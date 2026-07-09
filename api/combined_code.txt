@@ -1,0 +1,1432 @@
+
+============================================================
+FILE: auth.py
+============================================================
+
+import requests
+import json
+from config import settings
+from utils.logger import logger
+
+
+def get_access_token():
+    """키움 REST API 모의투자용 접근토큰 발급"""
+    url = "https://mockapi.kiwoom.com/oauth2/token"
+
+    payload = {
+        "grant_type": "client_credentials",
+        "appkey": settings.APP_KEY,
+        "secretkey": settings.SECRET_KEY,
+    }
+    headers = {"Content-Type": "application/json;charset=UTF-8"}
+
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=10)
+        res_json = response.json()
+
+        token = res_json.get("token")
+
+        if token:
+            logger.info("🔑 [성공] 모의투자용 REST API 토큰 발급 완료!")
+            return token
+        else:
+            logger.error(f"❌ 토큰을 찾지 못했습니다: {res_json.get('return_msg')}")
+            return None
+
+    except Exception as e:
+        logger.error(f"❌ 인증 서버 연결 오류: {e}")
+        return None
+
+
+def send_telegram(message, target='signal'):
+    """
+    텔레그램 알림 전송
+    
+    Args:
+        message: 보낼 메시지 본문
+        target: 'signal' (개인 채팅) 또는 'order' (주문 그룹 채팅)
+    """
+    chat_id = (settings.TELEGRAM_CHAT_ID_ORDER 
+               if target == 'order' 
+               else settings.TELEGRAM_CHAT_ID_SIGNAL)
+    url = f"https://api.telegram.org/bot{settings.TELEGRAM_TOKEN}/sendMessage"
+
+    try:
+        response = requests.post(
+            url,
+            json={"chat_id": chat_id, "text": message},
+            timeout=5,
+        )
+        result = response.json()
+
+        if not result.get("ok"):
+            logger.warning(
+                f"⚠️ 텔레그램 전송 실패 (target={target}): "
+                f"{result.get('description', '알 수 없는 오류')}"
+            )
+            return False
+        return True
+
+    except requests.Timeout:
+        logger.warning(f"⚠️ 텔레그램 전송 타임아웃 (target={target})")
+        return False
+    except Exception as e:
+        logger.warning(f"⚠️ 텔레그램 전송 예외 (target={target}): {e}")
+        return False
+
+============================================================
+FILE: candle_cache.py
+============================================================
+
+# api/candle_cache.py
+"""
+분봉 캐시 레이어 (CandleCache)
+================================
+목적: ka10080 분봉 호출 폭주 → 429 → 2초 blocking 재시도 → strategy 루프 정지(끊김)/시간차 완화
+
+동작 원리
+  1) 완성된 분봉은 같은 분(minute) 안에서 변하지 않는다.
+     → TTL(기본 8초) 동안은 같은 종목 재요청을 캐시로 응답하여 ka10080 호출 자체를 줄임.
+  2) 호출 실패(429/타임아웃/예외) 시 마지막 정상 캐시(stale)를 그대로 반환.
+     → 네트워크가 흔들려도 루프가 멈추지 않음(끊김 방지). 핫패스의 2초 blocking 재시도 제거.
+  3) hit / miss / stale / error 통계를 남겨, 풀타임 dry-run 후 실제 호출 절감량을 확인.
+
+주의
+  - 현재 형성 중인 봉([0], newest-first)은 분 안에서 close/high/low/volume이 변한다.
+    60MA 등은 '완성봉' 기준이므로 8초 staleness는 무해. 현재가는 캐시 말고 WebSocket tick을 사용.
+  - 락은 캐시 조회/기록만 보호하고, 실제 네트워크 호출은 락 밖에서 수행(다른 종목 블로킹 방지).
+    동일 종목 동시 miss 시 중복 호출이 날 수 있으나 10~30종목 규모에선 무시 가능.
+
+연결 방법 (예: api/kiwoom_rest.py)
+    from api.candle_cache import CandleCache
+
+    # 기존 원본 호출을 _raw 로 남겨두고:
+    #   def _raw_get_minute_candles(self, stock_code, ...): ... (지금의 get_minute_candles 본문)
+    self._candle_cache = CandleCache(self._raw_get_minute_candles, ttl_sec=8.0, logger=log)
+
+    # 호출부 교체:
+    def get_minute_candles(self, stock_code, *args, **kwargs):
+        return self._candle_cache.get(stock_code, *args, **kwargs)
+
+    # MA용 '최신 형성봉'이 꼭 필요한 극히 일부 지점만:
+    candles = self._candle_cache.get(stock_code, force=True)
+
+    # Phase 전환 로그(⏰)나 종료 시점에 1회:
+    self._candle_cache.log_stats()
+"""
+
+from __future__ import annotations
+
+import time
+import threading
+from typing import Any, Callable, Dict, List, Optional
+
+
+class CandleCache:
+    def __init__(
+        self,
+        fetch_fn: Callable[..., List[Dict[str, Any]]],
+        ttl_sec: float = 8.0,
+        stale_on_error: bool = True,
+        logger: Any = None,
+    ) -> None:
+        """
+        fetch_fn       : 실제 분봉을 가져오는 콜러블. (stock_code, *args, **kwargs) -> list[dict]
+                         즉 지금의 get_minute_candles 본문(_raw)을 그대로 넣으면 됨.
+        ttl_sec        : 캐시 유효시간(초). 8초면 완성봉 기준 무해하면서 ka10080 호출을 크게 절감.
+        stale_on_error : True면 호출 실패/빈응답 시 마지막 정상 캐시를 반환(끊김 방지).
+        logger         : 기존 'AutoTrader'/root 로거. None이면 무음.
+        """
+        self._fetch_fn = fetch_fn
+        self._ttl = float(ttl_sec)
+        self._stale_on_error = stale_on_error
+        self._log = logger
+        self._lock = threading.RLock()
+        # key -> {"data": list, "ts": float}
+        self._store: Dict[str, Dict[str, Any]] = {}
+        self._hit = 0
+        self._miss = 0
+        self._stale = 0
+        self._error = 0
+
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _key(stock_code: str, args: tuple, kwargs: dict) -> str:
+        if not args and not kwargs:
+            return stock_code
+        return f"{stock_code}|{args}|{tuple(sorted(kwargs.items()))}"
+
+    def get(self, stock_code: str, *args, force: bool = False, **kwargs):
+        """
+        캐시가 신선하면 캐시 반환, 아니면 실제 호출.
+        실패 시 stale_on_error에 따라 직전 캐시 반환(없으면 None).
+        반환 형식은 fetch_fn과 동일 (candle dict 리스트, newest-first).
+        """
+        key = self._key(stock_code, args, kwargs)
+        now = time.time()
+
+        with self._lock:
+            entry = self._store.get(key)
+            if (not force) and entry and (now - entry["ts"] < self._ttl):
+                self._hit += 1
+                return entry["data"]
+
+        # ---- 캐시 미스: 실제 호출 (락 밖에서 수행) ----
+        try:
+            data = self._fetch_fn(stock_code, *args, **kwargs)
+        except Exception as e:  # noqa: BLE001  (429 포함 모든 호출 실패)
+            self._error += 1
+            with self._lock:
+                entry = self._store.get(key)
+            if self._stale_on_error and entry:
+                self._stale += 1
+                self._dbg(
+                    f"📊 분봉 호출 실패({e}) → stale 캐시 반환 [{stock_code}] "
+                    f"(age={now - entry['ts']:.1f}s)"
+                )
+                return entry["data"]
+            self._warn(f"📊 분봉 호출 실패 & 캐시없음 [{stock_code}]: {e}")
+            return None
+
+        if data:
+            with self._lock:
+                self._store[key] = {"data": data, "ts": time.time()}
+                self._miss += 1
+            return data
+
+        # 빈 응답([] / None): 가능하면 직전 캐시 유지(일시적 빈응답으로 인한 '분봉부족' 오판 방지)
+        with self._lock:
+            entry = self._store.get(key)
+        if self._stale_on_error and entry:
+            self._stale += 1
+            return entry["data"]
+        self._miss += 1
+        return data  # [] 또는 None 그대로 → 호출부의 '분봉부족' 처리 흐름 유지
+
+    # ------------------------------------------------------------------ #
+    def invalidate(self, stock_code: Optional[str] = None) -> None:
+        """특정 종목(또는 전체) 캐시 무효화. 청산 직후 재매수 판단 등에서 강제 갱신용."""
+        with self._lock:
+            if stock_code is None:
+                self._store.clear()
+                return
+            for k in [
+                k for k in self._store
+                if k == stock_code or k.startswith(stock_code + "|")
+            ]:
+                self._store.pop(k, None)
+
+    def stats(self) -> Dict[str, Any]:
+        total = self._hit + self._miss
+        rate = (self._hit / total * 100.0) if total else 0.0
+        return {
+            "hit": self._hit,
+            "miss": self._miss,
+            "stale": self._stale,
+            "error": self._error,
+            "hit_rate_pct": round(rate, 1),
+            "cached_codes": len(self._store),
+        }
+
+    def log_stats(self) -> None:
+        s = self.stats()
+        self._info(
+            f"📊 분봉캐시 통계 hit={s['hit']} miss={s['miss']} "
+            f"stale={s['stale']} err={s['error']} "
+            f"hit율={s['hit_rate_pct']}% 종목수={s['cached_codes']}"
+        )
+
+    # ---- 로깅 헬퍼 (logger 없으면 무음) ----
+    def _info(self, msg: str) -> None:
+        if self._log:
+            self._log.info(msg)
+
+    def _warn(self, msg: str) -> None:
+        if self._log:
+            self._log.warning(msg)
+
+    def _dbg(self, msg: str) -> None:
+        if self._log:
+            self._log.debug(msg)
+
+============================================================
+FILE: kiwoom_rest.py
+============================================================
+
+"""
+키움 REST API 호출 모듈
+─────────────────────────────────────
+역할: 주문, 잔고/예수금 조회, 현재가 조회, 분봉 차트 조회
+"""
+import logging
+import json
+import time
+import requests
+from datetime import datetime
+
+from utils.logger import logger
+
+from api.candle_cache import CandleCache
+class KiwoomREST:
+    """키움 REST API 클라이언트"""
+
+    MOCK_HOST = "https://mockapi.kiwoom.com"
+    REAL_HOST = "https://api.kiwoom.com"
+
+    # 호출 빈도 제어 (1초 5회 제한 → 0.6초 안전마진)
+    MIN_INTERVAL = 0.6
+
+    def __init__(self, token: str, is_mock: bool = True):
+        self.token = token
+        self.host = self.MOCK_HOST if is_mock else self.REAL_HOST
+        self._last_request_ts = 0.0
+        self._candle_cache = CandleCache(
+            self._raw_get_minute_candles, ttl_sec=8.0, logger=logger)
+    # ─────────────────────────────────────
+    # 공통 호출
+    # ─────────────────────────────────────
+    def _throttle(self):
+        elapsed = time.time() - self._last_request_ts
+        if elapsed < self.MIN_INTERVAL:
+            time.sleep(self.MIN_INTERVAL - elapsed)
+        self._last_request_ts = time.time()
+
+    def _request(self, path: str, api_id: str, body: dict,
+                 cont_yn: str = "N", next_key: str = "") -> dict:
+        """공통 POST 요청. 429는 자동 재시도."""
+        self._throttle()
+        url = f"{self.host}{path}"
+        headers = {
+            "Content-Type": "application/json;charset=UTF-8",
+            "authorization": f"Bearer {self.token}",
+            "cont-yn": cont_yn,
+            "next-key": next_key,
+            "api-id": api_id,
+        }
+
+        try:
+            res = requests.post(url, headers=headers,
+                                data=json.dumps(body), timeout=10)
+            res.raise_for_status()
+            data = res.json()
+
+            if data.get("return_code") != 0:
+                logger.warning(
+                    f"⚠️ [{api_id}] 응답 실패: "
+                    f"code={data.get('return_code')} "
+                    f"msg={data.get('return_msg')}"
+                )
+            return data
+
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code
+            if status == 429:
+                logger.warning(f"⚠️ [{api_id}] 429 호출빈도 초과, 2초 대기 후 재시도")
+                time.sleep(2)
+                try:
+                    res = requests.post(url, headers=headers,
+                                        data=json.dumps(body), timeout=10)
+                    res.raise_for_status()
+                    return res.json()
+                except Exception as e2:
+                    logger.error(f"❌ [{api_id}] 재시도 실패: {e2}")
+                    return {"return_code": -1, "return_msg": "rate_limit_retry_failed"}
+            logger.error(f"❌ [{api_id}] HTTP 에러 {status}: {e.response.text[:200]}")
+            return {"return_code": -1, "return_msg": str(e)}
+        except Exception as e:
+            logger.error(f"❌ [{api_id}] 요청 예외: {e}")
+            return {"return_code": -1, "return_msg": str(e)}
+
+    # ─────────────────────────────────────
+    # 주문
+    # ─────────────────────────────────────
+    def buy_market_order(self, stock_code: str, qty: int,
+                         price: int = 0, trde_tp: str = "3") -> dict:
+        """매수 주문 (kt10000)"""
+        body = {
+            "dmst_stex_tp": "KRX",
+            "stk_cd": stock_code,
+            "ord_qty": str(qty),
+            "ord_uv": str(price) if price > 0 else "",
+            "trde_tp": trde_tp,
+            "cond_uv": "",
+        }
+        result = self._request("/api/dostk/ordr", "kt10000", body)
+        if result.get("return_code") == 0:
+            logger.info(
+                f"✅ 매수주문 성공 | {stock_code} | {qty}주 | "
+                f"단가={price if price > 0 else '시장가'} | ord_no={result.get('ord_no')}"
+            )
+        return result
+
+    def sell_market_order(self, stock_code: str, qty: int,
+                          price: int = 0, trde_tp: str = "3") -> dict:
+        """매도 주문 (kt10001)"""
+        body = {
+            "dmst_stex_tp": "KRX",
+            "stk_cd": stock_code,
+            "ord_qty": str(qty),
+            "ord_uv": str(price) if price > 0 else "",
+            "trde_tp": trde_tp,
+            "cond_uv": "",
+        }
+        result = self._request("/api/dostk/ordr", "kt10001", body)
+        if result.get("return_code") == 0:
+            logger.info(
+                f"✅ 매도주문 성공 | {stock_code} | {qty}주 | "
+                f"단가={price if price > 0 else '시장가'} | ord_no={result.get('ord_no')}"
+            )
+        return result
+
+    def cancel_order(self, orig_ord_no: str, stock_code: str,
+                     cancel_qty: int = 0) -> dict:
+        """주문 취소 (kt10003)"""
+        body = {
+            "dmst_stex_tp": "KRX",
+            "orig_ord_no": orig_ord_no,
+            "stk_cd": stock_code,
+            "mdfy_qty": "",
+            "cncl_qty": str(cancel_qty),
+        }
+        result = self._request("/api/dostk/ordr", "kt10003", body)
+        if result.get("return_code") == 0:
+            logger.info(f"✅ 주문 취소 | orig_ord_no={orig_ord_no} | {stock_code}")
+        return result
+
+    # ─────────────────────────────────────
+    # 시세 조회
+    # ─────────────────────────────────────
+    def get_current_price(self, stock_code: str) -> int:
+        """주식기본정보 (ka10001) → 현재가"""
+        result = self._request("/api/dostk/stkinfo", "ka10001",
+                               {"stk_cd": stock_code})
+        if result.get("return_code") != 0:
+            return 0
+        return self._safe_price(result.get("cur_prc", "0"))
+
+    def get_stock_info(self, stock_code: str) -> dict:
+        """주식기본정보 전체 (ka10001)"""
+        return self._request("/api/dostk/stkinfo", "ka10001",
+                             {"stk_cd": stock_code})
+
+    def get_index_change_rate(self, sector_code: str = "001") -> float:
+        """업종 현재가 (ka20001) → 전일 대비 등락률(%).
+        sector_code: 001=코스피, 101=코스닥. 실패 시 0.0(정상 간주)."""
+        result = self._request("/api/dostk/sect", "ka20001",
+                               {"mrkt_tp": "0", "inds_cd": sector_code})
+        
+        if result.get("return_code") != 0:
+            return 0.0
+        raw = result.get("flu_rt") or result.get("prdy_ctrt") or "0"
+        try:
+            return float(str(raw).replace("+", "").strip())
+        except (ValueError, TypeError):
+            return 0.0
+
+    # ─────────────────────────────────────
+    # 분봉 차트 조회 (ka10080)
+    # ─────────────────────────────────────
+    def get_minute_candles(self, stock_code: str, interval: int = 1,
+                           count: int = 60, base_date: str = None) -> list:
+        """분봉 조회 (캐시 경유). 8초 TTL + 429/실패 시 직전 캐시 반환."""
+        return self._candle_cache.get(
+            stock_code, interval=interval, count=count, base_date=base_date) or []
+    
+    def _raw_get_minute_candles(self, stock_code: str, interval: int = 1,
+                                count: int = 60, base_date: str = None) -> list:
+        """분봉 조회 (ka10080). candles[0]이 어느 시점인지는 📊 로그로 확인.
+        반환: [{time_str(14자리), open, high, low, close, volume}, ...]"""
+        if not base_date:
+            base_date = datetime.now().strftime("%Y%m%d")
+
+        body = {
+            "stk_cd": stock_code,
+            "tic_scope": str(interval),
+            "upd_stkpc_tp": "1",
+            "base_dt": base_date,
+        }
+
+        result = self._request("/api/dostk/chart", "ka10080", body)
+        if result.get("return_code") != 0:
+            return []
+
+        rows = result.get("stk_min_pole_chart_qry", []) or []
+        candles = []
+        for row in rows[:count]:
+            time_str = row.get("cntr_tm", "")
+            if len(time_str) != 14:
+                continue
+            candles.append({
+                "time_str": time_str,
+                "open":   self._safe_price(row.get("open_pric")),
+                "high":   self._safe_price(row.get("high_pric")),
+                "low":    self._safe_price(row.get("low_pric")),
+                "close":  self._safe_price(row.get("cur_prc")),
+                "volume": self._safe_int(row.get("trde_qty")),
+            })
+
+        if candles:
+            logger.info("[%s] 📊 분봉 %d개: [0]=%s ~ [-1]=%s",
+                        stock_code, len(candles),
+                        candles[0]["time_str"], candles[-1]["time_str"])
+        return candles
+        
+        
+    # ─────────────────────────────────────
+    # 계좌 조회
+    # ─────────────────────────────────────
+    def get_deposit(self) -> dict:
+        """예수금상세현황 (kt00001)"""
+        return self._request("/api/dostk/acnt", "kt00001",
+                             {"qry_tp": "3"})
+
+    def get_orderable_amount(self) -> int:
+        """주문가능금액"""
+        result = self.get_deposit()
+        if result.get("return_code") != 0:
+            return 0
+        return self._safe_int(result.get("ord_alow_amt", "0"))
+
+    def get_balance(self) -> dict:
+        """계좌평가잔고내역 (kt00018)"""
+        return self._request("/api/dostk/acnt", "kt00018",
+                             {"qry_tp": "1", "dmst_stex_tp": "KRX"})
+
+    def get_holdings(self) -> dict:
+        """보유 종목 → {종목코드: {정보}}"""
+        result = self.get_balance()
+        if result.get("return_code") != 0:
+            return {}
+
+        holdings = {}
+        for item in result.get("acnt_evlt_remn_indv_tot", []):
+            code = (item.get("stk_cd") or "").strip()
+            if code.startswith("A"):
+                code = code[1:]
+            if not code:
+                continue
+            holdings[code] = {
+                "name": item.get("stk_nm", ""),
+                "qty": self._safe_int(item.get("rmnd_qty", "0")),
+                "avg_price": self._safe_price(item.get("pur_pric", "0")),
+                "cur_price": self._safe_price(item.get("cur_prc", "0")),
+                "eval_amt": self._safe_int(item.get("evlt_amt", "0")),
+                "pnl": self._safe_int(item.get("evltv_prft", "0")),
+                "pnl_rate": self._safe_float(item.get("prft_rt", "0")),
+            }
+        return holdings
+
+    def get_unfilled_orders(self) -> dict:
+        """미체결 (ka10075)"""
+        body = {
+            "all_stk_tp": "0",
+            "trde_tp": "0",
+            "stex_tp": "0",
+            "stk_cd": "",
+        }
+        return self._request("/api/dostk/acnt", "ka10075", body)
+
+    # ─────────────────────────────────────
+    # 유틸
+    # ─────────────────────────────────────
+    @staticmethod
+    def _safe_int(v) -> int:
+        """
+        문자열 → 정수. 음수 보존.
+        손익(pnl), 거래량 등에 사용.
+        """
+        if v is None:
+            return 0
+        s = str(v).replace(",", "").replace("+", "").strip()
+        try:
+            return int(float(s))
+        except (ValueError, TypeError):
+            return 0
+
+    @staticmethod
+    def _safe_float(v) -> float:
+        """
+        문자열 → 실수. 음수 보존.
+        손익률(pnl_rate) 등에 사용.
+        """
+        if v is None:
+            return 0.0
+        s = str(v).replace(",", "").replace("+", "").strip()
+        try:
+            return float(s)
+        except (ValueError, TypeError):
+            return 0.0
+
+    @staticmethod
+    def _safe_price(v) -> int:
+        """
+        가격 전용 변환.
+        키움 API의 가격 응답에는 등락 부호('+'/'-')가 붙어있음:
+        - '+78800' = 전일대비 상승, 가격 78,800원
+        - '-78800' = 전일대비 하락, 가격 78,800원
+        부호는 등락 표시일 뿐 진짜 음수가 아니므로 절댓값으로 처리.
+        """
+        if v is None:
+            return 0
+        s = str(v).replace(",", "").replace("+", "").replace("-", "").strip()
+        try:
+            return int(float(s))
+        except (ValueError, TypeError):
+            return 0
+
+============================================================
+FILE: kiwoom_ws.py
+============================================================
+
+"""
+키움 WebSocket 클라이언트 (확장판)
+─────────────────────────────────────
+역할:
+  - WS 연결, 로그인, PING 자동 응답, 자동 재연결
+  - 조건검색 실시간 (CNSRREQ search_type=1): 편입/이탈 신호 콜백
+  - 조건검색 즉시 검색 (CNSRREQ search_type=0): 현재 진입 종목 스냅샷
+  - 종목별 실시간 (REG): 주식체결(0B) + 주식호가잔량(0D) 콜백
+  - 재접속 시 조건식 + 실시간 자동 재등록
+  - REG 구독 사이 sleep으로 빈도 제한 회피
+  - ★ half-open(좀비 연결) 감지: IDLE_TIMEOUT 무수신 시 ping 확인 → 실패하면 재연결
+"""
+import asyncio
+import json
+import websockets
+
+from config import settings
+from utils.logger import logger
+
+
+TYPE_TRADE = "0B"
+TYPE_ORDERBOOK = "0D"
+
+# WS REG 빈도 제한 회피 (키움 정책)
+REG_INTERVAL_SEC = 0.3
+
+# half-open(좀비 연결) 감지: 이 시간(초) 동안 무수신이면 연결 점검 → 재연결
+# 장중엔 체결(0B)/호가(0D)가 끊임없이 와야 정상이므로 60초면 충분히 보수적
+IDLE_TIMEOUT = 60
+
+
+class KiwoomWS:
+    MOCK_URL = "wss://mockapi.kiwoom.com:10000/api/dostk/websocket"
+    REAL_URL = "wss://api.kiwoom.com:10000/api/dostk/websocket"
+
+    def __init__(
+        self,
+        token: str,
+        is_mock: bool = True,
+        on_signal=None,
+        on_trade=None,
+        on_orderbook=None,
+    ):
+        self.token = token
+        self.url = self.MOCK_URL if is_mock else self.REAL_URL
+        self.on_signal = on_signal
+        self.on_trade = on_trade
+        self.on_orderbook = on_orderbook
+
+        self.ws = None
+        self.connected = False
+        self._stop = False
+
+        self._subscribed_seqs: list[str] = []
+        self.condition_map: dict[str, str] = {}
+        self._subscribed_realtime: dict[str, set[str]] = {}
+        self._cond_keys_logged = False   # 실시간 조건 raw 키 1회 로깅용
+        self._orderbook_keys_logged = False
+
+        # REG 호출 직렬화 + 빈도 제한
+        self._reg_lock = asyncio.Lock()
+        self._last_reg_ts = 0.0
+
+    # ─────────────────────────────────────────
+    # 1. 연결 & 로그인
+    # ─────────────────────────────────────────
+    async def connect(self):
+        logger.info(f"🔌 WebSocket 연결 시도: {self.url}")
+        self.ws = await websockets.connect(self.url, ping_interval=None)
+
+        login_msg = {"trnm": "LOGIN", "token": self.token}
+        await self.ws.send(json.dumps(login_msg))
+
+        raw = await asyncio.wait_for(self.ws.recv(), timeout=10)
+        resp = json.loads(raw)
+
+        if resp.get("trnm") != "LOGIN":
+            raise RuntimeError(f"LOGIN 응답이 아닌 메시지 수신: {resp}")
+        if resp.get("return_code") != 0:
+            raise RuntimeError(
+                f"LOGIN 실패: code={resp.get('return_code')} msg={resp.get('return_msg')}"
+            )
+
+        self.connected = True
+        logger.info("✅ WebSocket 로그인 성공")
+
+    # ─────────────────────────────────────────
+    # 2. 조건식 목록 조회
+    # ─────────────────────────────────────────
+    async def fetch_condition_list(self) -> dict[str, str]:
+        await self._send({"trnm": "CNSRLST"})
+        resp = await self._wait_for("CNSRLST", timeout=10)
+
+        items = resp.get("data") or []
+        result = {}
+        for it in items:
+            if isinstance(it, list):
+                seq, name = str(it[0]), str(it[1])
+            elif isinstance(it, dict):
+                seq = str(it.get("seq") or it.get("Seq") or "")
+                name = str(it.get("name") or it.get("Name") or "")
+            else:
+                continue
+            if seq:
+                result[seq] = name
+
+        self.condition_map = result
+        logger.info(f"📋 조건식 목록 {len(result)}개 조회 완료")
+        for seq, name in result.items():
+            logger.info(f"   seq={seq}  name={name}")
+
+        if not result:
+            logger.warning(
+                "⚠️ 조건식이 0개입니다! 영웅문4 [0150]에서 조건식을 만들고 "
+                "'내 조건식 저장'을 눌렀는지 확인하세요."
+            )
+        return result
+
+    # ─────────────────────────────────────────
+    # 3. 조건식 실시간 등록/해제
+    # ─────────────────────────────────────────
+    async def subscribe_condition(self, seq: str, stex_tp: str = "K"):
+        seq = str(seq)
+        msg = {
+            "trnm": "CNSRREQ", "seq": seq, "search_type": "1",
+            "stex_tp": stex_tp, "cont_yn": "N", "next_key": "",
+        }
+        await self._send(msg)
+        if seq not in self._subscribed_seqs:
+            self._subscribed_seqs.append(seq)
+        name = self.condition_map.get(seq, "?")
+        logger.info(f"📡 조건식 실시간 등록: seq={seq} ({name})")
+
+    async def unsubscribe_condition(self, seq: str):
+        seq = str(seq)
+        await self._send({"trnm": "CNSRCLR", "seq": seq})
+        if seq in self._subscribed_seqs:
+            self._subscribed_seqs.remove(seq)
+        logger.info(f"📴 조건식 실시간 해제: seq={seq}")
+
+    # ─────────────────────────────────────────
+    # 조건식 즉시 검색 (현재 진입 종목 스냅샷)
+    # ─────────────────────────────────────────
+    async def fetch_condition_snapshot(
+        self, seq: str, stex_tp: str = "K", timeout: int = 10,
+    ) -> list[str]:
+        """search_type=0으로 현재 시점에 조건식에 들어있는 종목 목록 1회 조회.
+
+        Returns: 종목코드 리스트 (예: ['005930', '003690', ...])
+        """
+        seq = str(seq)
+        await self._send({
+            "trnm": "CNSRREQ", "seq": seq, "search_type": "0",
+            "stex_tp": stex_tp, "cont_yn": "N", "next_key": "",
+        })
+
+        try:
+            resp = await self._wait_for("CNSRREQ", timeout=timeout)
+        except RuntimeError as e:
+            logger.warning(f"⚠️ 조건식 스냅샷 [seq={seq}] 응답 없음: {e}")
+            return []
+
+        # ── 디버그: 조건검색 응답 원본 확인 (0종목 원인 진단) ──
+        logger.info(f"🔍 CNSRREQ 응답원본 [seq={seq}]: {str(resp)[:500]}")
+
+        data = resp.get("data") or []
+        if isinstance(data, dict):
+            data = [data]
+
+        codes = []
+        for item in data:
+            code = (
+                item.get("9001") or item.get("jmcode") or item.get("stk_cd") or ""
+            ).strip()
+            if code.startswith("A"):
+                code = code[1:]
+            if code:
+                codes.append(code)
+
+        name = self.condition_map.get(seq, "?")
+        logger.info(f"📸 조건식 스냅샷 [seq={seq} {name}]: {len(codes)}종목 → {codes}")
+        return codes
+
+    # ─────────────────────────────────────────
+    # 4. 종목별 실시간 등록 (0B/0D) — 빈도 제한 회피
+    # ─────────────────────────────────────────
+    async def subscribe_realtime(
+        self, items: list[str], types: list[str], grp_no: str = "1"
+    ):
+        if not items or not types:
+            return
+        async with self._reg_lock:
+            # 직전 REG 호출과의 간격 보장
+            loop = asyncio.get_event_loop()
+            now = loop.time()
+            elapsed = now - self._last_reg_ts
+            if elapsed < REG_INTERVAL_SEC:
+                await asyncio.sleep(REG_INTERVAL_SEC - elapsed)
+
+            msg = {
+                "trnm": "REG", "grp_no": grp_no,
+                "refresh": "1",
+                "data": [{"item": items, "type": types}],
+            }
+            await self._send(msg)
+            self._last_reg_ts = asyncio.get_event_loop().time()
+
+            for code in items:
+                self._subscribed_realtime.setdefault(code, set()).update(types)
+            logger.info(f"📡 실시간 등록: {items} types={types}")
+
+    async def unsubscribe_realtime(
+        self, items: list[str], types: list[str], grp_no: str = "1"
+    ):
+        if not items or not types:
+            return
+        msg = {
+            "trnm": "REMOVE", "grp_no": grp_no,
+            "data": [{"item": items, "type": types}],
+        }
+        await self._send(msg)
+        for code in items:
+            if code in self._subscribed_realtime:
+                self._subscribed_realtime[code].difference_update(types)
+                if not self._subscribed_realtime[code]:
+                    del self._subscribed_realtime[code]
+        logger.info(f"📴 실시간 해제: {items} types={types}")
+
+    # ─────────────────────────────────────────
+    # 5. 수신 루프 (★ IDLE_TIMEOUT half-open 감지)
+    # ─────────────────────────────────────────
+    async def listen(self):
+        backoff = 1
+        while not self._stop:
+            try:
+                if not self.connected:
+                    await self.connect()
+                    await self.fetch_condition_list()
+                    for seq in list(self._subscribed_seqs):
+                        await self.subscribe_condition(seq)
+                    for code, types in list(self._subscribed_realtime.items()):
+                        await self.subscribe_realtime([code], list(types))
+                    backoff = 1
+
+                # async-for 대신 recv+timeout: IDLE_TIMEOUT 무수신 시 half-open 감지
+                while not self._stop:
+                    try:
+                        raw = await asyncio.wait_for(self.ws.recv(), timeout=IDLE_TIMEOUT)
+                    except asyncio.TimeoutError:
+                        # 무수신 = 좀비 의심 → ping 왕복 확인, 실패하면 재연결
+                        logger.warning(f"⚠️ WS {IDLE_TIMEOUT}s 무수신 → ping 확인")
+                        try:
+                            pong_waiter = await self.ws.ping()
+                            await asyncio.wait_for(pong_waiter, timeout=5)
+                            logger.info("✅ WS ping 응답 정상 (연결 살아있음)")
+                            continue
+                        except Exception:
+                            logger.warning("🔌 WS ping 실패 → 좀비 연결 간주, 재연결")
+                            break
+                    await self._handle_message(raw)
+
+            except websockets.ConnectionClosed as e:
+                logger.warning(f"🔌 연결 끊김 (code={e.code}, reason={e.reason})")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.exception(f"❌ 수신 루프 예외: {e}")
+
+            self.connected = False
+            if self._stop:
+                break
+
+            logger.info(f"♻️ {backoff}초 후 재연결 시도...")
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 60)
+
+    async def _handle_message(self, raw: str):
+        try:
+            msg = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning(f"⚠️ JSON 파싱 실패: {raw[:200]}")
+            return
+
+        trnm = msg.get("trnm")
+
+        if trnm == "PING":
+            await self.ws.send(raw)
+            return
+
+        if trnm in ("REAL", "CNSRREQ"):
+            await self._dispatch_signal(msg)
+            return
+
+        logger.info(f"📥 WS msg trnm={trnm}: {str(msg)[:300]}")
+
+    # ─────────────────────────────────────────
+    # 6. 디스패치
+    # ─────────────────────────────────────────
+    async def _dispatch_signal(self, msg: dict):
+        data = msg.get("data")
+        if not data:
+            return
+        if isinstance(data, dict):
+            data = [data]
+
+        for item in data:
+            item_type = item.get("type")
+            if item_type == TYPE_TRADE:
+                await self._dispatch_trade_item(item)
+            elif item_type == TYPE_ORDERBOOK:
+                await self._dispatch_orderbook_item(item)
+            else:
+                await self._dispatch_condition_item(item)
+
+    async def _dispatch_trade_item(self, item: dict):
+        if not self.on_trade:
+            return
+
+        stock_code = (item.get("item") or "").lstrip("A").strip()
+        values = item.get("values") or {}
+
+        price = self._parse_signed_int(values.get("10"))
+        volume_signed = self._parse_signed_int(values.get("15"))
+
+        if volume_signed > 0:
+            side = "buy"
+        elif volume_signed < 0:
+            side = "sell"
+        else:
+            side = "neutral"
+
+        parsed = {
+            "stock_code": stock_code,
+            "price": abs(price),
+            "volume": abs(volume_signed),
+            "side": side,
+            "strength": self._parse_float(values.get("228")),
+            "time": values.get("20", ""),
+            "raw": values,
+        }
+        try:
+            await self.on_trade(parsed)
+        except Exception:
+            logger.exception(f"on_trade 콜백 예외: {stock_code}")
+
+    async def _dispatch_orderbook_item(self, item: dict):
+        if not self.on_orderbook:
+            return
+        stock_code = (item.get("item") or "").lstrip("A").strip()
+        values = item.get("values") or {}
+
+        # 0D raw 키 1회 로깅 (FID 확정용)
+        if not getattr(self, "_orderbook_keys_logged", False):
+            logger.info(f"🔑 0D 호가 raw 키: {list(values.keys())}")
+            self._orderbook_keys_logged = True
+
+        # FID 매핑 (키움 0D 표준: 매도호가41~50/매수호가51~60/매도잔량61~70/매수잔량71~80)
+        ask_prices, ask_volumes, bid_prices, bid_volumes = [], [], [], []
+        for i in range(1, 11):
+            ap = values.get(str(40 + i))
+            av = values.get(str(60 + i))
+            bp = values.get(str(50 + i))
+            bv = values.get(str(70 + i))
+            if ap: ask_prices.append(self._parse_uint(ap))
+            if av: ask_volumes.append(self._parse_uint(av))
+            if bp: bid_prices.append(self._parse_uint(bp))
+            if bv: bid_volumes.append(self._parse_uint(bv))
+
+        parsed = {
+            "stock_code": stock_code,
+            "ask_prices": ask_prices,
+            "ask_volumes": ask_volumes,
+            "bid_prices": bid_prices,
+            "bid_volumes": bid_volumes,
+            "raw": values,
+        }
+        try:
+            await self.on_orderbook(parsed)
+        except Exception:
+            logger.exception(f"on_orderbook 콜백 예외: {stock_code}")
+
+    async def _dispatch_condition_item(self, item: dict):
+        stock_code = (
+            item.get("9001") or item.get("jmcode") or item.get("stk_cd") or ""
+        ).strip()
+        if stock_code.startswith("A"):
+            stock_code = stock_code[1:]
+        signal_type = item.get("843") or item.get("insert_delete_tp") or "I"
+        # 조건 일련번호(어느 조건에서 왔는지). 필드 추정: 841 → 안되면 raw 키 로그로 확정
+        cond_seq = str(
+            item.get("841") or item.get("cond_idx") or item.get("seq") or ""
+        ).strip()
+        if not stock_code:
+            return
+
+        # 실시간 조건 아이템 키를 1회만 로깅 (seq 필드 확정용)
+        if not self._cond_keys_logged:
+            logger.info(f"🔑 조건 실시간 raw 키: {list(item.keys())}")
+            self._cond_keys_logged = True
+
+        mark = "📈" if signal_type == "I" else "📉"
+        kind = "편입" if signal_type == "I" else "이탈"
+        logger.info(f"{mark} {kind} 신호: {stock_code} (seq={cond_seq or '?'})")
+        if self.on_signal:
+            try:
+                await self.on_signal(stock_code, signal_type, item, cond_seq or None)
+            except Exception:
+                logger.exception(f"on_signal 콜백 예외: {stock_code}")
+
+    # ─────────────────────────────────────────
+    # 7. 파싱 유틸
+    # ─────────────────────────────────────────
+    @staticmethod
+    def _parse_signed_int(s) -> int:
+        if not s:
+            return 0
+        try:
+            return int(str(s).strip())
+        except ValueError:
+            return 0
+
+    @staticmethod
+    def _parse_uint(s) -> int:
+        if not s:
+            return 0
+        try:
+            return abs(int(str(s).strip()))
+        except ValueError:
+            return 0
+
+    @staticmethod
+    def _parse_float(s) -> float:
+        if not s:
+            return 0.0
+        try:
+            return float(str(s).strip())
+        except ValueError:
+            return 0.0
+
+    # ─────────────────────────────────────────
+    # 8. 송신/대기 유틸
+    # ─────────────────────────────────────────
+    async def _send(self, payload: dict):
+        if not self.ws:
+            raise RuntimeError("WebSocket 미연결 상태")
+        await self.ws.send(json.dumps(payload))
+
+    async def _wait_for(self, trnm: str, timeout: int = 10) -> dict:
+        loop = asyncio.get_event_loop()
+        end = loop.time() + timeout
+        while loop.time() < end:
+            remaining = end - loop.time()
+            try:
+                raw = await asyncio.wait_for(self.ws.recv(), timeout=remaining)
+            except asyncio.TimeoutError:
+                raise RuntimeError(f"{trnm} 응답 타임아웃 ({timeout}s)")
+            msg = json.loads(raw)
+            if msg.get("trnm") == "PING":
+                await self.ws.send(raw)
+                continue
+            if msg.get("trnm") == trnm:
+                return msg
+        raise RuntimeError(f"{trnm} 응답 타임아웃")
+
+    async def close(self):
+        self._stop = True
+        if self.ws:
+            try:
+                for seq in list(self._subscribed_seqs):
+                    await self.unsubscribe_condition(seq)
+                for code, types in list(self._subscribed_realtime.items()):
+                    await self.unsubscribe_realtime([code], list(types))
+            except Exception:
+                pass
+            await self.ws.close()
+        logger.info("👋 WebSocket 종료")
+
+============================================================
+FILE: merge.py
+============================================================
+
+import os
+import traceback
+
+# 현재 파일 위치 무조건 잡기
+try:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+except:
+    script_dir = os.getcwd()
+
+output_file = os.path.join(script_dir, 'combined_code.txt')
+
+ignore_dirs = {'.git', '__pycache__', '.venv', 'venv', 'env', '.vscode'}
+ignore_files = {'config.ini', '.env'}
+
+def safe_read(filepath):
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            return f.read()
+    except UnicodeDecodeError:
+        try:
+            with open(filepath, 'r', encoding='cp949') as f:
+                return f.read()
+        except:
+            return "[한글 인코딩 에러]"
+    except Exception as e:
+        return f"[파일 읽기 불가: {e}]"
+
+print(f"시작 위치: {script_dir}")
+print("파일을 합치는 중...")
+
+with open(output_file, 'w', encoding='utf-8') as out:
+    try:
+        for root, dirs, files in os.walk(script_dir):
+            # 무시할 폴더 제거
+            dirs[:] = [d for d in dirs if d not in ignore_dirs]
+            
+            for f in files:
+                if f.endswith('.py') and f not in ignore_files:
+                    try:
+                        path = os.path.join(root, f)
+                        rel_path = os.path.relpath(path, script_dir)
+                        
+                        out.write(f'\n{"="*60}\n')
+                        out.write(f'FILE: {rel_path}\n')
+                        out.write(f'{"="*60}\n\n')
+                        out.write(safe_read(path))
+                        out.write('\n')
+                    except Exception as e:
+                        # 에러가 나도 멈추지 않고 다음 파일로 넘어감
+                        print(f"건너뜀: {f} (이유: {e})")
+    except Exception as e:
+        print(f"탐색 에러 발생: {e}")
+        traceback.print_exc()
+
+print(f"\n완료되었습니다! 파일 위치: {output_file}")
+
+============================================================
+FILE: test_minute_candles.py
+============================================================
+
+"""
+분봉 조회 메서드 테스트.
+
+실행: python test_minute_candles.py
+"""
+from api.auth import get_access_token
+from api.kiwoom_rest import KiwoomREST
+from config import settings
+
+
+def main():
+    # 토큰 발급
+    token = get_access_token()
+    if not token:
+        print("❌ 토큰 발급 실패")
+        return
+    print(f"✅ 토큰 발급 완료: {token[:20]}...")
+
+    rest = KiwoomREST(token, is_mock=settings.IS_MOCK)
+
+    # ───── 테스트 1: 1분봉 5개 ─────
+    print("\n" + "=" * 60)
+    print("테스트 1: 삼성전자(005930) 1분봉 5개 (최신순)")
+    print("=" * 60)
+
+    candles = rest.get_minute_candles("005930", interval=1, count=5)
+    print(f"받은 봉 개수: {len(candles)}")
+
+    for i, c in enumerate(candles):
+        diff = c["close"] - c["open"]
+        if diff > 0:
+            sign = f"양봉 +{diff:,}원"
+        elif diff < 0:
+            sign = f"음봉 {diff:,}원"
+        else:
+            sign = "보합"
+        print(f"\n[{i}] {c['time_str']}")
+        print(f"  시:{c['open']:>9,}  고:{c['high']:>9,}  "
+              f"저:{c['low']:>9,}  종:{c['close']:>9,}")
+        print(f"  거래량: {c['volume']:>10,}  ({sign})")
+
+    # ───── 테스트 2: 60분봉 5개 ─────
+    print("\n" + "=" * 60)
+    print("테스트 2: 삼성전자(005930) 60분봉 5개")
+    print("=" * 60)
+
+    candles_60 = rest.get_minute_candles("005930", interval=60, count=5)
+    print(f"받은 봉 개수: {len(candles_60)}")
+
+    for i, c in enumerate(candles_60):
+        print(f"  [{i}] {c['time_str']}  "
+              f"시:{c['open']:,}  고:{c['high']:,}  "
+              f"저:{c['low']:,}  종:{c['close']:,}")
+
+    # ───── 테스트 3: 09:00 60분봉 시가 (참고용) ─────
+    print("\n" + "=" * 60)
+    print("테스트 3: 09:00 60분봉 시가 조회")
+    print("=" * 60)
+
+    targets = [
+        ("005930", "삼성전자"),
+        ("000660", "SK하이닉스"),
+        ("042700", "한미반도체"),
+    ]
+    for code, name in targets:
+        op = rest.get_today_60min_open(code)
+        print(f"  {name:8s} ({code}): {op:>10,}원")
+
+    # ───── 테스트 4: 이동평균선 계산 ─────
+    print("\n" + "=" * 60)
+    print("테스트 4: 5MA / 60MA 계산 (삼성전자)")
+    print("=" * 60)
+
+    candles_70 = rest.get_minute_candles("005930", interval=1, count=70)
+    print(f"받은 1분봉 개수: {len(candles_70)}")
+
+    if len(candles_70) >= 5:
+        ma5_closes = [c["close"] for c in candles_70[:5]]
+        ma5 = sum(ma5_closes) / 5
+        print(f"  5MA  = {ma5:>10,.0f}원  (최근 5봉 평균)")
+
+    if len(candles_70) >= 60:
+        ma60_closes = [c["close"] for c in candles_70[:60]]
+        ma60 = sum(ma60_closes) / 60
+        print(f"  60MA = {ma60:>10,.0f}원  (최근 60봉 평균)")
+
+    if len(candles_70) > 0:
+        current = candles_70[0]["close"]
+        print(f"  현재가  = {current:>10,}원")
+        if len(candles_70) >= 5:
+            diff5 = (current - ma5) / ma5 * 100
+            print(f"  5MA  대비: {diff5:+.2f}%")
+        if len(candles_70) >= 60:
+            diff60 = (current - ma60) / ma60 * 100
+            print(f"  60MA 대비: {diff60:+.2f}%")
+
+    print("\n✅ 모든 테스트 완료")
+
+
+if __name__ == "__main__":
+    main()
+
+============================================================
+FILE: ws_supervisor.py
+============================================================
+
+# ws_supervisor.py
+"""
+WebSocket 재연결 슈퍼바이저 (WSSupervisor)
+==========================================
+목적: WS 끊김 대응 — (a)자동 재연결+백오프, (b)half-open(에러 없이 데이터만 끊김) 감지,
+      (c)재연결마다 조건검색 재등록 강제.
+
+★ 가장 중요 ★
+  키움 WS는 끊겼다 다시 붙으면 조건검색[0150] 등록(CNSRREQ seq=6/7/8)이 날아간다.
+  재연결돼도 재등록을 안 하면 연결은 멀쩡해 보여도 통지가 0건이 된다.
+  → 조건등록 코드는 run_once_fn '안', 연결+로그인 직후에 '매번' 넣을 것.
+  (증상 '조건검색과 코딩 불일치 / 끊김 / 스냅샷 0종목'의 유력한 한 원인.)
+
+라이브러리 비의존
+  websocket-client(WebSocketApp)든 websockets(asyncio)든 상관없이,
+  '연결 + 로그인 + 조건등록 + 수신루프(블로킹)' 한 덩어리를 run_once_fn으로 감싸면 됨.
+
+half-open 감지 (반쯤 죽은 소켓)
+  - 수신 콜백에서 매 메시지마다 sup.mark_alive() 호출(키움 PINGPONG echo 지점이면 충분).
+  - heartbeat_timeout 동안 한 건도 안 오면 죽은 연결로 보고 강제 재연결.
+  - ※ 블로킹 ws.recv()는 stop_event만으론 안 깨진다. 둘 중 하나 필요:
+      (1) 수신 소켓에 타임아웃 설정(ws.settimeout(5)) → recv가 주기적으로 풀려 stop_event 확인
+      (2) on_force_close 콜백 제공 → 워치독이 ws.close()로 강제로 깨움
+    가능하면 (1)+(2) 둘 다 권장.
+
+연결 방법
+  1) 기존 WS 코드를 함수 하나로 묶기 (stop_event 인자 받게):
+       def _run_ws_once(stop_event):
+           ws = connect()                 # 연결
+           ws.settimeout(5)               # ★ 권장: recv가 주기적으로 풀리게
+           login(ws)                      # 로그인
+           register_conditions(ws)        # ★★ seq=6/7/8 조건검색 재등록 (매 연결마다!)
+           while not stop_event.is_set():
+               try:
+                   msg = ws.recv()        # 블로킹(타임아웃 5s)
+               except TimeoutError:
+                   continue               # 타임아웃은 정상 — 루프 재확인
+               sup.mark_alive()           # half-open 감지용
+               handle(msg)                # PINGPONG echo / REAL / 조건통지 처리
+           ws.close()
+
+  2) 슈퍼바이저 (봇 기동 시):
+       from ws_supervisor import WSSupervisor
+       sup = WSSupervisor(
+           _run_ws_once,
+           heartbeat_timeout=30,          # 30s 무수신 → 강제 재연결 (0이면 끔)
+           on_force_close=lambda: ws_ref and ws_ref.close(),  # 선택: 블로킹 recv 깨우기
+           logger=log,
+       )
+       sup.start()
+
+  3) 종료: sup.stop()
+"""
+
+from __future__ import annotations
+
+import time
+import random
+import threading
+from typing import Any, Callable, Optional
+
+
+class WSSupervisor:
+    def __init__(
+        self,
+        run_once_fn: Callable[[threading.Event], Any],
+        on_state: Optional[Callable[[str], None]] = None,
+        on_force_close: Optional[Callable[[], None]] = None,
+        base_backoff: float = 1.0,
+        max_backoff: float = 30.0,
+        healthy_reset_sec: float = 60.0,
+        heartbeat_timeout: float = 0.0,   # 0이면 half-open 감지 끔
+        logger: Any = None,
+    ) -> None:
+        """
+        run_once_fn(stop_event): 연결+로그인+조건등록+수신루프(블로킹). 끊기면 리턴/예외 → 재연결.
+        on_state(state)        : 'connecting'/'connected'/'disconnected'/'reconnecting' 콜백(선택).
+        on_force_close()       : 워치독/종료 시 블로킹 recv를 깨우기 위한 강제 close(선택, 권장).
+        base/max_backoff       : 재연결 대기 1s→2s→4s...→30s(jitter 포함).
+        healthy_reset_sec      : 이 시간 이상 붙어있다 끊기면 백오프를 base로 리셋.
+        heartbeat_timeout      : 무수신 이 시간 초과 시 half-open으로 보고 강제 재연결.
+        """
+        self._run_once = run_once_fn
+        self._on_state = on_state
+        self._on_force_close = on_force_close
+        self._base = float(base_backoff)
+        self._max = float(max_backoff)
+        self._healthy = float(healthy_reset_sec)
+        self._hb_timeout = float(heartbeat_timeout)
+        self._log = logger
+
+        self._running = False
+        self._sup_thread: Optional[threading.Thread] = None
+        self._session_stop: Optional[threading.Event] = None
+        self._last_alive = 0.0
+        self._lock = threading.RLock()
+        self._reconnects = 0
+
+    # ---- lifecycle ----
+    def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        self._sup_thread = threading.Thread(target=self._supervise, name="ws_supervisor", daemon=True)
+        self._sup_thread.start()
+        self._info("🧵 ws_supervisor 시작")
+
+    def stop(self, timeout: float = 5.0) -> None:
+        if not self._running:
+            return
+        self._running = False
+        if self._session_stop:
+            self._session_stop.set()
+        self._force_close()   # 블로킹 recv 깨우기
+        if self._sup_thread:
+            self._sup_thread.join(timeout=timeout)
+        self._info(f"🧵 ws_supervisor 종료 (재연결 {self._reconnects}회)")
+
+    def mark_alive(self) -> None:
+        """수신 콜백에서 매 메시지마다 호출. half-open 감지의 기준점."""
+        with self._lock:
+            self._last_alive = time.time()
+
+    def reconnect_count(self) -> int:
+        return self._reconnects
+
+    # ---- core loop ----
+    def _supervise(self) -> None:
+        backoff = self._base
+        first = True
+        while self._running:
+            self._session_stop = threading.Event()
+            self.mark_alive()
+            self._emit_state("connecting" if first else "reconnecting")
+            first = False
+            t0 = time.time()
+
+            wd = None
+            if self._hb_timeout > 0:
+                wd = threading.Thread(
+                    target=self._watchdog, args=(self._session_stop,),
+                    name="ws_heartbeat", daemon=True,
+                )
+                wd.start()
+
+            try:
+                self._emit_state("connected")
+                self._run_once(self._session_stop)   # 블로킹: 끊기면 리턴/예외
+            except Exception as e:  # noqa: BLE001
+                self._err(f"🔴 WS 세션 예외: {e}")
+            finally:
+                self._session_stop.set()
+                if wd:
+                    wd.join(timeout=2.0)
+
+            if not self._running:
+                break
+
+            self._reconnects += 1
+            self._emit_state("disconnected")
+            alive = time.time() - t0
+            if alive >= self._healthy:
+                backoff = self._base   # 오래 붙어있었으면 백오프 리셋
+            self._warn(f"🔌 WS 끊김 (유지 {alive:.0f}s) → {backoff:.1f}s 후 재연결 (#{self._reconnects})")
+            self._sleep_backoff(backoff)
+            backoff = min(backoff * 2, self._max)
+
+    def _watchdog(self, session_stop: threading.Event) -> None:
+        while not session_stop.is_set() and self._running:
+            time.sleep(1.0)
+            with self._lock:
+                silent = time.time() - self._last_alive
+            if silent > self._hb_timeout:
+                self._warn(f"💤 WS {silent:.0f}s 무수신(half-open 의심) → 강제 재연결")
+                session_stop.set()
+                self._force_close()
+                return
+
+    # ---- helpers ----
+    def _sleep_backoff(self, backoff: float) -> None:
+        delay = backoff + random.uniform(0, backoff * 0.3)   # jitter
+        end = time.time() + delay
+        while time.time() < end and self._running:
+            time.sleep(0.2)
+
+    def _force_close(self) -> None:
+        if self._on_force_close:
+            try:
+                self._on_force_close()
+            except Exception as e:  # noqa: BLE001
+                self._err(f"on_force_close 예외: {e}")
+
+    def _emit_state(self, state: str) -> None:
+        if self._on_state:
+            try:
+                self._on_state(state)
+            except Exception as e:  # noqa: BLE001
+                self._err(f"on_state 콜백 예외: {e}")
+
+    def _info(self, m: str):
+        if self._log: self._log.info(m)
+    def _warn(self, m: str):
+        if self._log: self._log.warning(m)
+    def _err(self, m: str):
+        if self._log: self._log.error(m)

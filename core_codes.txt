@@ -1,0 +1,3132 @@
+﻿
+
+=== FILE: C:\Users\rober\OneDrive\문서\vscode\AutoTrader_Project\core\condition_manager.py ===
+
+"""
+議곌굔寃???좏샇 留ㅻ땲?
+?????????????????????????????????????
+??븷:
+  - WebSocket?먯꽌 諛쏆? ?몄엯/?댄깉 ?좏샇瑜?諛쏆븘 OrderManager濡??꾨떖
+  - ?좏샇 ?꾪꽣留?(以묐났/?쒓컙/釉붾옓由ъ뒪??
+  - ?좏샇 ?듦퀎 湲곕줉 (?몄엯/?댄깉 ?잛닔)
+"""
+import time
+from datetime import datetime
+from typing import Optional
+
+from core.order_manager import OrderManager
+from utils.logger import logger
+
+
+# ?????????????????????????????????????
+# ?좏샇 泥섎━ ?뚮씪誘명꽣
+# ?????????????????????????????????????
+DEDUP_WINDOW_SEC = 1.0           # 媛숈? 醫낅ぉ ?좏샇 以묐났 臾댁떆 (1珥??대궡)
+SIGNAL_LOG_INTERVAL_SEC = 60     # ?좏샇 ?듦퀎 異쒕젰 二쇨린
+
+# 醫낅ぉ 釉붾옓由ъ뒪??(愿由ъ쥌紐? 嫄곕옒?뺤?, 蹂몄씤???レ? 醫낅ぉ)
+# 6?먮━ 醫낅ぉ肄붾뱶 (?? '005930')
+BLACKLIST: set[str] = {
+    # "123456",  # ?덉떆 - 吏곸젒 異붽?
+}
+
+
+class ConditionManager:
+    """?몄엯/?댄깉 ?좏샇 泥섎━"""
+
+    def __init__(self, order_mgr: OrderManager):
+        self.order_mgr = order_mgr
+
+        # 以묐났 ?좏샇 ?꾪꽣: {醫낅ぉ肄붾뱶: 留덉?留??좏샇 ?쒓컖}
+        self._last_signal_ts: dict[str, float] = {}
+
+        # ?좏샇 ?듦퀎
+        self._stats = {
+            "insert": 0,        # ?몄엯 ?좏샇 珥?嫄댁닔
+            "delete": 0,        # ?댄깉 ?좏샇 珥?嫄댁닔
+            "filtered": 0,      # ?꾪꽣留곷맂 ?좏샇 (以묐났/釉붾옓由ъ뒪????
+            "buy_attempted": 0, # OrderManager濡?留ㅼ닔 ?쒕룄 ?잛닔
+        }
+        self._stats_last_print = time.time()
+
+    # ?????????????????????????????????????
+    # WebSocket 肄쒕갚 吏꾩엯??
+    # ?????????????????????????????????????
+    async def handle_signal(self, stock_code: str, signal_type: str, raw: dict):
+        """
+        KiwoomWS??on_signal 肄쒕갚?쇰줈 ?깅줉?섎뒗 ?⑥닔.
+        signal_type: 'I'(?몄엯) | 'D'(?댄깉)
+        """
+        # 1. 醫낅ぉ肄붾뱶 ?뺢퇋??('A005930' ??'005930')
+        stock_code = self._normalize_code(stock_code)
+        if not stock_code:
+            return
+
+        # 2. ?댄깉 ?좏샇: 濡쒓렇留??④린怨?醫낅즺
+        if signal_type == "D":
+            self._stats["delete"] += 1
+            held = stock_code in self.order_mgr.positions
+            held_mark = " (蹂댁쑀以?" if held else ""
+            logger.info(f"?뱣 [?댄깉] {stock_code}{held_mark}")
+            self._maybe_print_stats()
+            return
+
+        # 3. ?몄엯 ?좏샇 泥섎━
+        self._stats["insert"] += 1
+
+        # 3-1. 以묐났 ?좏샇 ?꾪꽣
+        if self._is_duplicate(stock_code):
+            self._stats["filtered"] += 1
+            logger.debug(f"[?꾪꽣] {stock_code} 以묐났 ?좏샇 臾댁떆")
+            return
+
+        # 3-2. 釉붾옓由ъ뒪??泥댄겕
+        if stock_code in BLACKLIST:
+            self._stats["filtered"] += 1
+            logger.info(f"[?꾪꽣] {stock_code} 釉붾옓由ъ뒪??)
+            return
+
+        # 3-3. ?쒓컙? ?꾪꽣 (?μ쨷 ?꾨땲硫?留ㅼ닔 ??蹂대깂, 濡쒓렇???④?)
+        if not self._is_signal_window():
+            self._stats["filtered"] += 1
+            logger.info(f"?뱢 [?몄엯] {stock_code} - 嫄곕옒?쒓컙 ?? 留ㅼ닔 蹂대쪟")
+            return
+
+        # ?? 紐⑤뱺 ?꾪꽣 ?듦낵 ??
+        logger.info(f"?뱢 [?몄엯] {stock_code} ??留ㅼ닔 ?쒕룄")
+        self._stats["buy_attempted"] += 1
+
+        try:
+            # OrderManager.try_buy???숆린 ?⑥닔
+            self.order_mgr.try_buy(stock_code)
+        except Exception:
+            logger.exception(f"留ㅼ닔 泥섎━ 以??덉쇅: {stock_code}")
+
+        self._maybe_print_stats()
+
+    # ?????????????????????????????????????
+    # ?꾪꽣 ?ы띁
+    # ?????????????????????????????????????
+    @staticmethod
+    def _normalize_code(code: str) -> str:
+        """'A005930' ??'005930', 怨듬갚/?댁긽媛?泥섎━"""
+        if not code:
+            return ""
+        code = code.strip()
+        if code.startswith("A"):
+            code = code[1:]
+        # 6?먮━ ?レ옄媛 ?꾨땲硫?臾댄슚
+        if not (code.isdigit() and len(code) == 6):
+            return ""
+        return code
+
+    def _is_duplicate(self, stock_code: str) -> bool:
+        """媛숈? 醫낅ぉ ?좏샇媛 1珥??대궡 以묐났?쇰줈 ?ㅼ뼱?붾뒗吏"""
+        now = time.time()
+        last = self._last_signal_ts.get(stock_code, 0)
+        if now - last < DEDUP_WINDOW_SEC:
+            return True
+        self._last_signal_ts[stock_code] = now
+        return False
+
+    @staticmethod
+    def _is_signal_window() -> bool:
+        """
+        留ㅼ닔???좏샇 泥섎━ 媛???쒓컙?.
+        OrderManager.TRADING_START~TRADING_END? 蹂꾨룄濡??ш린?쒕룄 ?쒕쾲 嫄곕쫫.
+        """
+        from core.order_manager import TRADING_START, TRADING_END
+        now = datetime.now().strftime("%H:%M")
+        return TRADING_START <= now <= TRADING_END
+
+    # ?????????????????????????????????????
+    # ?듦퀎 異쒕젰
+    # ?????????????????????????????????????
+    def _maybe_print_stats(self):
+        """二쇨린?곸쑝濡??좏샇 ?듦퀎 濡쒓렇"""
+        if time.time() - self._stats_last_print < SIGNAL_LOG_INTERVAL_SEC:
+            return
+        self._stats_last_print = time.time()
+        s = self._stats
+        logger.info(
+            f"?뱤 [?좏샇?듦퀎] ?몄엯={s['insert']} ?댄깉={s['delete']} "
+            f"?꾪꽣留?{s['filtered']} 留ㅼ닔?쒕룄={s['buy_attempted']}"
+        )
+
+    def get_stats(self) -> dict:
+        return dict(self._stats)
+
+
+=== FILE: C:\Users\rober\OneDrive\문서\vscode\AutoTrader_Project\core\order_manager.py ===
+
+"""
+二쇰Ц 愿由ъ옄
+?????????????????????????????????????
+??븷:
+  - 留ㅼ닔/留ㅻ룄 寃곗젙 諛??ㅽ뻾 (?꾪꽣留??ы븿)
+  - ?ъ???異붿쟻 + 醫낅ぉ紐?罹먯떆
+  - ?먯씡 紐⑤땲?곕쭅 ???듭젅/?먯젅 ?먮룞 留ㅻ룄
+  - ?붾젅洹몃옩 ?뚮┝ (醫낅ぉ紐??ы븿)
+
+StrategyManager ?듯빀:
+  - StrategyManager媛 ?먯껜 ?щ’/泥?궛 濡쒖쭅??媛吏怨??덉쑝誘濡?
+    `buy()` / `sell()` ?⑥닚 wrapper 硫붿꽌?쒕? ?듯빐 ?몄텧.
+  - 湲곗〈 try_buy / check_and_sell_positions / force_close_all? ?명솚???꾪빐 ?좎?.
+"""
+import time
+from datetime import datetime
+from typing import Optional
+
+from api.kiwoom_rest import KiwoomREST
+from api.auth import send_telegram
+from utils.logger import logger
+from utils.price_helper import add_ticks, round_to_tick
+
+
+# ?????????????????????????????????????
+# ?꾨왂 ?뚮씪誘명꽣
+# ?????????????????????????????????????
+BUY_AMOUNT_PER_STOCK = 2_000_000     # 醫낅ぉ??留ㅼ닔湲덉븸 (200留뚯썝)
+MAX_POSITIONS = 5                    # ?숈떆 蹂댁쑀 理쒕? 醫낅ぉ??
+BUY_COOLDOWN_SEC = 300               # 媛숈? 醫낅ぉ ?щℓ??荑⑤떎??(5遺?
+
+TAKE_PROFIT_PCT = 2.5                # +2.5% ?듭젅
+STOP_LOSS_PCT = -1.5                 # -1.5% ?먯젅
+TIME_STOP_MIN = 30                   # 30遺?蹂댁쑀 ??0% 誘몃쭔?대㈃ ?뺣━
+
+TRADING_START = "09:03"              # 嫄곕옒 ?쒖옉
+TRADING_END = "15:10"                # 嫄곕옒 醫낅즺 (?댄썑 ?좉퇋留ㅼ닔 X)
+FORCE_CLOSE_TIME = "15:15"           # 媛뺤젣 泥?궛 ?쒓컖
+
+BUY_PRICE_OFFSET_TICKS = 1           # ?꾩옱媛 +1??留ㅼ닔
+SELL_PRICE_OFFSET_TICKS = -1         # ?꾩옱媛 -1??留ㅻ룄
+
+
+class OrderManager:
+    def __init__(self, rest: KiwoomREST):
+        self.rest = rest
+        self.positions: dict[str, dict] = {}
+        self.last_buy_ts: dict[str, float] = {}
+        self.buying: set[str] = set()
+        self._name_cache: dict[str, str] = {}
+        self._force_close_done = False
+        self._sell_failed: set[str] = set()
+
+    # ?????????????????????????????????????
+    # 醫낅ぉ紐??ы띁
+    # ?????????????????????????????????????
+    def get_stock_name(self, stock_code: str) -> str:
+        if stock_code in self._name_cache:
+            return self._name_cache[stock_code]
+        info = self.rest.get_stock_info(stock_code)
+        name = (info.get("stk_nm") or "").strip()
+        if name:
+            self._name_cache[stock_code] = name
+        return name or "?"
+
+    # ?????????????????????????????????????
+    # ?붽퀬 ?숆린??
+    # ?????????????????????????????????????
+    def sync_positions_from_server(self):
+        holdings = self.rest.get_holdings()
+        new_positions = {}
+        for code, info in holdings.items():
+            if info["qty"] <= 0:
+                continue
+            new_positions[code] = {
+                "qty": info["qty"],
+                "avg_price": info["avg_price"],
+                "name": info["name"] or self.get_stock_name(code),
+                "bought_at": self.positions.get(code, {}).get("bought_at", time.time()),
+            }
+            if info["name"]:
+                self._name_cache[code] = info["name"]
+        self.positions = new_positions
+        logger.info(f"?벀 ?붽퀬 ?숆린?? 蹂댁쑀 {len(new_positions)}醫낅ぉ")
+        return new_positions
+
+    # ?????????????????????????????????????
+    # ??StrategyManager???⑥닚 wrapper
+    # ?????????????????????????????????????
+    def buy(self, stock_code: str, qty: int, price: int = 0) -> dict:
+        """?⑥닚 留ㅼ닔 wrapper (StrategyManager ?몄텧??.
+
+        Args:
+            stock_code: 醫낅ぉ肄붾뱶
+            qty: 留ㅼ닔 ?섎웾
+            price: 0?대㈃ ?꾩옱媛 +1?? >0?대㈃ 洹?媛寃?吏?뺢?
+
+        Returns:
+            {"success": bool, "ord_no"?: str, "price"?: int, "error"?: str}
+        """
+        if qty <= 0:
+            return {"success": False, "error": f"qty={qty}"}
+        try:
+            if price <= 0:
+                cur = self.rest.get_current_price(stock_code)
+                if cur <= 0:
+                    return {"success": False, "error": "?꾩옱媛 議고쉶 ?ㅽ뙣"}
+                price = round_to_tick(add_ticks(cur, BUY_PRICE_OFFSET_TICKS))
+
+            result = self.rest.buy_market_order(
+                stock_code, qty=qty, price=price, trde_tp="0"
+            )
+            rc = result.get("return_code")
+            if rc != 0:
+                return {"success": False, "error": result.get("return_msg", f"rc={rc}")}
+
+            # ?ъ???湲곕줉 (StrategyManager???먯껜 holdings 愿由ы븯吏留?sync ?쇨????꾪빐)
+            name = self.get_stock_name(stock_code)
+            self.positions[stock_code] = {
+                "qty": qty,
+                "avg_price": price,
+                "bought_at": time.time(),
+                "name": name,
+                "ord_no": result.get("ord_no", ""),
+            }
+            self.last_buy_ts[stock_code] = time.time()
+
+            return {
+                "success": True,
+                "ord_no": result.get("ord_no", ""),
+                "price": price,
+            }
+        except Exception as e:
+            logger.exception(f"[{stock_code}] buy() ?덉쇅")
+            return {"success": False, "error": str(e)}
+
+    def sell(self, stock_code: str, qty: int, price: int = 0) -> dict:
+        """?⑥닚 留ㅻ룄 wrapper (StrategyManager ?몄텧??.
+
+        Args:
+            stock_code: 醫낅ぉ肄붾뱶
+            qty: 留ㅻ룄 ?섎웾
+            price: 0?대㈃ ?꾩옱媛 -1?? >0?대㈃ 洹?媛寃?吏?뺢?
+
+        Returns:
+            {"success": bool, "ord_no"?: str, "price"?: int, "error"?: str}
+        """
+        if qty <= 0:
+            return {"success": False, "error": f"qty={qty}"}
+        try:
+            if price <= 0:
+                cur = self.rest.get_current_price(stock_code)
+                if cur <= 0:
+                    return {"success": False, "error": "?꾩옱媛 議고쉶 ?ㅽ뙣"}
+                price = round_to_tick(add_ticks(cur, SELL_PRICE_OFFSET_TICKS))
+                if price <= 0:
+                    price = cur
+
+            result = self.rest.sell_market_order(
+                stock_code, qty=qty, price=price, trde_tp="0"
+            )
+            rc = result.get("return_code")
+            if rc != 0:
+                err_msg = result.get("return_msg", f"rc={rc}")
+                # ?곴뎄 ?ㅽ뙣 ?먮떒
+                if any(kw in str(err_msg) for kw in ["?섎웾", "?붽퀬", "蹂댁쑀", "泥닿껐", "遺議?]):
+                    self._sell_failed.add(stock_code)
+                    self.positions.pop(stock_code, None)
+                return {"success": False, "error": err_msg}
+
+            self.positions.pop(stock_code, None)
+            return {
+                "success": True,
+                "ord_no": result.get("ord_no", ""),
+                "price": price,
+            }
+        except Exception as e:
+            logger.exception(f"[{stock_code}] sell() ?덉쇅")
+            return {"success": False, "error": str(e)}
+
+    # ?????????????????????????????????????
+    # 湲곗〈 留ㅼ닔 (?명솚?? ConditionManager ?먮쫫 ?깆뿉???ъ슜 媛??
+    # ?????????????????????????????????????
+    def try_buy(self, stock_code: str) -> bool:
+        if not self._is_trading_time():
+            logger.debug(f"[留ㅼ닔蹂대쪟] {stock_code} - 嫄곕옒?쒓컙 ??)
+            return False
+        if stock_code in self.buying:
+            return False
+        if stock_code in self.positions:
+            logger.debug(f"[留ㅼ닔蹂대쪟] {stock_code} - ?대? 蹂댁쑀")
+            return False
+        if len(self.positions) >= MAX_POSITIONS:
+            logger.info(f"[留ㅼ닔蹂대쪟] {stock_code} - 理쒕? 蹂댁쑀 {MAX_POSITIONS}醫낅ぉ ?꾨떖")
+            return False
+
+        last = self.last_buy_ts.get(stock_code, 0)
+        if time.time() - last < BUY_COOLDOWN_SEC:
+            return False
+
+        orderable = self.rest.get_orderable_amount()
+        if orderable < BUY_AMOUNT_PER_STOCK:
+            logger.warning(
+                f"[留ㅼ닔蹂대쪟] {stock_code} - 二쇰Ц媛?κ툑??遺議?"
+                f"(?꾩슂 {BUY_AMOUNT_PER_STOCK:,} / 媛??{orderable:,})"
+            )
+            return False
+
+        self.buying.add(stock_code)
+        try:
+            return self._execute_buy_legacy(stock_code)
+        finally:
+            self.buying.discard(stock_code)
+
+    def _execute_buy_legacy(self, stock_code: str) -> bool:
+        cur_price = self.rest.get_current_price(stock_code)
+        if cur_price <= 0:
+            logger.warning(f"[留ㅼ닔?ㅽ뙣] {stock_code} - ?꾩옱媛 議고쉶 ?ㅽ뙣")
+            return False
+
+        order_price = round_to_tick(add_ticks(cur_price, BUY_PRICE_OFFSET_TICKS))
+        qty = BUY_AMOUNT_PER_STOCK // order_price
+        if qty <= 0:
+            logger.warning(f"[留ㅼ닔?ㅽ뙣] {stock_code} - ?섎웾 0 (price={order_price})")
+            return False
+
+        name = self.get_stock_name(stock_code)
+
+        result = self.rest.buy_market_order(
+            stock_code, qty=qty, price=order_price, trde_tp="0"
+        )
+
+        if result.get("return_code") != 0:
+            msg = (f"??[留ㅼ닔?ㅽ뙣] {name}({stock_code}) {qty}二?@ {order_price:,}??n"
+                   f"?ъ쑀: {result.get('return_msg')}")
+            logger.error(msg)
+            send_telegram(msg, target="order")
+            return False
+
+        self.positions[stock_code] = {
+            "qty": qty,
+            "avg_price": order_price,
+            "bought_at": time.time(),
+            "name": name,
+            "ord_no": result.get("ord_no", ""),
+        }
+        self.last_buy_ts[stock_code] = time.time()
+
+        msg = (f"?? [留ㅼ닔二쇰Ц] {name} ({stock_code})\n"
+               f"?섎웾: {qty}二?n"
+               f"二쇰Ц媛: {order_price:,}??(?꾩옱媛 {cur_price:,}+{BUY_PRICE_OFFSET_TICKS}??\n"
+               f"湲덉븸: {qty * order_price:,}??n"
+               f"ord_no: {result.get('ord_no')}")
+        logger.info(msg)
+        send_telegram(msg, target="order")
+        return True
+
+    # ?????????????????????????????????????
+    # 留ㅻ룄 (?먯껜 泥?궛 濡쒖쭅, ?꾩옱 ?ъ슜 ??????StrategyManager媛 ?대떦)
+    # ?????????????????????????????????????
+    def check_and_sell_positions(self):
+        if not self.positions:
+            return
+
+        if self._should_force_close():
+            self.force_close_all()
+            return
+
+        for stock_code in list(self.positions.keys()):
+            if stock_code in self._sell_failed:
+                continue
+            try:
+                self._evaluate_sell(stock_code)
+            except Exception:
+                logger.exception(f"?ъ????됯? ?덉쇅: {stock_code}")
+
+    def _evaluate_sell(self, stock_code: str):
+        pos = self.positions.get(stock_code)
+        if not pos:
+            return
+
+        cur_price = self.rest.get_current_price(stock_code)
+        if cur_price <= 0:
+            return
+
+        avg = pos["avg_price"]
+        pnl_pct = (cur_price - avg) / avg * 100
+        held_min = (time.time() - pos["bought_at"]) / 60
+
+        if pnl_pct >= TAKE_PROFIT_PCT:
+            self._execute_sell(stock_code, reason=f"?듭젅 +{pnl_pct:.2f}%")
+            return
+        if pnl_pct <= STOP_LOSS_PCT:
+            self._execute_sell(stock_code, reason=f"?먯젅 {pnl_pct:.2f}%")
+            return
+        if held_min >= TIME_STOP_MIN and pnl_pct < 0:
+            self._execute_sell(stock_code, reason=f"?쒓컙?뺣━ {pnl_pct:.2f}% ({held_min:.0f}遺?")
+            return
+
+    def _execute_sell(self, stock_code: str, reason: str = "") -> bool:
+        pos = self.positions.get(stock_code)
+        if not pos:
+            return False
+
+        cur_price = self.rest.get_current_price(stock_code)
+        order_price = round_to_tick(add_ticks(cur_price, SELL_PRICE_OFFSET_TICKS))
+        if order_price <= 0:
+            order_price = cur_price
+
+        name = pos.get("name") or self.get_stock_name(stock_code)
+
+        result = self.rest.sell_market_order(
+            stock_code, qty=pos["qty"], price=order_price, trde_tp="0"
+        )
+
+        if result.get("return_code") != 0:
+            err_msg = str(result.get("return_msg", ""))
+            msg = f"??[留ㅻ룄?ㅽ뙣] {name}({stock_code})\n?ъ쑀: {err_msg}"
+
+            permanent_keywords = ["?섎웾", "?붽퀬", "蹂댁쑀", "泥닿껐", "遺議?]
+            if any(kw in err_msg for kw in permanent_keywords):
+                self._sell_failed.add(stock_code)
+                self.positions.pop(stock_code, None)
+                msg += "\n???ъ??섏뿉???쒓굅 (?섎룞 ?뺤씤 ?꾩슂)"
+
+            logger.error(msg)
+            send_telegram(msg, target="order")
+            return False
+
+        pnl = (order_price - pos["avg_price"]) * pos["qty"]
+        pnl_pct_actual = (order_price - pos["avg_price"]) / pos["avg_price"] * 100
+
+        msg = (f"?뮥 [留ㅻ룄二쇰Ц] {name} ({stock_code})\n"
+               f"?ъ쑀: {reason}\n"
+               f"?섎웾: {pos['qty']}二?n"
+               f"二쇰Ц媛: {order_price:,}??n"
+               f"?됯퇏?④?: {pos['avg_price']:,}??n"
+               f"?덉긽?먯씡: {pnl:+,}??({pnl_pct_actual:+.2f}%)")
+        logger.info(msg)
+        send_telegram(msg, target="order")
+
+        self.positions.pop(stock_code, None)
+        return True
+
+    def force_close_all(self):
+        if self._force_close_done:
+            return
+        self._force_close_done = True
+
+        if not self.positions:
+            return
+
+        logger.info(f"?뵒 ?λ쭏媛?媛뺤젣泥?궛: {len(self.positions)}醫낅ぉ")
+        send_telegram(f"?뵒 ?λ쭏媛?媛뺤젣泥?궛 ?쒖옉: {len(self.positions)}醫낅ぉ", target="order")
+
+        for stock_code in list(self.positions.keys()):
+            self._execute_sell(stock_code, reason="?λ쭏媛?媛뺤젣泥?궛")
+
+    # ?????????????????????????????????????
+    # ?쒓컙 泥댄겕
+    # ?????????????????????????????????????
+    @staticmethod
+    def _is_trading_time() -> bool:
+        now = datetime.now().strftime("%H:%M")
+        return TRADING_START <= now <= TRADING_END
+
+    @staticmethod
+    def _should_force_close() -> bool:
+        return datetime.now().strftime("%H:%M") >= FORCE_CLOSE_TIME
+
+    # ?????????????????????????????????????
+    # ?곹깭 異쒕젰
+    # ?????????????????????????????????????
+    def status_summary(self) -> str:
+        if not self.positions:
+            return "蹂댁쑀 醫낅ぉ ?놁쓬"
+        lines = [f"?뱤 蹂댁쑀 {len(self.positions)}醫낅ぉ"]
+        for code, pos in self.positions.items():
+            held = (time.time() - pos["bought_at"]) / 60
+            name = pos.get("name", "?")
+            lines.append(f"  {name}({code}): {pos['qty']}二?@ {pos['avg_price']:,}??"
+                         f"({held:.0f}遺?蹂댁쑀)")
+        return "\n".join(lines)
+
+
+=== FILE: C:\Users\rober\OneDrive\문서\vscode\AutoTrader_Project\core\phase1b_controller.py ===
+
+"""Phase 1B 而⑦듃濡ㅻ윭 ??泥닿껐媛뺣룄 ?꾨왂 ?곗씠???뚯씠?꾨씪??
+
+KiwoomWS??on_trade / on_orderbook 肄쒕갚?먯꽌 ?몄텧.
+?대? ?몃옒而ㅻ뱾???낅뜲?댄듃?섍퀬 ChemulEvaluator濡?FSM ?됯?.
+StrategyManager媛 寃곌낵(ChemulState)瑜?諛쏆븘 留ㅼ닔 ?ㅽ뻾 ?щ? 寃곗젙.
+"""
+from typing import Optional
+
+from core.strategy.orderbook import OrderbookTracker
+from core.strategy.trade_flow import TradeFlowTracker
+from core.strategy.wall_detector import WallDetector
+from core.strategy.chemul_evaluator import ChemulEvaluator, ChemulState
+
+
+class Phase1BController:
+    """泥닿껐媛뺣룄 ?꾨왂???곗씠???뚯씠?꾨씪??+ FSM ?듯빀 ?섑띁."""
+
+    def __init__(
+        self,
+        # ?몃옒而??뚮씪誘명꽣 (TBD: ?ㅻ뜲?댄꽣濡??쒕떇)
+        history_window_sec: float = 120,
+        # WallDetector
+        detect_multiplier: float = 5.0,
+        shrink_ratio: float = 0.7,
+        disappear_ratio: float = 0.2,
+        avg_window_sec: float = 60,
+        watch_levels: tuple = (1, 2),
+        # ChemulEvaluator
+        pullback_pct: float = -1.5,
+        pullback_window_sec: float = 60,
+        strength_short_window: float = 10,
+        strength_long_window: float = 30,
+        strength_min: float = 180,
+        state_timeout_sec: float = 60,
+    ):
+        self.orderbook = OrderbookTracker(history_window_sec=history_window_sec)
+        self.wall_detector = WallDetector(
+            self.orderbook,
+            detect_multiplier=detect_multiplier,
+            shrink_ratio=shrink_ratio,
+            disappear_ratio=disappear_ratio,
+            avg_window_sec=avg_window_sec,
+            watch_levels=watch_levels,
+        )
+        self.trade_flow = TradeFlowTracker(max_window_sec=history_window_sec)
+        self.evaluator = ChemulEvaluator(
+            trade_flow=self.trade_flow,
+            wall_detector=self.wall_detector,
+            orderbook=self.orderbook,
+            pullback_pct=pullback_pct,
+            pullback_window_sec=pullback_window_sec,
+            strength_short_window=strength_short_window,
+            strength_long_window=strength_long_window,
+            strength_min=strength_min,
+            state_timeout_sec=state_timeout_sec,
+        )
+
+        # 媛먯떆 以묒씤 醫낅ぉ 吏묓빀
+        self.watched: set[str] = set()
+
+    # ??? 媛먯떆 醫낅ぉ 愿由?????????????????????????
+    def start_watching(self, stock_code: str):
+        """Phase 1B ?꾨낫 媛먯떆 ?쒖옉."""
+        self.watched.add(stock_code)
+
+    def stop_watching(self, stock_code: str):
+        """媛먯떆 以묐떒 + ?몃옒而?硫붾え由??뺣━."""
+        self.watched.discard(stock_code)
+        self.evaluator.reset(stock_code)
+        self.orderbook.reset(stock_code)
+        self.trade_flow.reset(stock_code)
+        self.wall_detector.reset(stock_code)
+
+    def is_watching(self, stock_code: str) -> bool:
+        return stock_code in self.watched
+
+    def get_state(self, stock_code: str) -> ChemulState:
+        return self.evaluator.get_state(stock_code)
+
+    # ??? WS 肄쒕갚 吏꾩엯??????????????????????????
+    def on_trade(self, parsed_trade: dict, now: float = None) -> Optional[ChemulState]:
+        """KiwoomWS on_trade?먯꽌 ?몄텧. 媛먯떆 醫낅ぉ?대㈃ ChemulState 諛섑솚."""
+        code = parsed_trade.get("stock_code")
+        if not code or code not in self.watched:
+            return None
+        self.trade_flow.add_tick(
+            code,
+            parsed_trade.get("price", 0),
+            parsed_trade.get("side", "neutral"),
+            parsed_trade.get("volume", 0),
+            now=now,
+        )
+        return self.evaluator.evaluate(code, now=now)
+
+    def on_orderbook(self, parsed_orderbook: dict, now: float = None) -> Optional[ChemulState]:
+        """KiwoomWS on_orderbook?먯꽌 ?몄텧."""
+        code = parsed_orderbook.get("stock_code")
+        if not code or code not in self.watched:
+            return None
+        self.orderbook.update(code, parsed_orderbook, now=now)
+        self.wall_detector.on_orderbook(code, now=now)
+        return self.evaluator.evaluate(code, now=now)
+
+
+=== FILE: C:\Users\rober\OneDrive\문서\vscode\AutoTrader_Project\core\strategy_manager.py ===
+
+"""
+留ㅻℓ ?꾨왂 留ㅻ땲? ??Phase 1A/1B/2/3 ?듯빀 + ?섏씠釉뚮━??泥?궛 + ?숈쟻 鍮꾩쨷 + ?섏닔猷?諛섏쁺
+
+?쒓컙?:
+  Phase 1A (09:00 ~ 09:20): ?쒖큹媛+5% + 5MA ?곗튂
+  Phase 1B (09:00 ~ 10:40): 泥닿껐媛뺣룄 FSM (Phase 1 ?덈룄???좏샇留?
+  Phase 2  (09:21 ~ 10:40): 30MA ?곗튂  (5/22 60MA->30MA 蹂寃? ?좏샇 鍮덈룄up)
+  Phase 3  (10:41 ~ 15:00): 泥닿껐媛뺣룄 ?⑥“利앷? 1遺??좎?
+
+泥?궛 (5/22 媛쒗렪 - 20MA ?댄깉 泥?궛 ?꾩엯):
+  ?먯젅 -2.5%(媛寃?  <- 湲곗〈 -1.5%?먯꽌 ?꾪솕
+  ?듭젅 罹?+2.5%(?쒖씡)  <- ?좎?
+  20MA ?댄깉 泥?궛: ?꾩옱媛媛 20MA瑜?0.3% ?댁긽 ?섑쉶?섎㈃ 留ㅻ룄  <- ?몃젅?쇰쭅 ?泥?
+  ?쒓컙?뺣━ 30遺?
+  * ?듭젅罹≪? ?섏닔猷?李④컧???쒖닔??湲곗? (紐⑥쓽 0.3% / ?ㅼ쟾 0.015% ?먮룞 遺꾧린)
+  * ?몃젅?쇰쭅 ?쒓굅 (20MA ?댄깉??異붿꽭 泥?궛 ??븷 ?泥?
+  * 20MA??蹂댁쑀醫낅ぉ蹂꾨줈 tick()?먯꽌 二쇨린 媛깆떊/罹먯떆. 遺꾨큺 遺議???20MA 泥?궛留??ㅽ궢(?먯젅/?듭젅罹≪? 怨꾩냽 ?묐룞)
+  留ㅻ룄 3???ㅽ뙣 李⑤떒 / ?щℓ??荑⑤떎??10遺?/ 留ㅼ닔/?ъ떆??60珥??뚮컢??
+
+吏꾩엯 (?먯닔 湲곕컲 ??scoring.py ?꾩엫):
+  evaluate_phase1/surge/phase2 媛 ?섎뱶 AND ???媛以??먯닔濡??듦낵 ?먯젙.
+  score_cfg.threshold_ratio=1.0 ?대㈃ 湲곗〈 AND? (嫄곗쓽) ?숈씪. dry-run 濡쒓렇(score/score_breakdown)
+  蹂닿퀬 ?④퀎?곸쑝濡???떠 near-miss 吏꾩엯 ?덉슜. ?꾧퀎媛???텛硫?留ㅼ닔 湲고쉶??由ъ뒪???몄텧??
+"""
+import logging
+from datetime import datetime, time, timedelta
+from typing import Optional
+
+from core.strategy.indicators import calc_ma
+from core.strategy.chemul_evaluator import ChemulState
+from core.strategy.scoring import ScoreConfig, score_phase1, score_surge, score_phase2
+from db import TradeRepository, WatchListRepository, SystemEventRepository
+
+try:
+    from api.auth import send_telegram
+except Exception as e:
+    logging.getLogger(__name__).warning("send_telegram ?ъ슜 遺덇?: %s", e)
+    send_telegram = None
+
+logger = logging.getLogger(__name__)
+
+
+# -------------------------------------------------
+# ?섏닔猷?(IS_MOCK ?먮룞 遺꾧린, config??紐낆떆?섎㈃ ?곗꽑)
+# -------------------------------------------------
+def _load_fee_settings():
+    is_mock = True
+    commission = None
+    tax = 0.0018
+    try:
+        import settings
+        raw_mock = getattr(settings, "IS_MOCK", True)
+        if isinstance(raw_mock, str):
+            is_mock = raw_mock.strip().lower() in ("true", "1", "yes")
+        else:
+            is_mock = bool(raw_mock)
+        # config??紐낆떆媛??덉쑝硫??곗꽑
+        c = getattr(settings, "COMMISSION_RATE", None)
+        if c not in (None, "", 0):
+            commission = float(c)
+        t = getattr(settings, "TAX_RATE", None)
+        if t not in (None, ""):
+            tax = float(t)
+    except Exception:
+        pass
+    if commission is None:
+        commission = 0.003 if is_mock else 0.00015   # 紐⑥쓽 0.3% / ?ㅼ쟾 0.015%
+    return commission, tax
+
+
+COMMISSION_RATE, TAX_RATE = _load_fee_settings()
+ROUND_TRIP_COST = 2 * COMMISSION_RATE + TAX_RATE   # ?뺣났 珥앸퉬??(留ㅼ닔?섏닔猷?留ㅻ룄?섏닔猷?嫄곕옒??
+logger.info("?섏닔猷??ㅼ젙: ?몃룄 %.3f%% + ?멸툑 %.3f%% -> ?뺣났 鍮꾩슜 %.3f%%",
+            COMMISSION_RATE * 100, TAX_RATE * 100, ROUND_TRIP_COST * 100)
+
+
+# -------------------------------------------------
+# ?쒓컙 ?덈룄??
+# -------------------------------------------------
+PHASE1_START = time(9, 0)
+PHASE1_END   = time(9, 21)
+PHASE2_START = time(9, 21)
+PHASE2_END   = time(10, 40)
+PHASE3_START = time(10, 41)
+PHASE3_END   = time(15, 0)
+
+# 吏꾩엯 議곌굔
+SURGE_THRESHOLD     = 0.05
+MA_TOUCH_TOLERANCE  = 0.003
+VOLUME_SURGE_RATIO  = 1.5
+VOLUME_LOOKBACK     = 5
+
+# Phase2 ?대룞?됯퇏 湲곌컙 (5/22 60->30 蹂寃?
+PHASE2_MA_PERIOD    = 30
+
+# 泥?궛 (gross=媛寃⑷린以, net=?쒖씡湲곗?) - 5/22 媛쒗렪
+TAKE_PROFIT_CAP     = 0.025    # ?듭젅 罹?(?쒖씡 湲곗?) - ?좎?
+STOP_LOSS_RATE      = -0.025   # ?먯젅 (媛寃?湲곗?) - 湲곗〈 -1.5%?먯꽌 -2.5%濡??꾪솕
+HOLDING_TIMEOUT     = timedelta(minutes=30)
+
+# 20MA ?댄깉 泥?궛 (?몃젅?쇰쭅 ?泥?
+EXIT_MA_PERIOD      = 20       # 泥?궛 湲곗? ?대룞?됯퇏 (1遺꾨큺 20MA)
+EXIT_MA_BREAK_PCT   = 0.003    # 20MA瑜???鍮꾩쑉 ?댁긽 ?섑쉶?섎㈃ 泥?궛 (0.3%)
+EXIT_MA_REFRESH     = timedelta(seconds=30)   # 20MA 罹먯떆 媛깆떊 二쇨린
+EXIT_MA_FETCH_COUNT = 25       # 20MA 怨꾩궛??遺꾨큺 議고쉶 媛쒖닔 (20 + ?ъ쑀)
+
+# 留ㅻ룄 ?ㅽ뙣 & 荑⑤떎??& ?뚮컢??
+MAX_SELL_FAIL    = 3
+REBUY_COOLDOWN   = timedelta(minutes=10)
+RESTART_WARMUP   = timedelta(seconds=60)   # 30 -> 60 (紐⑥쓽 留ㅻ룄媛?μ닔??吏?????
+BUY_WARMUP       = timedelta(seconds=60)
+
+# 湲덉븸 + ?щ’
+# 湲덉븸 + ?щ’
+POSITION_AMOUNT  = 2_000_000
+MAX_HOLDINGS     = 5
+PHASE1A_MAX_SLOTS = 3
+PHASE1B_MAX_SLOTS = 2
+PHASE3_MAX_SLOTS  = 3
+
+# ?쇄뼹???ш린??異붽? ?쇄뼹??
+MAX_WATCH_SLOTS = 10                      # ?뚯씠?ъ뿉???숈떆 愿李고븷 理쒕? 醫낅ぉ ??
+WATCH_TIMEOUT = timedelta(minutes=10)     # 10遺??숈븞 吏꾩엯 ??먯씠 ???섏삤硫?愿李?痍⑥냼
+
+# 湲됰벑(surge) 利됱떆 吏꾩엯 ??議곌굔蹂??쇱슦??SURGE_CONDITION_NAMES). MA?곗튂 ?놁쓬.
+SURGE_ENTRY_MIN   = 0.03   # 理쒓렐 遊??쒓? ?鍮?理쒖냼 ?곸듅瑜?(0 ?대㈃ 湲됰벑% 泥댄겕 ??
+SURGE_MAX_SLOTS   = 2      # 湲됰벑 ?꾩슜 ?щ’ (MAX_HOLDINGS=5 怨듭쑀)
+
+def _notify(msg: str):
+    if send_telegram is None:
+        return
+    try:
+        send_telegram(msg)
+    except Exception as e:
+        logger.warning("?붾젅洹몃옩 ?꾩넚 ?ㅽ뙣: %s", e)
+
+
+class StrategyManager:
+    def __init__(
+        self,
+        kiwoom_rest,
+        order_manager,
+        phase1b_controller=None,
+        phase3_controller=None,
+        portfolio_optimizer=None,
+        now_func=None,
+    ):
+        self.api = kiwoom_rest
+        self.order_manager = order_manager
+        self.phase1b = phase1b_controller
+        self.phase3 = phase3_controller
+        self.optimizer = portfolio_optimizer
+        self._now = now_func or datetime.now
+
+        self.holdings: dict[str, dict] = {}
+        self.watch_list_today: set[str] = set()
+        self.pending: set[str] = set()
+        self._stock_names: dict[str, str] = {}
+        
+        # ?쇄뼹???ш린??異붽? ?쇄뼹??
+        # HTS?먯꽌 ?섏뼱??1李??⑷꺽 醫낅ぉ?ㅼ쓽 ??먯쓣 湲곕떎由щ뒗 ?湲곗뿴 {醫낅ぉ肄붾뱶: ?ъ갑?쒓컙}
+        self.watch_candidates: dict[str, datetime] = {}
+
+        self._sell_fail_count: dict[str, int] = {}
+        self._sell_blocked: set[str] = set()
+        self._sold_at: dict[str, datetime] = {}
+        self._buy_success_count = 0
+
+        # ?먯닔 湲곕컲 吏꾩엯 ?ㅼ젙.
+        # threshold_ratio=1.0 -> 湲곗〈 AND? (嫄곗쓽) ?숈씪. dry-run?먯꽌 score_breakdown 濡쒓렇 蹂???
+        # 0.85 -> 0.75 ?앹쑝濡??④퀎?곸쑝濡???떠 near-miss 吏꾩엯 ?덉슜(=由ъ뒪???몄텧???④퍡 利앷?).
+        self.score_cfg = ScoreConfig(
+            surge_target=SURGE_THRESHOLD,
+            surge_min=SURGE_ENTRY_MIN,
+            ma_tolerance=MA_TOUCH_TOLERANCE,
+            volume_target=VOLUME_SURGE_RATIO,
+            threshold_ratio=1.0,
+        )
+
+        self._restore_from_db()
+        self._last_phase = self.get_current_phase()
+
+    # ========================================
+    # ?쒖닔?듬쪧 怨꾩궛 (?섏닔猷?李④컧)
+    # ========================================
+    @staticmethod
+    def _gross_rate(buy_price: float, current_price: float) -> float:
+        return (current_price - buy_price) / buy_price if buy_price else 0.0
+
+    @staticmethod
+    def _net_rate(buy_price: float, current_price: float) -> float:
+        """?섏닔猷??뺣났)+?멸툑 李④컧 ?쒖닔?듬쪧."""
+        if not buy_price:
+            return 0.0
+        gross = (current_price - buy_price) / buy_price
+        return gross - ROUND_TRIP_COST
+
+    @staticmethod
+    def _net_profit(buy_price: float, current_price: float, qty: int) -> float:
+        """?ㅼ젣 ?쒖넀??湲덉븸 (?섏닔猷??멸툑 李④컧)."""
+        buy_amt = buy_price * qty
+        sell_amt = current_price * qty
+        cost = buy_amt * COMMISSION_RATE + sell_amt * (COMMISSION_RATE + TAX_RATE)
+        return (sell_amt - buy_amt) - cost
+
+    # ========================================
+    # ?곹깭 蹂듭썝
+    # ========================================
+    def _restore_from_db(self):
+        warmup_until = self._now() + RESTART_WARMUP
+        for h in TradeRepository.find_holdings():
+            buy_price = float(h["buy_price"])
+            self.holdings[h["stock_code"]] = {
+                "trade_id": h["id"],
+                "buy_price": buy_price,
+                "buy_quantity": int(h["buy_quantity"]),
+                "buy_time": h["buy_time"],
+                "stock_name": h["stock_name"],
+                "strategy_phase": h["strategy_phase"],
+                "sub_strategy": h.get("sub_strategy"),
+                "highest_price": buy_price,
+                "ma20": None,                 # 20MA 罹먯떆 (誘멸퀎??
+                "ma20_updated": None,         # 20MA 媛깆떊 ?쒓컖
+                "warmup_until": warmup_until,
+            }
+        for w in WatchListRepository.find_by_date(self._now().date()):
+            self.watch_list_today.add(w["stock_code"])
+
+        logger.info(
+            "DB 蹂듭썝: 蹂댁쑀 %d (1A=%d, 1B=%d, 2=%d, 3=%d) / ?뚯튂 %d / ?뚮컢??%ds",
+            len(self.holdings),
+            self.count_holdings_by_strategy("1A"),
+            self.count_holdings_by_strategy("1B"),
+            self.count_holdings_by_strategy("2"),
+            self.count_holdings_by_strategy("3"),
+            len(self.watch_list_today),
+            int(RESTART_WARMUP.total_seconds()),
+        )
+
+    # ========================================
+    # 雅뚯눊由??紐꾪뀱 (二쇨린 ?몄텧)
+    # ========================================
+    def tick(self):
+        now = self._now()
+
+        cur_phase = self.get_current_phase()
+        if cur_phase != self._last_phase:
+            # (以묐왂... ?꾨왂 ?꾪솚 濡쒓렇 李띾뒗 遺遺?
+            self._last_phase = cur_phase
+
+        # ?쇄뼹???ш린????踰덉㎏ 蹂듭궗蹂?for code in list(self.watch_candidates.keys()): 遺遺???遺숈뿬?ｌ쑝?몄슂 ?쇄뼹??
+        for code in list(self.watch_candidates.keys()):
+            # ?대? ?嫄곕굹 ?щ뵫(二쇰Ц 以??대㈃ ?щ’?먯꽌 鍮꾩썙以?
+            if code in self.holdings or code in self.pending:
+                del self.watch_candidates[code]
+                continue
+
+            try:
+                # 1遺꾨큺 ?곗씠??70媛??몄텧 (CandleCache媛 諛⑹뼱?댁쨲)
+                candles = self.api.get_minute_candles(code, interval=1, count=70)
+                
+                # N???뚮┝紐?????됯?!
+                is_timing, info = self.evaluate_morning_pullback(candles)
+                
+                if is_timing:
+                    stock_name = self._stock_names.get(code, code)
+                    logger.info("?렞 [%s] %s 10MA ?뚮┝紐?????ъ갑! 留ㅼ닔 ?ㅽ뻾", code, stock_name)
+                    
+                    # 留ㅼ닔 ?ㅽ뻾 (?쒕툕 ?꾨왂 ?대쫫 '1N' - N???뚮┝紐?
+                    self._execute_buy(code, stock_name, phase=cur_phase or 1, info=info, sub_strategy="1N")
+                    
+                    # 留ㅼ닔 ???щ’ 鍮꾩슦湲?
+                    del self.watch_candidates[code]
+
+            except Exception as e:
+                logger.warning("[%s] 愿李?醫낅ぉ ????됯? 以??먮윭: %s", code, e)
+        # ?꿎뼯???ш린源뚯? ?꿎뼯??
+
+        if self.phase1b and now.time() >= PHASE2_END:
+            for code in list(self.phase1b.watched):
+                if code not in self.holdings:
+                    self.phase1b.stop_watching(code)
+        # 蹂댁쑀醫낅ぉ 20MA 罹먯떆 媛깆떊 (泥?궛??
+        self._refresh_exit_ma()
+
+        self.check_timeouts()
+
+    # ========================================
+    # 20MA 罹먯떆 媛깆떊 (泥?궛 湲곗???
+    # ========================================
+    def _refresh_exit_ma(self):
+        """蹂댁쑀醫낅ぉ蹂꾨줈 20MA瑜?二쇨린 媛깆떊??罹먯떆. 遺꾨큺 遺議??ㅽ뙣 ??None ?좎?."""
+        now = self._now()
+        for code, pos in list(self.holdings.items()):
+            if code in self._sell_blocked:
+                continue
+            last = pos.get("ma20_updated")
+            if last and (now - last) < EXIT_MA_REFRESH:
+                continue
+            try:
+                candles = self.api.get_minute_candles(
+                    code, interval=1, count=EXIT_MA_FETCH_COUNT)
+                if candles and len(candles) >= EXIT_MA_PERIOD:
+                    ma20 = calc_ma(candles, EXIT_MA_PERIOD)
+                    if ma20:
+                        pos["ma20"] = ma20
+                        pos["ma20_updated"] = now
+                else:
+                    # 遺꾨큺 遺議??? ?μ쨷 1媛?踰꾧렇) -> 20MA 泥?궛 ?ㅽ궢, ?먯젅/?듭젅罹≪? 怨꾩냽 ?묐룞
+                    logger.debug("[%s] 20MA 媛깆떊 蹂대쪟: 遺꾨큺 %d媛?,
+                                 code, len(candles) if candles else 0)
+            except Exception as e:
+                logger.warning("[%s] 20MA 媛깆떊 ?ㅽ뙣: %s", code, e)
+
+    # ========================================
+    # Phase ?먮퀎
+    # ========================================
+    def get_current_phase(self) -> Optional[int]:
+        t = self._now().time()
+        if PHASE1_START <= t < PHASE1_END:
+            return 1
+        if PHASE2_START <= t < PHASE2_END:
+            return 2
+        if PHASE3_START <= t < PHASE3_END:
+            return 3
+        return None
+
+    def can_buy_more(self) -> bool:
+        return len(self.holdings) < MAX_HOLDINGS
+
+    def count_holdings_by_strategy(self, sub: str) -> int:
+        return sum(1 for h in self.holdings.values() if h.get("sub_strategy") == sub)
+
+    def can_buy_phase1a(self) -> bool:
+        return (self.can_buy_more()
+                and self.count_holdings_by_strategy("1A") < PHASE1A_MAX_SLOTS
+                and PHASE1_START <= self._now().time() < PHASE1_END)
+
+    def can_buy_phase1b(self) -> bool:
+        return (self.can_buy_more()
+                and self.count_holdings_by_strategy("1B") < PHASE1B_MAX_SLOTS
+                and PHASE1_START <= self._now().time() < PHASE2_END)
+
+    def can_buy_phase3(self) -> bool:
+        return (self.can_buy_more()
+                and self.count_holdings_by_strategy("3") < PHASE3_MAX_SLOTS
+                and PHASE3_START <= self._now().time() < PHASE3_END)
+
+    def can_buy_surge(self) -> bool:
+        return (self.can_buy_more()
+                and self.count_holdings_by_strategy("1S") < SURGE_MAX_SLOTS
+                and PHASE1_START <= self._now().time() < PHASE2_END)
+
+    # ========================================
+    # 荑⑤떎??/ 李⑤떒
+    # ========================================
+    def _is_rebuy_blocked(self, stock_code: str) -> tuple[bool, str]:
+        if stock_code in self._sell_blocked:
+            return True, "留ㅻ룄 李⑤떒 (?곴뎄?ㅽ뙣)"
+        if stock_code in self._sold_at:
+            elapsed = self._now() - self._sold_at[stock_code]
+            if elapsed < REBUY_COOLDOWN:
+                remaining = REBUY_COOLDOWN - elapsed
+                return True, f"荑⑤떎??(?붿뿬 {int(remaining.total_seconds())}珥?"
+        return False, ""
+
+    # ========================================
+    # 吏꾩엯
+    # ========================================
+    def on_condition_hit(self, stock_code: str, stock_name: str, is_surge: bool = False):
+        phase = self.get_current_phase()
+        if phase is None:
+            return
+        if stock_code in self.holdings or stock_code in self.pending:
+            return
+
+        blocked, reason = self._is_rebuy_blocked(stock_code)
+        if blocked:
+            logger.info("[%s] %s 留ㅼ닔 李⑤떒: %s", stock_code, stock_name, reason)
+            return
+
+        self._stock_names[stock_code] = stock_name
+
+        # ?? Phase 3 (10:41~): 泥닿껐媛뺣룄 ?⑥“利앷? 媛먯떆 ??
+        if phase == 3:
+            if not self.phase3:
+                return
+            if not self.can_buy_phase3():
+                logger.info("[%s] Phase 3 ?щ’ 遺議?- 媛먯떆 嫄대꼫?", stock_code)
+                return
+            if not self.phase3.is_watching(stock_code):
+                self.phase3.start_watching(stock_code)
+            return
+
+        try:
+            candles = self.api.get_minute_candles(stock_code, interval=1, count=15)
+            if not candles or len(candles) < VOLUME_LOOKBACK + 1:
+                logger.warning("[%s] 遺꾨큺 遺議?(%d媛?", stock_code,
+                               len(candles) if candles else 0)
+            else:
+               # ?? 湲됰벑(surge) 議곌굔: 09:00~10:40 ?쒓컙???곕씪 1S(?뚰뙆) ?먮뒗 ?뚮┝紐⑹쑝濡?遺꾧린 ??
+                if is_surge:
+                    # 9??30遺??댁쟾: ?먮옒?濡?怨쇨컧?섍쾶 利됱떆留ㅼ닔(1S) 吏꾩엯
+                    if self._now().time() < time(9, 30):
+                        ok, info = self.evaluate_surge(candles)
+                        self._record_watch_list(stock_code, stock_name, phase, info)
+                        if ok:
+                            if self.can_buy_surge():
+                                self._execute_buy(stock_code, stock_name, phase, info, sub_strategy="1S")
+                                return
+                            else:
+                                logger.info("[%s] 湲됰벑 議곌굔 OK but ?щ’ 遺議?, stock_code)
+                        else:
+                            logger.info("[%s] %s 湲됰벑 誘몄땐議? %s", stock_code, stock_name, info.get("reason"))
+                    
+                    # 9??30遺??댄썑: ?뚰뙆 ?좏샇吏留?異붽꺽留ㅼ닔 湲덉?, 5MA ?뚮┝紐?Phase1)?쇰줈 ?꾪솚
+                    else:
+                        logger.info("[%s] 9??30遺??댄썑 ?뚰뙆 ?좏샇 -> 5MA ?뚮┝紐⑹쑝濡??먮룞 ?꾪솚", stock_code)
+                        ok, info = self.evaluate_phase1(candles)
+                        self._record_watch_list(stock_code, stock_name, phase, info)
+                        if ok:
+                            if self.can_buy_phase1a():
+                                self._execute_buy(stock_code, stock_name, phase, info, sub_strategy="1N")
+                                return
+                            else:
+                                logger.info("[%s] ?꾪솚???뚮┝紐?議곌굔 OK but ?щ’ 遺議?, stock_code)
+                        else:
+                            logger.info("[%s] %s ?꾪솚???뚮┝紐?誘몄땐議? %s", stock_code, stock_name, info.get("reason"))
+                    else:
+                        # 9??30遺??댄썑: ?뚰뙆 ?좏샇媛 ?붾뜑?쇰룄 異붽꺽留ㅼ닔 湲덉?! ?뚮┝紐?Phase1) 怨꾩궛湲곕줈 ?먮룞 ?꾪솚!
+                        logger.info("[%s] 9??30遺??댄썑 ?뚰뙆 ?좏샇 -> ?뚮┝紐⑹쑝濡??먮룞 ?꾪솚", stock_code)
+                        ok, info = self.evaluate_phase1(candles)
+                        self._record_watch_list(stock_code, stock_name, phase, info)
+                        if ok:
+                            if self.can_buy_phase1a():
+                                self._execute_buy(stock_code, stock_name, phase, info, sub_strategy="1N")
+                                return
+                            else:
+                                logger.info("[%s] ?꾪솚???뚮┝紐?議곌굔 OK but ?щ’ 遺議?, stock_code)
+                        else:
+                            logger.info("[%s] %s ?꾪솚???뚮┝紐?誘몄땐議? %s",
+                                        stock_code, stock_name, info.get("reason"))
+                # ?? 鍮?湲됰벑 議곌굔: Phase1留?5MA ?됯? (Phase2 30MA 留ㅼ닔???쒓굅) ??
+                elif phase == 1:
+                    ok, info = self.evaluate_phase1(candles)
+                    self._record_watch_list(stock_code, stock_name, phase, info)
+                    if ok:
+                        if self.can_buy_phase1a():
+                            self._execute_buy(stock_code, stock_name, phase, info, sub_strategy="1A")
+                            return
+                        else:
+                            logger.info("[%s] Phase1A 議곌굔 OK but ?щ’ 遺議?, stock_code)
+                    else:
+                        logger.info("[%s] %s Phase1 誘몄땐議? %s",
+                                    stock_code, stock_name, info.get("reason"))
+
+            # ?? Phase1 ?덈룄?? 泥닿껐媛뺣룄(1B) 媛먯떆 ?쒖옉 (湲됰벑/鍮꾧툒??怨듯넻, 湲곗〈 ?좎?) ??
+            if phase == 1 and self.phase1b and not self.phase1b.is_watching(stock_code):
+                self.phase1b.start_watching(stock_code)
+                logger.info("[%s] Phase 1B 媛먯떆 ?쒖옉", stock_code)
+
+        except Exception as e:
+            logger.exception("[%s] on_condition_hit ?ㅽ뙣: %s", stock_code, e)
+            SystemEventRepository.log("STRATEGY_ERROR", f"{stock_code}: {e}", "ERROR")
+            _notify(f"?꾨왂 ?먮윭\n{stock_code}: {e}")
+
+    # ========================================
+    # ?ㅼ떆媛?肄쒕갚
+    # ========================================
+    def on_trade(self, parsed_trade: dict, now: float = None):
+        code = parsed_trade.get("stock_code")
+        if not code:
+            return
+
+        if code in self.holdings:
+            price = parsed_trade.get("price")
+            if price:
+                self.on_price_update(code, price)
+            return
+
+        if self.phase1b and self.phase1b.is_watching(code):
+            state = self.phase1b.on_trade(parsed_trade, now=now)
+            if state == ChemulState.READY_TO_BUY:
+                self._try_phase1b_buy(code, now)
+
+        if self.phase3 and self.phase3.is_watching(code):
+            from core.strategy.phase3_controller import Phase3State
+            new_state = self.phase3.on_trade(parsed_trade)
+            if new_state == Phase3State.READY_TO_BUY:
+                self._try_phase3_buy(code)
+
+    def on_orderbook(self, parsed_orderbook: dict, now: float = None):
+        code = parsed_orderbook.get("stock_code")
+        if not code:
+            return
+        if self.phase1b and self.phase1b.is_watching(code):
+            state = self.phase1b.on_orderbook(parsed_orderbook, now=now)
+            if state == ChemulState.READY_TO_BUY:
+                self._try_phase1b_buy(code, now)
+
+    def _try_phase1b_buy(self, stock_code: str, now: float = None):
+        if not self.can_buy_phase1b():
+            logger.info("[%s] Phase 1B READY but ?щ’ 遺議?, stock_code)
+            return
+        if stock_code in self.holdings or stock_code in self.pending:
+            return
+        blocked, reason = self._is_rebuy_blocked(stock_code)
+        if blocked:
+            logger.info("[%s] Phase 1B 留ㅼ닔 李⑤떒: %s", stock_code, reason)
+            return
+
+        current_price = self.phase1b.trade_flow.get_latest_price(stock_code)
+        if not current_price:
+            logger.warning("[%s] Phase 1B 留ㅼ닔 ?쒕룄 but 媛寃??놁쓬", stock_code)
+            return
+
+        stock_name = self._stock_names.get(stock_code, stock_code)
+        info = {"current_price": current_price, "volume_ratio": 0.0}
+        self._execute_buy(stock_code, stock_name, phase=1, info=info, sub_strategy="1B")
+        self.phase1b.stop_watching(stock_code)
+
+    def _try_phase3_buy(self, stock_code: str):
+        if not self.can_buy_phase3():
+            logger.info("[%s] Phase 3 READY but ?щ’ 遺議?, stock_code)
+            self.phase3.stop_watching(stock_code)
+            return
+        if stock_code in self.holdings or stock_code in self.pending:
+            return
+        blocked, reason = self._is_rebuy_blocked(stock_code)
+        if blocked:
+            logger.info("[%s] Phase 3 留ㅼ닔 李⑤떒: %s", stock_code, reason)
+            self.phase3.stop_watching(stock_code)
+            return
+
+        try:
+            candles = self.api.get_minute_candles(stock_code, interval=1, count=1)
+            current_price = candles[0]["close"] if candles else 0
+        except Exception:
+            current_price = 0
+
+        if not current_price:
+            logger.warning("[%s] Phase 3 留ㅼ닔 ?쒕룄 but 媛寃??놁쓬", stock_code)
+            self.phase3.stop_watching(stock_code)
+            return
+
+        stock_name = self._stock_names.get(stock_code, stock_code)
+        info = {"current_price": current_price, "volume_ratio": 0.0}
+        self._execute_buy(stock_code, stock_name, phase=3, info=info, sub_strategy="3")
+        self.phase3.stop_watching(stock_code)
+
+    # ========================================
+    # 吏꾩엯 ?됯? (?먯닔 湲곕컲 ??scoring.py ?꾩엫)
+    #   諛섑솚 怨꾩빟/?똧nfo ?ㅻ뒗 湲곗〈怨??숈씪. threshold_ratio濡?媛뺣룄 議곗젅.
+    # ========================================
+    def evaluate_phase1(self, candles: list[dict]) -> tuple[bool, dict]:
+        code = candles[0].get("stock_code") or list(self.watch_candidates.keys())[0]
+        current_strength = self.phase1b.trade_flow.compute_strength(code, window_sec=10)
+        return score_phase1(candles, self._volume_ratio(candles), current_strength, self.score_cfg)
+
+    def evaluate_surge(self, candles: list[dict]) -> tuple[bool, dict]:
+        code = candles[0].get("stock_code") or list(self.watch_candidates.keys())[0]
+        current_strength = self.phase1b.trade_flow.compute_strength(code, window_sec=10)
+        return score_surge(candles, self._volume_ratio(candles), current_strength, self.score_cfg)
+
+    def evaluate_phase2(self, candles: list[dict]) -> tuple[bool, dict]:
+        code = candles[0].get("stock_code") or list(self.watch_candidates.keys())[0]
+        current_strength = self.phase1b.trade_flow.compute_strength(code, window_sec=10)
+        return score_phase2(candles, self._volume_ratio(candles), PHASE2_MA_PERIOD, current_strength, self.score_cfg)
+
+    @staticmethod
+    def _volume_ratio(candles: list[dict]) -> float:
+        cur_vol = candles[0]["volume"]
+        prev = candles[1:1 + VOLUME_LOOKBACK]
+        if not prev:
+            return 0.0
+        avg = sum(c["volume"] for c in prev) / len(prev)
+        return cur_vol / avg if avg > 0 else 0.0
+
+    # ?쇄뼹???ш린??泥?踰덉㎏ 蹂듭궗蹂?evaluate_morning_pullback ?꾩껜)??遺숈뿬?ｌ쑝?몄슂 ?쇄뼹??
+    # ========================================
+    # ?ㅼ쟾??湲됰벑 ??泥??뚮┝紐??ㅻ굹?댄띁 留ㅼ닔 ???(N??諛섎벑)
+    # ========================================
+    def evaluate_morning_pullback(self, candles: list[dict]) -> tuple[bool, dict]:
+        # ... (?댁쟾 ?듬????⑥닔 ?댁슜) ...
+    # ?꿎뼯???ш린源뚯? ?꿎뼯??
+
+    # ========================================
+    # ?쇻끉????쎈뻬 (留ㅼ닔 ?ㅽ뻾 ?뚰듃)
+    # ========================================
+    def _resolve_position_amount(self, stock_code: str, sub_strategy: str) -> tuple[int, Optional[dict]]:
+        # ...
+
+    # ========================================
+    # 留ㅼ닔 ?ㅽ뻾
+    # ========================================
+    def _resolve_position_amount(self, stock_code: str, sub_strategy: str) -> tuple[int, Optional[dict]]:
+        if self.optimizer is None:
+            return POSITION_AMOUNT, None
+        try:
+            opt_info = self.optimizer.calculate_position_amount(stock_code, sub_strategy)
+            amount = int(opt_info.get("amount", 0))
+            if amount <= 0:
+                return POSITION_AMOUNT, None
+            return amount, opt_info
+        except Exception:
+            logger.exception(f"[{stock_code}] 鍮꾩쨷 怨꾩궛 ?ㅽ뙣, fallback")
+            return POSITION_AMOUNT, None
+
+    def _execute_buy(self, stock_code, stock_name, phase, info, sub_strategy):
+        current_price = info["current_price"]
+
+        position_amount, opt_info = self._resolve_position_amount(stock_code, sub_strategy)
+        quantity = int(position_amount // current_price)
+        if quantity < 1:
+            logger.warning("[%s] %s ?섎웾 0 -> skip", stock_code, stock_name)
+            return
+
+        if opt_info:
+            logger.info("[%s] ?숈쟻 鍮꾩쨷 %.2fx -> %s??, stock_code,
+                        opt_info.get("final_weight", 1.0), f"{position_amount:,}")
+
+        self.pending.add(stock_code)
+        try:
+            ma_val = info.get("ma5") or 0
+            if sub_strategy == "1B":
+                entry_reason = f"Phase 1B 泥닿껐媛뺣룄 (?꾩옱媛 {current_price:,})"
+            elif sub_strategy == "3":
+                entry_reason = f"Phase 3 ?⑥“利앷? 1遺꾩쑀吏 (?꾩옱媛 {current_price:,})"
+            elif sub_strategy == "1S":
+                entry_reason = (f"湲됰벑 吏꾩엯 | ?쒖큹媛+{info.get('surge_rate', 0)*100:.2f}% "
+                                f"| vol x{info.get('volume_ratio', 0):.2f} (?꾩옱媛 {current_price:,})")
+            else:
+                # 1A=5MA, 2=30MA (PHASE2_MA_PERIOD)
+                ma_label = "5" if sub_strategy == "1A" else str(PHASE2_MA_PERIOD)
+                entry_reason = (f"Phase{sub_strategy} | "
+                                f"MA{ma_label}={ma_val:,.0f} "
+                                f"| vol x{info.get('volume_ratio', 0):.2f}")
+                if sub_strategy == "1A":
+                    entry_reason += f" | ?쒖큹媛+{info.get('surge_rate', 0)*100:.2f}%"
+            if opt_info:
+                entry_reason += f" | 鍮꾩쨷x{opt_info.get('final_weight', 1.0):.2f}"
+
+            result = self.order_manager.buy(stock_code, quantity, price=0)
+            if not result or not result.get("success"):
+                err = (result or {}).get("error", "unknown")
+                logger.error("[%s] 留ㅼ닔 ?ㅽ뙣: %s", stock_code, err)
+                SystemEventRepository.log("ORDER_FAIL", f"BUY {stock_code}: {err}", "ERROR")
+                _notify(f"留ㅼ닔 ?ㅽ뙣\n{stock_code} {stock_name}\n?ъ쑀: {err}")
+                return
+
+            trade_id = TradeRepository.insert_buy(
+                stock_code=stock_code, stock_name=stock_name,
+                buy_price=current_price, buy_quantity=quantity,
+                strategy_phase=phase, sub_strategy=sub_strategy,
+                entry_reason=entry_reason,
+            )
+
+            self.holdings[stock_code] = {
+                "trade_id": trade_id,
+                "buy_price": current_price,
+                "buy_quantity": quantity,
+                "buy_time": self._now(),
+                "stock_name": stock_name,
+                "strategy_phase": phase,
+                "sub_strategy": sub_strategy,
+                "highest_price": current_price,
+                "ma20": None,
+                "ma20_updated": None,
+                "position_weight": (opt_info or {}).get("final_weight", 1.0),
+                "warmup_until": self._now() + BUY_WARMUP,
+            }
+            self._sold_at.pop(stock_code, None)
+            self._buy_success_count += 1
+
+            logger.info("BUY [%s] %s %d二?@ %s??(%s) = %s??| ?뚮컢??%ds",
+                        stock_code, stock_name, quantity, f"{current_price:,}",
+                        sub_strategy, f"{current_price * quantity:,}",
+                        int(BUY_WARMUP.total_seconds()))
+            SystemEventRepository.log("BUY",
+                f"{stock_code} {stock_name} {quantity}二?@ {current_price:,}??[{sub_strategy}]", "INFO")
+            weight_str = f" (鍮꾩쨷 {opt_info['final_weight']:.2f}x)" if opt_info else ""
+            _notify(f"留ㅼ닔 泥닿껐 [{sub_strategy}]\n醫낅ぉ: {stock_name} ({stock_code})\n"
+                    f"?섎웾: {quantity}二?@ {current_price:,}??weight_str}\n"
+                    f"湲덉븸: {current_price * quantity:,}??n?꾨왂: {entry_reason}")
+            self._mark_watch_bought(stock_code)
+        finally:
+            self.pending.discard(stock_code)
+
+    # ========================================
+    # ?뚯튂由ъ뒪??
+    # ========================================
+    def _record_watch_list(self, stock_code, stock_name, phase, info):
+        if stock_code in self.watch_list_today:
+            return
+        try:
+            extra = {}
+            for k in ("ma5", "current_price", "volume_ratio"):
+                if k in info:
+                    extra[k] = info[k]
+            if "surge_rate" in info:
+                extra["surge_rate"] = info["surge_rate"] * 100
+            if "reason" in info:
+                extra["reason_not_bought"] = info["reason"]
+            WatchListRepository.add(stock_code=stock_code, stock_name=stock_name, phase=phase, **extra)
+            self.watch_list_today.add(stock_code)
+        except Exception as e:
+            logger.warning("[%s] ?뚯튂由ъ뒪???ㅽ뙣: %s", stock_code, e)
+
+    def _mark_watch_bought(self, stock_code: str):
+        try:
+            for w in WatchListRepository.find_by_date(self._now().date()):
+                if w["stock_code"] == stock_code and not w.get("is_bought"):
+                    WatchListRepository.mark_bought(w["id"])
+                    break
+        except Exception as e:
+            logger.warning("[%s] mark_bought ?ㅽ뙣: %s", stock_code, e)
+
+    # ========================================
+    # 泥?궛 (5/22 媛쒗렪: ?먯젅 -2.5% / ?듭젅罹?+2.5% / 20MA ?댄깉 / ?쒓컙?뺣━)
+    # ========================================
+    def on_price_update(self, stock_code: str, current_price: float):
+        pos = self.holdings.get(stock_code)
+        if not pos or not current_price:
+            return
+        if stock_code in self._sell_blocked:
+            return
+
+        buy_price = pos["buy_price"]
+        if not buy_price:
+            return
+
+        if current_price > pos["highest_price"]:
+            pos["highest_price"] = current_price
+
+        warmup_until = pos.get("warmup_until")
+        if warmup_until and self._now() < warmup_until:
+            return
+
+        gross_rate = self._gross_rate(buy_price, current_price)   # 媛寃?湲곗?
+        net_rate   = gross_rate - ROUND_TRIP_COST                 # ?쒖씡 湲곗?
+
+        exit_reason = None
+
+        # 1) ?먯젅: 媛寃?湲곗? -2.5%
+        if gross_rate <= STOP_LOSS_RATE:
+            exit_reason = f"?먯젅 媛寃?gross_rate*100:.2f}% (??{net_rate*100:.2f}%)"
+
+        # 2) ?듭젅 罹? ?쒖씡 湲곗? +2.5%
+        elif net_rate >= TAKE_PROFIT_CAP:
+            exit_reason = f"?듭젅 罹???{net_rate*100:.2f}% (媛寃?+{gross_rate*100:.2f}%)"
+
+        # 3) 20MA ?댄깉: ?꾩옱媛媛 20MA瑜?0.3% ?댁긽 ?섑쉶 (?몃젅?쇰쭅 ?泥?
+        #    20MA 罹먯떆媛 ?덉쓣 ?뚮쭔 ?묐룞. 遺꾨큺 遺議깆쑝濡?罹먯떆 None?대㈃ ?ㅽ궢.
+        else:
+            ma20 = pos.get("ma20")
+            if ma20:
+                break_line = ma20 * (1 - EXIT_MA_BREAK_PCT)
+                if current_price < break_line:
+                    below_pct = (current_price - ma20) / ma20 * 100
+                    exit_reason = (f"20MA ?댄깉 ({below_pct:+.2f}%, "
+                                   f"??{net_rate*100:+.2f}%)")
+
+        # 4) ?쒓컙?뺣━ 30遺?
+        if exit_reason is None:
+            if self._now() - pos["buy_time"] >= HOLDING_TIMEOUT:
+                exit_reason = f"?쒓컙?뺣━ 30遺?(??{net_rate*100:+.2f}%)"
+
+        if exit_reason:
+            self._execute_sell(stock_code, current_price, exit_reason)
+
+    def _execute_sell(self, stock_code, current_price, exit_reason):
+        pos = self.holdings.get(stock_code)
+        if not pos or stock_code in self.pending:
+            return
+        if stock_code in self._sell_blocked:
+            return
+
+        logger.info("泥?궛 ?몃━嫄?[%s] %s | ?ъ쑀: %s | ?꾩옱媛 %s",
+                    stock_code, pos.get("stock_name", ""), exit_reason, f"{current_price:,}")
+
+        self.pending.add(stock_code)
+        try:
+            quantity = pos["buy_quantity"]
+            result = self.order_manager.sell(stock_code, quantity, price=0)
+
+            if not result or not result.get("success"):
+                err = (result or {}).get("error", "unknown")
+                cnt = self._sell_fail_count.get(stock_code, 0) + 1
+                self._sell_fail_count[stock_code] = cnt
+
+                logger.error("[%s] 留ㅻ룄 ?ㅽ뙣 (%d/%d): %s", stock_code, cnt, MAX_SELL_FAIL, err)
+                SystemEventRepository.log("ORDER_FAIL",
+                    f"SELL {stock_code}: {err} ({cnt}/{MAX_SELL_FAIL})", "ERROR")
+
+                if cnt >= MAX_SELL_FAIL:
+                    self._sell_blocked.add(stock_code)
+                    stock_name = pos.get("stock_name", stock_code)
+                    self.holdings.pop(stock_code, None)
+                    logger.warning("[%s] %s 留ㅻ룄 %d???ㅽ뙣 -> 李⑤떒", stock_code, stock_name, cnt)
+                    SystemEventRepository.log("SELL_BLOCKED",
+                        f"{stock_code} 留ㅻ룄 {cnt}???ㅽ뙣 -> 李⑤떒", "WARNING")
+                    _notify(f"留ㅻ룄 李⑤떒\n{stock_name} ({stock_code})\n"
+                            f"留ㅻ룄 {cnt}???ㅽ뙣 -> ?섎룞 ?뺤씤 ?꾩슂")
+                else:
+                    _notify(f"留ㅻ룄 ?ㅽ뙣 ({cnt}/{MAX_SELL_FAIL})\n"
+                            f"{pos.get('stock_name', stock_code)} ({stock_code})\n?ъ쑀: {err}")
+                return
+
+            self._sell_fail_count.pop(stock_code, None)
+            self._sold_at[stock_code] = self._now()
+
+            TradeRepository.update_sell(
+                trade_id=pos["trade_id"], sell_price=current_price,
+                sell_quantity=quantity, exit_reason=exit_reason,
+            )
+
+            # ?쒖넀??(?섏닔猷??멸툑 李④컧)
+            gross_profit = (current_price - pos["buy_price"]) * quantity
+            net_profit = self._net_profit(pos["buy_price"], current_price, quantity)
+            gross_rate = self._gross_rate(pos["buy_price"], current_price) * 100
+            net_rate = self._net_rate(pos["buy_price"], current_price) * 100
+            stock_name = pos["stock_name"]
+            sub = pos.get("sub_strategy", "?")
+            del self.holdings[stock_code]
+
+            logger.info("SELL [%s] %s %d二?@ %s??-> %s | ?쒖넀??%s??(??%.2f%%, 媛寃?%.2f%%) [%s]",
+                        stock_code, stock_name, quantity, f"{current_price:,}", exit_reason,
+                        f"{net_profit:+,.0f}", net_rate, gross_rate, sub)
+            SystemEventRepository.log("SELL",
+                f"{stock_code} {stock_name} {quantity}二?@ {current_price:,}??[{sub}] | "
+                f"{exit_reason} | ?쒖넀??{net_profit:+,.0f}??, "INFO")
+            emoji = "+" if net_profit > 0 else "-"
+            _notify(f"留ㅻ룄 泥닿껐 [{sub}] ({emoji})\n醫낅ぉ: {stock_name} ({stock_code})\n"
+                    f"?섎웾: {quantity}二?@ {current_price:,}??n"
+                    f"?쒖넀?? {net_profit:+,.0f}??(??{net_rate:+.2f}%, 媛寃?{gross_rate:+.2f}%)\n"
+                    f"?ъ쑀: {exit_reason}\n?щℓ??李⑤떒: {int(REBUY_COOLDOWN.total_seconds()/60)}遺?)
+        finally:
+            self.pending.discard(stock_code)
+
+    # ========================================
+    # ??꾩븘??
+    # ========================================
+    def check_timeouts(self):
+        now = self._now()
+        for code in list(self.holdings.keys()):
+            pos = self.holdings[code]
+            warmup_until = pos.get("warmup_until")
+            if warmup_until and now < warmup_until:
+                continue
+            if now - pos["buy_time"] < HOLDING_TIMEOUT:
+                continue
+            if code in self._sell_blocked:
+                continue
+            try:
+                candles = self.api.get_minute_candles(code, interval=1, count=1)
+                if candles:
+                    self._execute_sell(code, candles[0]["close"], "?쒓컙?뺣━ 30遺?)
+            except Exception as e:
+                logger.exception("[%s] ??꾩븘??泥?궛 ?ㅽ뙣: %s", code, e)
+
+
+=== FILE: C:\Users\rober\OneDrive\문서\vscode\AutoTrader_Project\core\strategy\chemul_evaluator.py ===
+
+"""Phase 1B 泥닿껐媛뺣룄 ?꾨왂 FSM.
+
+5?④퀎 ?쒖감 議곌굔 異붿쟻:
+  1. 1遺꾨큺 ?뚮┝ (-1.5%) ??WAITING_WALL
+  2. 留ㅻ룄踰??깆옣 (WallState.DETECTED) ??WAITING_SHRINK_STRENGTH
+  3. 留ㅻ룄踰?異뺤냼 (SHRINKING) + 泥닿껐媛뺣룄 湲됱긽????WAITING_DISAPPEAR
+  4. 留ㅻ룄踰??뚯떎 (DISAPPEARED) ??READY_TO_BUY
+  5. 留ㅼ닔 ??reset() ?먮뒗 ??꾩븘????WAITING_PULLBACK 蹂듦?
+
+?뚮씪誘명꽣??placeholder (?ㅻ뜲?댄꽣 諛쏄퀬 ?쒕떇 ?덉젙).
+"""
+import time
+from enum import Enum
+from typing import Optional
+
+from core.strategy.orderbook import OrderbookTracker
+from core.strategy.trade_flow import TradeFlowTracker
+from core.strategy.wall_detector import WallDetector, WallState
+
+
+class ChemulState(str, Enum):
+    WAITING_PULLBACK = "waiting_pullback"
+    WAITING_WALL = "waiting_wall"
+    WAITING_SHRINK_STRENGTH = "waiting_shrink_strength"
+    WAITING_DISAPPEAR = "waiting_disappear"
+    READY_TO_BUY = "ready_to_buy"
+
+
+class ChemulEvaluator:
+    """泥닿껐媛뺣룄 ?꾨왂 ??醫낅ぉ蹂?5?④퀎 FSM."""
+
+    def __init__(
+        self,
+        trade_flow: TradeFlowTracker,
+        wall_detector: WallDetector,
+        orderbook: OrderbookTracker,
+        # ?뚮씪誘명꽣 (TBD: ?ㅻ뜲?댄꽣濡??쒕떇)
+        pullback_pct: float = -1.5,          # 1遺꾧컙 -1.5% ?댄븯硫??뚮┝
+        pullback_window_sec: float = 60,
+        strength_short_window: float = 10,
+        strength_long_window: float = 30,
+        strength_min: float = 180,            # ?④린 媛以?媛뺣룄 ?꾧퀎媛?
+        state_timeout_sec: float = 60,        # 媛??곹깭 理쒕? 泥대쪟 ?쒓컙
+    ):
+        self.tf = trade_flow
+        self.wd = wall_detector
+        self.ob = orderbook
+
+        self.pullback_pct = pullback_pct
+        self.pullback_window_sec = pullback_window_sec
+        self.strength_short_window = strength_short_window
+        self.strength_long_window = strength_long_window
+        self.strength_min = strength_min
+        self.state_timeout_sec = state_timeout_sec
+
+        # {code: {state, ts_entered_state}}
+        self._state: dict[str, dict] = {}
+
+    def evaluate(self, stock_code: str, now: float = None) -> ChemulState:
+        """留??대깽??泥닿껐/?멸?)留덈떎 ?몄텧. 媛?ν븯硫??щ윭 ?곹깭 ?곗냽 ?꾩씠."""
+        now = now if now is not None else time.time()
+
+        s = self._state.get(stock_code)
+        if s is None:
+            s = {"state": ChemulState.WAITING_PULLBACK, "ts": now}
+            self._state[stock_code] = s
+
+        # ??꾩븘??泥댄겕 (PULLBACK / READY_TO_BUY???쒖쇅)
+        if s["state"] not in (ChemulState.WAITING_PULLBACK, ChemulState.READY_TO_BUY):
+            if now - s["ts"] > self.state_timeout_sec:
+                s["state"] = ChemulState.WAITING_PULLBACK
+                s["ts"] = now
+
+        # 媛?ν븳 留뚰겮 ?곗냽 ?꾩씠
+        while True:
+            prev = s["state"]
+            self._try_transition(stock_code, now)
+            if s["state"] == prev:
+                break
+
+        return s["state"]
+
+    def _try_transition(self, code: str, now: float):
+        s = self._state[code]
+        st = s["state"]
+
+        if st == ChemulState.WAITING_PULLBACK:
+            pct = self.tf.get_price_change_pct(
+                code, self.pullback_window_sec, now
+            )
+            if pct is not None and pct <= self.pullback_pct:
+                self._advance(code, ChemulState.WAITING_WALL, now)
+
+        elif st == ChemulState.WAITING_WALL:
+            ws = self.wd.get_state(code)
+            # ?대? SHRINKING/DISAPPEARED?쇰룄 DETECTED瑜?嫄곗퀜??嫄곕땲 吏꾪뻾
+            if ws in (WallState.DETECTED, WallState.SHRINKING, WallState.DISAPPEARED):
+                self._advance(code, ChemulState.WAITING_SHRINK_STRENGTH, now)
+
+        elif st == ChemulState.WAITING_SHRINK_STRENGTH:
+            ws = self.wd.get_state(code)
+            if ws in (WallState.SHRINKING, WallState.DISAPPEARED):
+                if self.tf.is_strength_rising(
+                    code,
+                    short_window=self.strength_short_window,
+                    long_window=self.strength_long_window,
+                    now=now,
+                    min_short_strength=self.strength_min,
+                ):
+                    self._advance(code, ChemulState.WAITING_DISAPPEAR, now)
+
+        elif st == ChemulState.WAITING_DISAPPEAR:
+            if self.wd.get_state(code) == WallState.DISAPPEARED:
+                self._advance(code, ChemulState.READY_TO_BUY, now)
+
+    def _advance(self, code: str, new_state: ChemulState, now: float):
+        self._state[code]["state"] = new_state
+        self._state[code]["ts"] = now
+
+    def get_state(self, stock_code: str) -> ChemulState:
+        s = self._state.get(stock_code)
+        return s["state"] if s else ChemulState.WAITING_PULLBACK
+
+    def get_info(self, stock_code: str) -> Optional[dict]:
+        return self._state.get(stock_code)
+
+    def reset(self, stock_code: str):
+        """留ㅼ닔 ?깃났 ???먮뒗 媛뺤젣 由ъ뀑."""
+        self._state.pop(stock_code, None)
+
+
+=== FILE: C:\Users\rober\OneDrive\문서\vscode\AutoTrader_Project\core\strategy\indicators.py ===
+
+"""
+湲곗닠??吏??怨꾩궛 紐⑤뱢
+?????????????????????????????????????
+?대룞?됯퇏??MA), MA ?곗튂 ?먯젙 ??
+蹂몄씤 ?꾨왂???듭떖 吏??怨꾩궛 ?⑥닔??
+"""
+
+
+def calc_ma(candles: list[dict], period: int) -> float:
+    """
+    ?대룞?됯퇏??(Simple Moving Average) 怨꾩궛.
+    
+    Args:
+        candles: 遺꾨큺 由ъ뒪??(?쒓컙 ??닚, [0]??理쒖떊).
+                 媛???ぉ? {'close': int, ...} ?뺥깭?ъ빞 ??
+        period: 湲곌컙 (?? 5, 20, 60, 120).
+    
+    Returns:
+        吏곸쟾 period媛?遊됱쓽 醫낃? ?됯퇏.
+        遊됱씠 遺議깊븯硫?0.
+    
+    Examples:
+        >>> candles = [{'close': 100}, {'close': 102}, {'close': 98},
+        ...            {'close': 105}, {'close': 103}]
+        >>> calc_ma(candles, 5)
+        101.6
+    """
+    if len(candles) < period:
+        return 0.0
+    closes = [c["close"] for c in candles[:period]]
+    return sum(closes) / period
+
+
+def is_ma_touch(price: int, ma: float, tolerance_pct: float = 0.3) -> bool:
+    """
+    ?꾩옱媛媛 ?대룞?됯퇏?좎뿉 '?곗튂'?덈뒗吏 ?먯젙.
+    
+    ?곗튂 ?뺤쓽: ?꾩옱媛媛 MA??짹tolerance_pct% ?대궡.
+    
+    Args:
+        price: ?꾩옱媛.
+        ma: ?대룞?됯퇏媛?
+        tolerance_pct: ?덉슜 踰붿쐞 (%). 0.3?대㈃ 짹0.3%.
+    
+    Returns:
+        True硫??곗튂.
+    
+    Examples:
+        >>> is_ma_touch(100, 100.0, 0.3)   # ?뺥솗???곗튂
+        True
+        >>> is_ma_touch(100, 100.2, 0.3)   # +0.2% 李⑥씠 ???곗튂
+        True
+        >>> is_ma_touch(100, 100.5, 0.3)   # +0.5% 李⑥씠 ??誘명꽣移?
+        False
+    """
+    if ma == 0:
+        return False
+    diff_pct = abs(price - ma) / ma * 100
+    return diff_pct <= tolerance_pct
+
+
+def is_volume_breakout(
+    candles: list[dict],
+    multiplier: float = 1.5,
+    avg_window: int = 5,
+) -> bool:
+    """
+    理쒓렐 遊됱쓽 嫄곕옒?됱씠 吏곸쟾 ?됯퇏??multiplier諛??댁긽?몄? ?먯젙.
+    
+    Args:
+        candles: 遺꾨큺 由ъ뒪??(?쒓컙 ??닚, [0]??理쒖떊).
+        multiplier: 諛곗닔 (1.5?대㈃ ?됯퇏??1.5諛??댁긽).
+        avg_window: ?됯퇏 怨꾩궛??遊?媛쒖닔 (5?대㈃ [1:6] ?ъ슜).
+    
+    Returns:
+        True硫?嫄곕옒????쬆.
+    
+    Examples:
+        >>> candles = [{'volume': 1000}, {'volume': 500}, {'volume': 600},
+        ...            {'volume': 550}, {'volume': 450}, {'volume': 500}]
+        >>> is_volume_breakout(candles, 1.5)   # 1000 vs ?됯퇏 520
+        True
+    """
+    if len(candles) < avg_window + 1:
+        return False
+    
+    latest_vol = candles[0]["volume"]
+    prev_volumes = [c["volume"] for c in candles[1:1 + avg_window]]
+    
+    if not prev_volumes:
+        return False
+    
+    avg_vol = sum(prev_volumes) / len(prev_volumes)
+    if avg_vol == 0:
+        return False
+    
+    return latest_vol >= avg_vol * multiplier
+
+
+def get_volume_ratio(
+    candles: list[dict],
+    avg_window: int = 5,
+) -> float:
+    """
+    理쒓렐 遊?嫄곕옒??/ 吏곸쟾 ?됯퇏 嫄곕옒??鍮꾩쑉.
+    
+    is_volume_breakout()??吏꾨떒/濡쒓렇??踰꾩쟾.
+    
+    Returns:
+        鍮꾩쑉 (?? 2.5 = ?됯퇏??2.5諛?. ?곗씠??遺議깊븯硫?0.
+    """
+    if len(candles) < avg_window + 1:
+        return 0.0
+    
+    latest_vol = candles[0]["volume"]
+    prev_volumes = [c["volume"] for c in candles[1:1 + avg_window]]
+    
+    if not prev_volumes:
+        return 0.0
+    
+    avg_vol = sum(prev_volumes) / len(prev_volumes)
+    if avg_vol == 0:
+        return 0.0
+    
+    return latest_vol / avg_vol
+
+
+def is_bullish_candle(candle: dict) -> bool:
+    """
+    ?묐큺(?곸듅 遊? ?щ?.
+    
+    Args:
+        candle: 遊?dict, {'open': int, 'close': int, ...}.
+    
+    Returns:
+        醫낃? > ?쒓?硫?True.
+    """
+    return candle["close"] > candle["open"]
+
+
+def is_bearish_candle(candle: dict) -> bool:
+    """?뚮큺 ?щ? (李멸퀬??"""
+    return candle["close"] < candle["open"]
+
+
+def get_today_first_candle(candles: list[dict], target_date: str) -> dict | None:
+    """
+    ?뱀씪 泥?1遺꾨큺 (=?쒖큹媛 遊? 李얘린.
+    
+    Args:
+        candles: 遺꾨큺 由ъ뒪??(?쒓컙 ??닚).
+        target_date: YYYYMMDD.
+    
+    Returns:
+        ?ㅻ뒛 09:01遊?dict (?먮뒗 媛???대Ⅸ ?ㅻ뒛 遊?.
+        ?놁쑝硫?None.
+    """
+    today_candles = [c for c in candles if c["time_str"].startswith(target_date)]
+    if not today_candles:
+        return None
+    
+    # ?쒓컙 ??닚?대땲 留덉?留됱씠 媛???대Ⅸ 遊?
+    return today_candles[-1]
+
+
+def calc_rise_pct_from_open(current: int, today_open: int) -> float:
+    """
+    ?쒖큹媛 ?鍮??곸듅瑜?(%).
+    
+    Args:
+        current: ?꾩옱媛.
+        today_open: ?ㅻ뒛 ?쒖큹媛.
+    
+    Returns:
+        ?곸듅瑜?(?? 5.3 = +5.3%). today_open=0?대㈃ 0.0.
+    """
+    if today_open == 0:
+        return 0.0
+    return (current - today_open) / today_open * 100
+
+
+=== FILE: C:\Users\rober\OneDrive\문서\vscode\AutoTrader_Project\core\strategy\orderbook.py ===
+
+"""?ㅼ떆媛??멸?李??ㅻ깄???몃옒而?
+
+KiwoomWS??on_orderbook 肄쒕갚?먯꽌 update() ?몄텧.
+WallDetector媛 ?닿구 李몄“?댁꽌 留ㅻ룄踰?異붿쟻.
+"""
+import time
+from collections import deque
+from typing import Optional
+
+
+class OrderbookTracker:
+    """醫낅ぉ蹂??멸?李?理쒖떊 ?곹깭 + ?붾웾 ?덉뒪?좊━."""
+
+    def __init__(self, history_window_sec: float = 60):
+        # ?꾩옱 ?ㅻ깄?? {code: snapshot_dict}
+        self.snapshots: dict[str, dict] = {}
+        # ?멸? ?붾웾 ?덉뒪?좊━: {code: deque[(ts, ask_volumes_list, bid_volumes_list)]}
+        self.history: dict[str, deque] = {}
+        self.history_window_sec = history_window_sec
+
+    def update(self, stock_code: str, snapshot: dict, now: float = None):
+        """0D 硫붿떆吏 ?ㅼ뼱???뚮쭏???몄텧."""
+        now = now if now is not None else time.time()
+        self.snapshots[stock_code] = snapshot
+
+        h = self.history.setdefault(stock_code, deque())
+        h.append((
+            now,
+            list(snapshot.get("ask_volumes") or []),
+            list(snapshot.get("bid_volumes") or []),
+        ))
+        # ?ㅻ옒???곗씠???쒓굅
+        cutoff = now - self.history_window_sec
+        while h and h[0][0] < cutoff:
+            h.popleft()
+
+    def get_snapshot(self, stock_code: str) -> Optional[dict]:
+        return self.snapshots.get(stock_code)
+
+    def get_ask_volume(self, stock_code: str, level: int = 1) -> int:
+        """?꾩옱 留ㅻ룄 N?멸? ?붾웾 (level=1~10)."""
+        snap = self.snapshots.get(stock_code)
+        if not snap:
+            return 0
+        vols = snap.get("ask_volumes") or []
+        idx = level - 1
+        return vols[idx] if 0 <= idx < len(vols) else 0
+
+    def get_bid_volume(self, stock_code: str, level: int = 1) -> int:
+        snap = self.snapshots.get(stock_code)
+        if not snap:
+            return 0
+        vols = snap.get("bid_volumes") or []
+        idx = level - 1
+        return vols[idx] if 0 <= idx < len(vols) else 0
+
+    def get_ask_volume_avg(
+        self,
+        stock_code: str,
+        level: int = 1,
+        window_sec: float = None,
+        exclude_latest: bool = False,
+    ) -> float:
+        """留ㅻ룄 N?멸???吏곸쟾 window_sec ?숈븞 ?됯퇏 ?붾웾.
+
+        window_sec=None?대㈃ ?꾩껜 history ?ъ슜.
+        exclude_latest=True硫?媛??理쒓렐 ?ㅻ깄???쒖쇅 (踰?媛먯? baseline ?곗텧??.
+        """
+        h = self.history.get(stock_code)
+        if not h:
+            return 0.0
+        if window_sec is not None:
+            now = h[-1][0]
+            cutoff = now - window_sec
+            samples = [ask for ts, ask, _ in h if ts >= cutoff]
+        else:
+            samples = [ask for _, ask, _ in h]
+
+        if exclude_latest:
+            if len(samples) <= 1:
+                return 0.0  # baseline ?≪쓣 ?곗씠???놁쓬
+            samples = samples[:-1]
+
+        idx = level - 1
+        values = [s[idx] for s in samples if idx < len(s)]
+        return sum(values) / len(values) if values else 0.0
+
+    def get_top_ask(self, stock_code: str) -> tuple[Optional[int], int]:
+        """?꾩옱 留ㅻ룄 1?멸? (price, volume). ?놁쑝硫?(None, 0)."""
+        snap = self.snapshots.get(stock_code)
+        if not snap:
+            return None, 0
+        prices = snap.get("ask_prices") or []
+        vols = snap.get("ask_volumes") or []
+        if not prices:
+            return None, 0
+        return prices[0], (vols[0] if vols else 0)
+
+    def get_top_bid(self, stock_code: str) -> tuple[Optional[int], int]:
+        snap = self.snapshots.get(stock_code)
+        if not snap:
+            return None, 0
+        prices = snap.get("bid_prices") or []
+        vols = snap.get("bid_volumes") or []
+        if not prices:
+            return None, 0
+        return prices[0], (vols[0] if vols else 0)
+
+    def reset(self, stock_code: str):
+        self.snapshots.pop(stock_code, None)
+        self.history.pop(stock_code, None)
+
+
+=== FILE: C:\Users\rober\OneDrive\문서\vscode\AutoTrader_Project\core\strategy\order_queue.py ===
+
+# order_queue.py
+"""
+二쇰Ц ??+ 二쇰Ц ?뚯빱 (OrderQueue)
+===============================================
+紐⑹쟻: strategy 猷⑦봽?먯꽌 '二쇰Ц ?ㅽ뻾'???쇱뼱???쒓컙李??딄? ?쒓굅.
+  - 吏湲? strategy_manager媛 BUY ?뺤젙 吏곹썑 二쇰Ц ?⑥닔瑜?'?숆린'濡??몄텧 ???ㅽ듃?뚰겕 ????숈븞 猷⑦봽 ?뺤?
+  - 蹂寃? strategy_manager??signal dict瑜??먯뿉 put()留??쇰툝濡쒗궧). 蹂꾨룄 ?뚯빱 ?ㅻ젅?쒓? 爰쇰궡???ㅼ젣 二쇰Ц.
+
+?ㅺ퀎 ?먯튃
+  - threading 湲곕컲(??遊뉗쓽 湲곗〈 ?ㅻ젅??紐⑤뜽怨??숈씪, asyncio ?꾨㈃ ?ъ옉??X).
+  - ?섏〈??二쇱엯: ?ㅼ젣 二쇰Ц? place_order_fn 肄쒕윭釉붾줈 諛쏆쓬 ??OrderManager ?쒓렇?덉쿂瑜???嫄대뱶由?
+  - 吏?뺢? +1???쒖옣媛 湲덉?, ?щ━?쇱? 理쒖냼??. KRX ?멸?媛寃⑸떒?????댁옣(2023-01-25 媛쒖젙, 7?④퀎).
+  - 醫낅ぉ??in-flight 1嫄?dedup ??鍮좊Ⅸ tick ?곗궗濡??명븳 以묐났 二쇰Ц 諛⑹?.
+    (???щ’/MAX_HOLDINGS=5 寃뚯씠?낆쓣 '?泥??섎뒗 寃??꾨땲?? ?묒닔~?뺤젙 ?ъ씠 以묐났諛쒖궗留?留됰뒗 蹂댄샇留?
+  - ?ъ떆?꾨뒗 '嫄곕옒?뚯뿉 ?꾨떖 紐???寃?紐낇솗????留? ?좊ℓ?섎㈃ ?ъ떆??湲덉?(以묐났留ㅼ닔 ?꾪뿕).
+  - 寃곌낵??on_result 肄쒕갚?쇰줈 strategy???뚮젮以???holdings/positions 媛깆떊? 湲곗〈 濡쒖쭅 ?좎?.
+
+KRX ?멸?媛寃⑸떒??(2023-01-25 媛쒖젙, 肄붿뒪??肄붿뒪??肄붾꽖???듭씪, 7?④퀎)
+  <2,000:1 / 2,000~5,000:5 / 5,000~20,000:10 / 20,000~50,000:50 /
+  50,000~200,000:100 / 200,000~500,000:500 / >=500,000:1,000
+  ??WebSocket ?멸?(留ㅻ룄?멸?1)媛 ?덉쑝硫?洹?媛믪쓣 price濡??섍린??寃???怨꾩궛蹂대떎 ?뺥솗.
+
+?곌껐 諛⑸쾿
+  1) ?앹꽦 (遊?湲곕룞 ??1??:
+       from order_queue import OrderQueue
+       self.order_q = OrderQueue(
+           place_order_fn=self.order_manager.buy,   # ?덉쓽 ?ㅼ젣 留ㅼ닔 ?⑥닔(肄쒕윭釉?
+           on_result=self._on_order_result,         # 寃곌낵 肄쒕갚(?꾨옒 2)
+           max_retries=2, logger=log,
+       )
+       self.order_q.start()
+  2) 寃곌낵 肄쒕갚 (holdings 媛깆떊 ??湲곗〈 濡쒖쭅 ?곌껐):
+       def _on_order_result(self, signal, result):
+           if isinstance(result, dict) and result.get("ok"):
+               ...  # ?묒닔/泥닿껐 泥섎━ (holdings ?깅줉 ??
+           else:
+               ...  # ?ㅽ뙣 泥섎━ (濡쒓렇/?щ’ 蹂듦뎄 ??
+  3) strategy_manager??'BUY ?뺤젙' 吏??援먯껜:
+       # 湲곗〈(?숆린 ?몄텧 ?쒓굅): self.order_manager.buy(code, qty, price)
+       self.order_q.put({"stock_code": code, "qty": qty, "price": cur_price, "phase": "1A"})
+  4) 醫낅즺 ??
+       self.order_q.stop()
+
+place_order_fn ?쒓렇?덉쿂媛 buy(code, qty, price)媛 ?꾨땲硫??뚮떎 ?대뙌?곕쭔:
+   place_order_fn=lambda code, qty, price: self.order_manager.send_order(
+       code=code, ord_qty=qty, ord_prc=price, ord_type="buy")
+
+諛섑솚媛?沅뚯옣: dict {"ok": bool, "retryable": bool(optional), ...}.
+  - bool/二쇰Ц踰덊샇(str) 諛섑솚?댁뼱???숈옉(truthy=?깃났)?섏?留? ?ъ떆???뺣??꾨? ?꾪빐 dict 沅뚯옣.
+"""
+
+from __future__ import annotations
+
+import time
+import queue
+import threading
+from typing import Any, Callable, Dict, Optional
+
+
+# ===================== KRX ?멸?媛寃⑸떒??(2023-01-25 媛쒖젙) ===================== #
+_KRX_TICK_TABLE = (
+    (2_000, 1),
+    (5_000, 5),
+    (20_000, 10),
+    (50_000, 50),
+    (200_000, 100),
+    (500_000, 500),
+    (float("inf"), 1_000),
+)
+
+
+def krx_tick_size(price: float) -> int:
+    for upper, tick in _KRX_TICK_TABLE:
+        if price < upper:
+            return tick
+    return 1_000
+
+
+def buy_limit_price(price: float, ticks: int = 1) -> int:
+    """湲곗?媛瑜???洹몃━?쒖뿉 ?ㅻ깄(?대┝)????+ticks ?멸?. 吏?뺢? 留ㅼ닔??"""
+    tick = krx_tick_size(price)
+    base = int(price // tick) * tick
+    return base + tick * ticks
+
+
+# ===================== 二쇰Ц ??===================== #
+class OrderQueue:
+    _SENTINEL = object()
+
+    def __init__(
+        self,
+        place_order_fn: Callable[..., Any],
+        on_result: Optional[Callable[[dict, Any], None]] = None,
+        max_retries: int = 2,
+        retry_backoff: float = 0.5,
+        limit_ticks: int = 1,
+        dedup: bool = True,
+        logger: Any = None,
+    ) -> None:
+        self._place = place_order_fn
+        self._on_result = on_result
+        self._max_retries = int(max_retries)
+        self._backoff = float(retry_backoff)
+        self._limit_ticks = int(limit_ticks)
+        self._dedup = dedup
+        self._log = logger
+
+        self._q: "queue.Queue" = queue.Queue()
+        self._inflight: set = set()
+        self._lock = threading.RLock()
+        self._worker: Optional[threading.Thread] = None
+        self._running = False
+        # stats
+        self._put = 0
+        self._skipped = 0
+        self._ok = 0
+        self._fail = 0
+        self._retry = 0
+
+    # ---- lifecycle ----
+    def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        self._worker = threading.Thread(target=self._run, name="order_worker", daemon=True)
+        self._worker.start()
+        self._info("?㏊ order_worker ?쒖옉")
+
+    def stop(self, drain: bool = False, timeout: float = 5.0) -> None:
+        if not self._running:
+            return
+        self._running = False
+        if not drain:  # 誘몄쿂由??좏샇 ?먭린 (drain=True硫??⑥? 寃?泥섎━ ??醫낅즺)
+            try:
+                while True:
+                    self._q.get_nowait()
+                    self._q.task_done()
+            except queue.Empty:
+                pass
+        self._q.put(self._SENTINEL)
+        if self._worker:
+            self._worker.join(timeout=timeout)
+        self._info(
+            f"?㏊ order_worker 醫낅즺 (put={self._put} ok={self._ok} "
+            f"fail={self._fail} skip={self._skipped} retry={self._retry})"
+        )
+
+    # ---- enqueue ----
+    def put(self, signal: dict) -> bool:
+        """strategy_manager媛 BUY ?뺤젙 ???몄텧. 利됱떆 諛섑솚(?쇰툝濡쒗궧). dedup ??以묐났 醫낅ぉ? skip."""
+        code = signal.get("stock_code")
+        if not code:
+            self._warn(f"?좑툘 stock_code ?녿뒗 ?좏샇 臾댁떆: {signal}")
+            return False
+        if self._dedup:
+            with self._lock:
+                if code in self._inflight:
+                    self._skipped += 1
+                    self._dbg(f"??툘 in-flight 以묐났 [{code}] ?좏샇 skip")
+                    return False
+                self._inflight.add(code)
+        self._put += 1
+        self._q.put(signal)
+        return True
+
+    # ---- worker ----
+    def _run(self) -> None:
+        while True:
+            item = self._q.get()
+            if item is self._SENTINEL:
+                self._q.task_done()
+                break
+            try:
+                self._process(item)
+            except Exception as e:  # noqa: BLE001
+                self._fail += 1
+                self._err(f"?뵶 order_worker 泥섎━ ?덉쇅 [{item.get('stock_code')}]: {e}")
+                self._emit_result(item, {"ok": False, "error": str(e)})
+            finally:
+                self._release(item.get("stock_code"))
+                self._q.task_done()
+
+    def _process(self, signal: dict) -> None:
+        code = signal["stock_code"]
+        qty = signal.get("qty")
+        price = signal.get("price")
+        phase = signal.get("phase", "")
+
+        if not qty or not price:
+            self._warn(f"?좑툘 qty/price ?꾨씫 [{code}] {signal}")
+            self._emit_result(signal, {"ok": False, "error": "missing qty/price"})
+            return
+
+        limit = buy_limit_price(price, self._limit_ticks)
+
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                result = self._place(code, qty, limit)
+            except Exception as e:  # ?덉쇅 = 嫄곕옒???꾨떖 ?ㅽ뙣 媛?μ꽦?????ъ떆?????
+                if attempt <= self._max_retries:
+                    self._retry += 1
+                    self._warn(f"?봺 二쇰Ц ?덉쇅 ?ъ떆??{attempt}/{self._max_retries} [{code}]: {e}")
+                    time.sleep(self._backoff * attempt)
+                    continue
+                self._fail += 1
+                self._err(f"?뵶 二쇰Ц 理쒖쥌 ?ㅽ뙣(?덉쇅) [{code}]: {e}")
+                self._emit_result(signal, {"ok": False, "error": str(e)})
+                return
+
+            ok, retryable = self._interpret(result)
+            if ok:
+                self._ok += 1
+                self._info(f"?윟 BUY[{phase}] ?묒닔 [{code}] x{qty} @吏?뺢? {limit:,} (?쒕룄 {attempt})")
+                self._emit_result(signal, result)
+                return
+            if retryable and attempt <= self._max_retries:
+                self._retry += 1
+                self._warn(f"?봺 二쇰Ц 嫄곕? ?ъ떆??{attempt}/{self._max_retries} [{code}] result={result}")
+                time.sleep(self._backoff * attempt)
+                continue
+            self._fail += 1
+            self._err(f"?뵶 二쇰Ц ?ㅽ뙣 [{code}] result={result}")
+            self._emit_result(signal, result)
+            return
+
+    # ---- helpers ----
+    @staticmethod
+    def _interpret(result: Any):
+        """二쇰Ц 寃곌낵 ?댁꽍 ??(?깃났?щ?, ?ъ떆?꾧???. ?좊ℓ?섎㈃ ?ъ떆??湲덉?(以묐났留ㅼ닔 諛⑹?)."""
+        if isinstance(result, dict):
+            ok = bool(result.get("ok", result.get("success", False)))
+            return ok, bool(result.get("retryable", False))
+        if isinstance(result, bool):
+            return result, False
+        # None/二쇰Ц踰덊샇(str ??: truthy硫??깃났 媛꾩＜, ?ъ떆?꾨뒗 ????
+        return bool(result), False
+
+    def _release(self, code: Optional[str]) -> None:
+        if self._dedup and code:
+            with self._lock:
+                self._inflight.discard(code)
+
+    def _emit_result(self, signal: dict, result: Any) -> None:
+        if self._on_result:
+            try:
+                self._on_result(signal, result)
+            except Exception as e:  # noqa: BLE001
+                self._err(f"?뵶 on_result 肄쒕갚 ?덉쇅 [{signal.get('stock_code')}]: {e}")
+
+    def pending(self) -> Dict[str, Any]:
+        with self._lock:
+            return {"queued": self._q.qsize(), "inflight": list(self._inflight)}
+
+    def stats(self) -> Dict[str, int]:
+        return {
+            "put": self._put, "ok": self._ok, "fail": self._fail,
+            "skipped": self._skipped, "retry": self._retry,
+            "inflight": len(self._inflight),
+        }
+
+    # ---- 濡쒓퉭 (logger ?놁쑝硫?臾댁쓬) ----
+    def _info(self, m: str):
+        if self._log: self._log.info(m)
+    def _warn(self, m: str):
+        if self._log: self._log.warning(m)
+    def _err(self, m: str):
+        if self._log: self._log.error(m)
+    def _dbg(self, m: str):
+        if self._log: self._log.debug(m)
+
+
+=== FILE: C:\Users\rober\OneDrive\문서\vscode\AutoTrader_Project\core\strategy\phase3_controller.py ===
+
+"""
+Phase 3 而⑦듃濡ㅻ윭 ??泥닿껐媛뺣룄 ?⑥“利앷? + 1遺??좎? ??留ㅼ닔.
+
+?쒓컙: 10:41 ~ 15:00 (議곌굔?? 10??1遺??꾪뙆誘???컻)
+?щ’: 3媛?(StrategyManager.PHASE3_MAX_SLOTS)
+
+?곹깭 癒몄떊:
+  WATCHING_120 ??WATCHING_150 ??WATCHING_180 ??HOLD_180 ??READY_TO_BUY
+
+  媛??④퀎?먯꽌 ?꾨떖???덈꺼 ?꾨옒濡??꾪눜 ????ABANDONED
+  HOLD_180?먯꽌 1遺??좎? ????READY_TO_BUY
+  ?꾩껜 5遺??덉뿉 180 紐?李띿쑝硫???ABANDONED
+
+泥닿껐媛뺣룄 (?ㅼ? FID 228 湲곗?):
+  120 / 150 / 180 ?④퀎
+"""
+import logging
+from datetime import datetime, timedelta
+from enum import Enum
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+
+LEVEL_120 = 120.0
+LEVEL_150 = 150.0
+LEVEL_180 = 180.0
+HOLD_DURATION = timedelta(seconds=60)
+MAX_TOTAL_WAIT = timedelta(minutes=5)
+
+
+class Phase3State(Enum):
+    WATCHING_120 = "WATCHING_120"
+    WATCHING_150 = "WATCHING_150"
+    WATCHING_180 = "WATCHING_180"
+    HOLD_180     = "HOLD_180"
+    READY_TO_BUY = "READY_TO_BUY"
+    ABANDONED    = "ABANDONED"
+
+
+class Phase3Controller:
+    def __init__(self, now_func=None):
+        self._now = now_func or datetime.now
+        self.watched: dict[str, dict] = {}
+
+    def is_watching(self, code: str) -> bool:
+        return (code in self.watched
+                and self.watched[code]["state"] not in (
+                    Phase3State.READY_TO_BUY, Phase3State.ABANDONED))
+
+    def start_watching(self, code: str):
+        if code in self.watched:
+            return
+        self.watched[code] = {
+            "start_time":   self._now(),
+            "state":        Phase3State.WATCHING_120,
+            "level_180_at": None,
+            "last_strength": 0.0,
+            "max_strength":  0.0,
+        }
+        logger.info("[%s] ?뱻 Phase 3 媛먯떆 ?쒖옉 (120??50??80 + 1遺??좎?)", code)
+
+    def stop_watching(self, code: str):
+        self.watched.pop(code, None)
+
+    def get_state(self, code: str) -> Optional[Phase3State]:
+        s = self.watched.get(code)
+        return s["state"] if s else None
+
+    def on_trade(self, parsed_trade: dict) -> Optional[Phase3State]:
+        """泥닿껐 ?ㅼ뼱?????몄텧. ???곹깭 諛섑솚."""
+        code = parsed_trade.get("stock_code")
+        if not code or code not in self.watched:
+            return None
+
+        st = self.watched[code]
+        if st["state"] in (Phase3State.READY_TO_BUY, Phase3State.ABANDONED):
+            return st["state"]
+
+        strength = float(parsed_trade.get("strength") or 0)
+        now = self._now()
+        st["last_strength"] = strength
+        if strength > st["max_strength"]:
+            st["max_strength"] = strength
+
+        cur = st["state"]
+
+        if cur == Phase3State.WATCHING_120:
+            if strength >= LEVEL_180:
+                st["state"] = Phase3State.HOLD_180
+                st["level_180_at"] = now
+                logger.info("[%s] Phase 3: 120??80 ?먰봽, HOLD ?쒖옉 (str=%.1f)",
+                            code, strength)
+            elif strength >= LEVEL_150:
+                st["state"] = Phase3State.WATCHING_180
+                logger.info("[%s] Phase 3: 120??50 ?먰봽 (str=%.1f)", code, strength)
+            elif strength >= LEVEL_120:
+                st["state"] = Phase3State.WATCHING_150
+                logger.info("[%s] Phase 3: 120 ?듦낵 (str=%.1f)", code, strength)
+
+        elif cur == Phase3State.WATCHING_150:
+            if strength < LEVEL_120:
+                st["state"] = Phase3State.ABANDONED
+                logger.info("[%s] Phase 3 ?먭린: 120 ?꾪눜 (str=%.1f)", code, strength)
+            elif strength >= LEVEL_180:
+                st["state"] = Phase3State.HOLD_180
+                st["level_180_at"] = now
+                logger.info("[%s] Phase 3: 150??80 ?먰봽, HOLD ?쒖옉 (str=%.1f)",
+                            code, strength)
+            elif strength >= LEVEL_150:
+                st["state"] = Phase3State.WATCHING_180
+                logger.info("[%s] Phase 3: 150 ?듦낵 (str=%.1f)", code, strength)
+
+        elif cur == Phase3State.WATCHING_180:
+            if strength < LEVEL_150:
+                st["state"] = Phase3State.ABANDONED
+                logger.info("[%s] Phase 3 ?먭린: 150 ?꾪눜 (str=%.1f)", code, strength)
+            elif strength >= LEVEL_180:
+                st["state"] = Phase3State.HOLD_180
+                st["level_180_at"] = now
+                logger.info("[%s] Phase 3: 180 ?꾨떖, HOLD ?쒖옉 (str=%.1f)",
+                            code, strength)
+
+        elif cur == Phase3State.HOLD_180:
+            if strength < LEVEL_180:
+                st["state"] = Phase3State.ABANDONED
+                logger.info("[%s] Phase 3 ?먭린: 180 ?꾪눜 (str=%.1f)", code, strength)
+            else:
+                hold_elapsed = now - st["level_180_at"]
+                if hold_elapsed >= HOLD_DURATION:
+                    st["state"] = Phase3State.READY_TO_BUY
+                    logger.info("[%s] Phase 3: 1遺??좎? ?꾨즺, READY_TO_BUY (max=%.1f)",
+                                code, st["max_strength"])
+
+        # 5遺?珥덇낵 寃??(180 ?꾨떖 紐???寃쎌슦留?
+        if st["state"] in (Phase3State.WATCHING_120, Phase3State.WATCHING_150,
+                           Phase3State.WATCHING_180):
+            if now - st["start_time"] > MAX_TOTAL_WAIT:
+                st["state"] = Phase3State.ABANDONED
+                logger.info("[%s] Phase 3 ?먭린: 5遺??덉뿉 180 紐?李띿쓬", code)
+
+        return st["state"]
+
+    def tick(self) -> list[str]:
+        """二쇨린 ?몄텧. ?쒓컙 湲곕컲 ?꾩씠 (泥닿껐?????ㅼ뼱???HOLD 1遺?寃쎄낵 ??READY).
+        Returns: ?덈줈 READY_TO_BUY ??醫낅ぉ 由ъ뒪??""
+        ready = []
+        now = self._now()
+        for code, st in list(self.watched.items()):
+            if st["state"] == Phase3State.HOLD_180:
+                # HOLD 以?留덉?留?媛뺣룄 180 誘몃쭔?대㈃ ?먭린
+                if st["last_strength"] < LEVEL_180:
+                    st["state"] = Phase3State.ABANDONED
+                    logger.info("[%s] Phase 3 ?먭린(tick): 留덉?留?媛뺣룄 %.1f",
+                                code, st["last_strength"])
+                    continue
+                hold_elapsed = now - st["level_180_at"]
+                if hold_elapsed >= HOLD_DURATION:
+                    st["state"] = Phase3State.READY_TO_BUY
+                    logger.info("[%s] Phase 3: 1遺??좎? ?꾨즺(tick), READY_TO_BUY", code)
+                    ready.append(code)
+            elif st["state"] in (Phase3State.WATCHING_120, Phase3State.WATCHING_150,
+                                 Phase3State.WATCHING_180):
+                if now - st["start_time"] > MAX_TOTAL_WAIT:
+                    st["state"] = Phase3State.ABANDONED
+                    logger.info("[%s] Phase 3 ?먭린(tick): 5遺??덉뿉 180 紐?李띿쓬", code)
+        return ready
+
+
+=== FILE: C:\Users\rober\OneDrive\문서\vscode\AutoTrader_Project\core\strategy\portfolio_optimizer.py ===
+
+"""
+?ы듃?대━??理쒖쟻????吏꾩엯 鍮꾩쨷 ?숈쟻 議곗젅
+
+?꾨왂:
+  1. 耳덈━ 怨듭떇: 怨쇨굅 嫄곕옒 (sub_strategy 蹂? ?밸쪧 횞 ?먯씡鍮???踰좏똿 遺꾩닔
+  2. 蹂?숈꽦 ?寃잜똿: ATR/?꾩옱媛 ??紐⑺몴 蹂?숈꽦 ?鍮?鍮꾩쨷 議곗젙
+
+理쒖쥌 湲덉븸:
+  base_amount 횞 kelly_multiplier 횞 volatility_multiplier  (?대━??
+
+耳덈━ 怨꾩닔??嫄곕옒 ?곗씠?곌? 遺議깊븷 ??(< min_trades) 1.0x濡??泥?
+利?遊?珥덇린??蹂?숈꽦 ?寃잜똿留??숈옉, ?곗씠???볦씠硫??먮룞 ?쒖꽦??
+"""
+import logging
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+try:
+    from db import TradeRepository
+except Exception:
+    TradeRepository = None
+
+
+DEFAULT_BASE_AMOUNT = 2_000_000
+
+
+# ?????????????????????????????????????????????
+# ?쒖닔 ?⑥닔: 耳덈━ 遺꾩닔
+# ?????????????????????????????????????????????
+def kelly_fraction(
+    win_rate: float, avg_win: float, avg_loss: float,
+    max_fraction: float = 0.25,
+) -> float:
+    """耳덈━ 怨듭떇 f* = (p*b - q) / b 瑜?[0, max_fraction]?쇰줈 ?대━??
+
+    Args:
+        win_rate:  ?밸쪧 0~1
+        avg_win:   ?됯퇏 ?섏씡 (?묒닔)
+        avg_loss:  ?됯퇏 ?먯떎 (?묒닔, ?덈?媛?
+        max_fraction: 蹂댄넻 1/4 耳덈━(0.25) ?ъ슜
+    """
+    if avg_loss <= 0 or win_rate <= 0 or win_rate >= 1 or avg_win <= 0:
+        return 0.0
+    b = avg_win / avg_loss
+    q = 1.0 - win_rate
+    f = (win_rate * b - q) / b
+    return max(0.0, min(f, max_fraction))
+
+
+# ?????????????????????????????????????????????
+# ?쒖닔 ?⑥닔: ATR
+# ?????????????????????????????????????????????
+def compute_atr(candles: list[dict], period: int = 14) -> Optional[float]:
+    """ATR (newest-first candles 媛??.
+    TR = max(high-low, |high-prev_close|, |low-prev_close|)
+    ATR = 理쒓렐 period媛?TR???⑥닚?됯퇏
+    """
+    if not candles or len(candles) < period + 1:
+        return None
+    trs = []
+    for i in range(period):
+        cur = candles[i]
+        prev = candles[i + 1]
+        tr = max(
+            cur["high"] - cur["low"],
+            abs(cur["high"] - prev["close"]),
+            abs(cur["low"] - prev["close"]),
+        )
+        trs.append(tr)
+    return sum(trs) / len(trs) if trs else None
+
+
+# ?????????????????????????????????????????????
+# 嫄곕옒 ?먯씡 異붿텧 (而щ읆 ?대쫫???ㅼ뼇?대룄 ???
+# ?????????????????????????????????????????????
+def _trade_profit(t: dict) -> Optional[float]:
+    """trades row?먯꽌 ?먯씡 異붿텧. profit_amount 而щ읆 ?덉쑝硫??곗꽑, ?놁쑝硫?怨꾩궛."""
+    if t.get("profit_amount") is not None:
+        try:
+            return float(t["profit_amount"])
+        except (TypeError, ValueError):
+            pass
+    sell = t.get("sell_price")
+    buy = t.get("buy_price")
+    qty = t.get("buy_quantity") or t.get("sell_quantity")
+    if sell is None or buy is None or qty is None:
+        return None
+    try:
+        return (float(sell) - float(buy)) * int(qty)
+    except (TypeError, ValueError):
+        return None
+
+
+# ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧??
+# PortfolioOptimizer
+# ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧??
+class PortfolioOptimizer:
+    """吏꾩엯 鍮꾩쨷 怨꾩궛.
+
+    Usage:
+        opt = PortfolioOptimizer(rest_api)
+        info = opt.calculate_position_amount("005930", "1A")
+        amount = info["amount"]
+    """
+
+    def __init__(
+        self,
+        rest_api,
+        base_amount: int = DEFAULT_BASE_AMOUNT,
+        kelly_cap: float = 0.25,           # 1/4 耳덈━
+        kelly_baseline: float = 0.10,      # 耳덈━ 0.10??multiplier 1.0??湲곗?
+        target_volatility: float = 0.02,   # 紐⑺몴 ?쇱씪 蹂?숈꽦 2%
+        min_weight: float = 0.3,
+        max_weight: float = 2.0,
+        min_trades_for_kelly: int = 20,
+        atr_period: int = 14,
+        atr_candle_count: int = 30,
+    ):
+        self.api = rest_api
+        self.base_amount = base_amount
+        self.kelly_cap = kelly_cap
+        self.kelly_baseline = kelly_baseline
+        self.target_vol = target_volatility
+        self.min_weight = min_weight
+        self.max_weight = max_weight
+        self.min_trades = min_trades_for_kelly
+        self.atr_period = atr_period
+        self.atr_candle_count = atr_candle_count
+
+    def calculate_position_amount(
+        self, stock_code: str, sub_strategy: str,
+    ) -> dict:
+        """理쒖쥌 留ㅼ닔 湲덉븸 + 怨꾩궛 洹쇨굅 諛섑솚.
+
+        Returns:
+            {
+              'amount': int,              # 1000???⑥쐞濡?諛섏삱由쇰맂 留ㅼ닔 湲덉븸
+              'base': int,                # base_amount
+              'kelly_fraction': float|None,
+              'kelly_multiplier': float,
+              'vol_multiplier': float,
+              'atr_pct': float|None,
+              'final_weight': float,
+              'reasons': list[str],
+            }
+        """
+        reasons = []
+
+        # ?? 1. Kelly multiplier
+        kelly_f = self._compute_kelly(sub_strategy)
+        if kelly_f is None:
+            kelly_mult = 1.0
+            reasons.append(f"Kelly: ?곗씠??遺議?(<{self.min_trades}嫄? ??1.0x")
+        elif kelly_f <= 0:
+            kelly_mult = self.min_weight
+            reasons.append(
+                f"Kelly: f*={kelly_f:.3f} ?먯떎 湲곕? ??{kelly_mult}x (理쒖냼鍮꾩쨷)"
+            )
+        else:
+            kelly_mult = kelly_f / self.kelly_baseline
+            reasons.append(
+                f"Kelly: f*={kelly_f:.3f} ??{kelly_mult:.2f}x "
+                f"(baseline {self.kelly_baseline})"
+            )
+
+        # ?? 2. Volatility multiplier
+        vol_mult, atr_pct = self._compute_volatility(stock_code)
+        if vol_mult is None:
+            vol_mult = 1.0
+            reasons.append("Vol: 遺꾨큺 遺議???1.0x")
+        else:
+            reasons.append(
+                f"Vol: ATR/price={atr_pct*100:.2f}% ??{vol_mult:.2f}x "
+                f"(target {self.target_vol*100:.1f}%)"
+            )
+
+        # ?? 3. ?듯빀 + ?대━??
+        raw_weight = kelly_mult * vol_mult
+        final_weight = max(self.min_weight, min(self.max_weight, raw_weight))
+        if abs(final_weight - raw_weight) > 1e-6:
+            reasons.append(
+                f"?대━?? {raw_weight:.2f} ??{final_weight:.2f} "
+                f"({self.min_weight}~{self.max_weight})"
+            )
+
+        amount = int(self.base_amount * final_weight)
+        amount = (amount // 1000) * 1000  # 1000???⑥쐞 諛섏삱由?
+
+        return {
+            "amount": amount,
+            "base": self.base_amount,
+            "kelly_fraction": kelly_f,
+            "kelly_multiplier": kelly_mult,
+            "vol_multiplier": vol_mult,
+            "atr_pct": atr_pct,
+            "final_weight": final_weight,
+            "reasons": reasons,
+        }
+
+    # ?????????????????????????????????????????
+    # Kelly 怨꾩궛
+    # ?????????????????????????????????????????
+    def _compute_kelly(self, sub_strategy: str) -> Optional[float]:
+        if TradeRepository is None:
+            return None
+        try:
+            trades = TradeRepository.find_closed_by_substrategy(sub_strategy)
+        except Exception as e:
+            logger.warning("Kelly: DB 議고쉶 ?ㅽ뙣 (%s): %s", sub_strategy, e)
+            return None
+
+        if not trades or len(trades) < self.min_trades:
+            return None
+
+        wins, losses = [], []
+        for t in trades:
+            p = _trade_profit(t)
+            if p is None:
+                continue
+            if p > 0:
+                wins.append(p)
+            elif p < 0:
+                losses.append(abs(p))
+
+        if not wins or not losses:
+            return None
+
+        n_total = len(wins) + len(losses)
+        win_rate = len(wins) / n_total
+        avg_win = sum(wins) / len(wins)
+        avg_loss = sum(losses) / len(losses)
+
+        return kelly_fraction(
+            win_rate, avg_win, avg_loss, max_fraction=self.kelly_cap
+        )
+
+    # ?????????????????????????????????????????
+    # Volatility 怨꾩궛
+    # ?????????????????????????????????????????
+    def _compute_volatility(
+        self, stock_code: str,
+    ) -> tuple[Optional[float], Optional[float]]:
+        try:
+            candles = self.api.get_minute_candles(
+                stock_code, interval=1, count=self.atr_candle_count
+            )
+        except Exception as e:
+            logger.warning("[%s] Vol: 遺꾨큺 議고쉶 ?ㅽ뙣: %s", stock_code, e)
+            return None, None
+
+        if not candles or len(candles) < self.atr_period + 1:
+            return None, None
+
+        atr = compute_atr(candles, self.atr_period)
+        current_price = candles[0].get("close")
+
+        if not atr or not current_price or current_price <= 0:
+            return None, None
+
+        atr_pct = atr / current_price
+        if atr_pct <= 0:
+            return None, None
+
+        mult = self.target_vol / atr_pct
+        # 洹밸떒媛?諛⑹뼱 (媛쒕퀎 multiplier ?④퀎?먯꽌 0.2~3.0)
+        mult = max(0.2, min(3.0, mult))
+        return mult, atr_pct
+
+
+=== FILE: C:\Users\rober\OneDrive\문서\vscode\AutoTrader_Project\core\strategy\scoring.py ===
+
+# core/strategy/scoring.py
+"""
+?먯닔 湲곕컲 吏꾩엯 ?됯? (AND ?꾪꽣 ??媛以??먯닔) + 泥닿껐媛뺣룄 ?꾪꽣 ?꾨꼍 寃고빀
+===================================================================
+媛吏?泥닿껐媛뺣룄(140% ?댁긽 怨쇱뿴 + 嫄곕옒??遺議?or ?뚮큺)瑜??먯쿇 李⑤떒?섎뒗 濡쒖쭅??異붽??섏뿀?듬땲??
+"""
+
+from __future__ import annotations
+from dataclasses import dataclass
+from core.strategy.indicators import calc_ma
+
+# ===================== ?ㅼ젙 ===================== #
+@dataclass
+class ScoreConfig:
+    # 媛以묒튂 (Weights)
+    w_surge: float = 3.0
+    w_ma: float = 2.0
+    w_candle: float = 2.0
+    w_volume: float = 3.0
+    w_strength: float = 2.0         # 泥닿껐媛뺣룄 媛以묒튂 (異붽???
+
+    # 留뚯젏 湲곗???
+    surge_target: float = 0.05      # Phase1 SURGE_THRESHOLD (留뚯젏 湲곗? ?곸듅瑜?
+    surge_min: float = 0.03         # Surge SURGE_ENTRY_MIN (0?대㈃ 湲됰벑% ?붿냼 ??
+    ma_tolerance: float = 0.003     # MA_TOUCH_TOLERANCE (???덉씠硫?MA 留뚯젏)
+    ma_band: float = 0.010          # tol 珥덇낵 ??0?먭퉴吏????1%)
+    volume_target: float = 1.5      # VOLUME_SURGE_RATIO (留뚯젏 湲곗? 嫄곕옒?됰같??
+    doji_credit: float = 0.4        # ?꾩?(close==open) 遺遺꾩젏??
+    strength_target: float = 120.0  # 120% ?댁긽????泥닿껐媛뺣룄 留뚯젏 (異붽???
+
+    # ?듦낵 湲곗?
+    threshold_ratio: float = 0.7
+    threshold_abs: float | None = None
+
+DEFAULT = ScoreConfig()
+
+# ===================== ?붿냼蹂?factor (0~1) ===================== #
+def _clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
+    return max(lo, min(hi, x))
+
+def _f_surge(surge_rate: float, target: float) -> float:
+    if target <= 0:
+        return 1.0
+    return _clamp(surge_rate / target)
+
+def _f_ma(current: float, ma: float | None, tol: float, band: float) -> float:
+    if not ma:
+        return 0.0
+    d = abs(current - ma) / ma
+    if d <= tol:
+        return 1.0
+    return _clamp(1.0 - (d - tol) / band)
+
+def _f_candle(cur: dict, doji_credit: float) -> float:
+    o, c = cur["open"], cur["close"]
+    if c > o:
+        return 1.0
+    if c == o:
+        return doji_credit
+    return 0.0
+
+def _f_volume(vol_ratio: float, target: float) -> float:
+    if target <= 0:
+        return 1.0
+    return _clamp(vol_ratio / target)
+
+# [?듭떖] 媛吏?泥닿껐媛뺣룄 ?꾪꽣留?濡쒖쭅
+def _f_strength(strength: float, cur_candle: dict, vol_ratio: float, target: float = 120.0) -> float:
+    if strength < 100:
+        return 0.0
+    
+    # ?뚮큺 ?먮퀎
+    is_bearish = cur_candle["close"] < cur_candle["open"]
+    
+    # 140% ?댁긽 怨쇱뿴 ?곹깭?몃뜲, ?뚮큺?닿굅??嫄곕옒?됱씠 ?됱냼 1諛곕룄 ???섎㈃(遊뉗쓽 ?λ궃) 媛李⑥뾾??0??
+    if strength >= 140:
+        if is_bearish or vol_ratio < 1.0:
+            return 0.0
+            
+    return _clamp((strength - 100) / (target - 100))
+
+# ===================== 怨듯넻 留덇컧 ===================== #
+def _finalize(parts: dict, maxw: dict, cfg: ScoreConfig) -> tuple[bool, float, float, str]:
+    total = sum(parts.values())
+    max_total = sum(maxw.values())
+    thr = cfg.threshold_abs if cfg.threshold_abs is not None else cfg.threshold_ratio * max_total
+    passed = total >= thr
+    # 泥닿껐媛뺣룄(strength) ?쇰꺼 異붽?
+    label_map = {"surge": "湲됰벑", "ma": "MA", "candle": "?묐큺", "volume": "嫄곕옒??, "strength": "媛뺣룄"}
+    seg = ", ".join(f"{label_map.get(k, k)} {parts[k]:.1f}/{maxw[k]:.0f}" for k in parts)
+    reason = f"?먯닔 {total:.1f}/{max_total:.0f} < {thr:.1f} ({seg})"
+    return passed, total, thr, reason
+
+def _breakdown(parts: dict) -> dict:
+    return {k: round(v, 2) for k, v in parts.items()}
+
+# ===================== Phase 1A ===================== #
+def score_phase1(candles: list[dict], volume_ratio: float, current_strength: float = 100.0, cfg: ScoreConfig = DEFAULT):
+    cur = candles[0]
+    open_price = candles[-1]["open"]
+    current_price = cur["close"]
+    surge_rate = (current_price - open_price) / open_price if open_price else 0.0
+    ma5 = calc_ma(candles, 5)
+
+    parts = {
+        "surge":  cfg.w_surge   * _f_surge(surge_rate, cfg.surge_target),
+        "ma":     cfg.w_ma      * _f_ma(current_price, ma5, cfg.ma_tolerance, cfg.ma_band),
+        "candle": cfg.w_candle  * _f_candle(cur, cfg.doji_credit),
+        "volume": cfg.w_volume  * _f_volume(volume_ratio, cfg.volume_target),
+        "strength": cfg.w_strength * _f_strength(current_strength, cur, volume_ratio, cfg.strength_target),
+    }
+    maxw = {"surge": cfg.w_surge, "ma": cfg.w_ma, "candle": cfg.w_candle, "volume": cfg.w_volume, "strength": cfg.w_strength}
+    passed, total, thr, reason = _finalize(parts, maxw, cfg)
+
+    info = {
+        "current_price": current_price, "open_price": open_price,
+        "surge_rate": surge_rate, "ma5": ma5, "volume_ratio": volume_ratio,
+        "current_strength": current_strength,
+        "score": round(total, 2), "score_threshold": round(thr, 2),
+        "score_breakdown": _breakdown(parts),
+    }
+    if not passed:
+        info["reason"] = reason
+    return passed, info
+
+# ===================== Surge (1S) ??MA ?놁쓬 ===================== #
+def score_surge(candles: list[dict], volume_ratio: float, current_strength: float = 100.0, cfg: ScoreConfig = DEFAULT):
+    cur = candles[0]
+    open_price = candles[-1]["open"]
+    current_price = cur["close"]
+    surge_rate = (current_price - open_price) / open_price if open_price else 0.0
+
+    w_surge = cfg.w_surge if cfg.surge_min > 0 else 0.0
+    parts = {
+        "surge":  w_surge      * _f_surge(surge_rate, cfg.surge_min),
+        "candle": cfg.w_candle * _f_candle(cur, cfg.doji_credit),
+        "volume": cfg.w_volume * _f_volume(volume_ratio, cfg.volume_target),
+        "strength": cfg.w_strength * _f_strength(current_strength, cur, volume_ratio, cfg.strength_target),
+    }
+    maxw = {"surge": w_surge, "candle": cfg.w_candle, "volume": cfg.w_volume, "strength": cfg.w_strength}
+    passed, total, thr, reason = _finalize(parts, maxw, cfg)
+
+    info = {
+        "current_price": current_price, "surge_rate": surge_rate,
+        "volume_ratio": volume_ratio, "current_strength": current_strength,
+        "score": round(total, 2), "score_threshold": round(thr, 2),
+        "score_breakdown": _breakdown(parts),
+    }
+    if not passed:
+        info["reason"] = reason
+    return passed, info
+
+# ===================== Phase 2 (NN MA) ===================== #
+def score_phase2(candles: list[dict], volume_ratio: float, ma_period: int, current_strength: float = 100.0, cfg: ScoreConfig = DEFAULT):
+    cur = candles[0]
+    current_price = cur["close"]
+    ma = calc_ma(candles, ma_period)
+
+    parts = {
+        "ma":     cfg.w_ma      * _f_ma(current_price, ma, cfg.ma_tolerance, cfg.ma_band),
+        "candle": cfg.w_candle  * _f_candle(cur, cfg.doji_credit),
+        "volume": cfg.w_volume  * _f_volume(volume_ratio, cfg.volume_target),
+        "strength": cfg.w_strength * _f_strength(current_strength, cur, volume_ratio, cfg.strength_target),
+    }
+    maxw = {"ma": cfg.w_ma, "candle": cfg.w_candle, "volume": cfg.w_volume, "strength": cfg.w_strength}
+    passed, total, thr, reason = _finalize(parts, maxw, cfg)
+
+    info = {
+        "current_price": current_price, "ma5": ma, "volume_ratio": volume_ratio,
+        "current_strength": current_strength,
+        "score": round(total, 2), "score_threshold": round(thr, 2),
+        "score_breakdown": _breakdown(parts),
+    }
+    if not passed:
+        info["reason"] = reason
+    return passed, info
+
+
+=== FILE: C:\Users\rober\OneDrive\문서\vscode\AutoTrader_Project\core\strategy\trade_flow.py ===
+
+"""泥닿껐 ???щ씪?대뵫 ?덈룄??+ ?쒓컙媛以?泥닿껐媛뺣룄 + 媛寃?異붿쟻.
+
+KiwoomWS??on_trade 肄쒕갚?먯꽌 add_tick() ?몄텧.
+泥닿껐媛뺣룄 = 媛以?留ㅼ닔泥닿껐??/ 媛以?留ㅻ룄泥닿껐??횞 100
+媛寃? get_latest_price / get_price_around / get_price_change_pct
+"""
+import math
+import time
+from collections import deque
+from typing import Callable, Optional
+
+
+class TradeFlowTracker:
+    """泥닿껐 ?щ씪?대뵫 ?덈룄??+ ?쒓컙媛以?媛뺣룄 + 媛寃?異붿쟻."""
+
+    def __init__(self, max_window_sec: float = 120):
+        # {code: deque[(ts, price, side, volume)]}
+        self.ticks: dict[str, deque] = {}
+        self.max_window_sec = max_window_sec
+
+    def add_tick(
+        self,
+        stock_code: str,
+        price: int,
+        side: str,
+        volume: int,
+        now: float = None,
+    ):
+        """0B 泥닿껐 1嫄?異붽?. side: 'buy'/'sell'/'neutral'."""
+        now = now if now is not None else time.time()
+        d = self.ticks.setdefault(stock_code, deque())
+        d.append((now, price, side, volume))
+
+        # ?ㅻ옒???곗씠???쒓굅
+        cutoff = now - self.max_window_sec
+        while d and d[0][0] < cutoff:
+            d.popleft()
+
+    def compute_strength(
+        self,
+        stock_code: str,
+        window_sec: float,
+        now: float = None,
+        weight_fn: Callable[[float, float], float] = None,
+    ) -> float:
+        """
+        ?쒓컙媛以?泥닿껐媛뺣룄 = 媛以?留ㅼ닔泥닿껐??/ 媛以?留ㅻ룄泥닿껐??횞 100.
+
+        weight_fn(age_sec, window_sec) ??0~1. 湲곕낯? ?좏삎 媛먯뇿.
+        留ㅻ룄媛 0?대㈃ 9999 (留ㅼ슦 媛뺥븳 留ㅼ닔 ?곗꽭) 諛섑솚.
+        """
+        now = now if now is not None else time.time()
+        d = self.ticks.get(stock_code)
+        if not d:
+            return 0.0
+
+        weight_fn = weight_fn or self.linear_weight
+        cutoff = now - window_sec
+        w_buy = 0.0
+        w_sell = 0.0
+        for ts, price, side, vol in d:
+            if ts < cutoff:
+                continue
+            w = weight_fn(now - ts, window_sec)
+            if side == "buy":
+                w_buy += vol * w
+            elif side == "sell":
+                w_sell += vol * w
+
+        if w_sell == 0:
+            return 9999.0 if w_buy > 0 else 0.0
+        return w_buy / w_sell * 100
+
+    def is_strength_rising(
+        self,
+        stock_code: str,
+        short_window: float = 10,
+        long_window: float = 30,
+        now: float = None,
+        min_short_strength: float = 0,
+    ) -> bool:
+        """?④린 ?덈룄??媛뺣룄媛 ?κ린 ?덈룄??媛뺣룄蹂대떎 媛뺥븳吏."""
+        s_short = self.compute_strength(stock_code, short_window, now)
+        s_long = self.compute_strength(stock_code, long_window, now)
+        return s_short > s_long and s_short >= min_short_strength
+
+    def get_stats(
+        self, stock_code: str, window_sec: float = 30, now: float = None
+    ) -> dict:
+        """?붾쾭洹?愿李곗슜 ?듦퀎."""
+        now = now if now is not None else time.time()
+        d = self.ticks.get(stock_code, deque())
+        cutoff = now - window_sec
+        recent = [t for t in d if t[0] >= cutoff]
+        buy_vol = sum(v for _, _, s, v in recent if s == "buy")
+        sell_vol = sum(v for _, _, s, v in recent if s == "sell")
+        simple = (buy_vol / sell_vol * 100) if sell_vol else (9999.0 if buy_vol else 0.0)
+        return {
+            "count": len(recent),
+            "buy_vol": buy_vol,
+            "sell_vol": sell_vol,
+            "strength_simple": simple,
+            "strength_weighted": self.compute_strength(stock_code, window_sec, now),
+        }
+
+    # ??? 媛寃?異붿쟻 ?????????????????????????????????
+    def get_latest_price(self, stock_code: str) -> Optional[int]:
+        """媛??理쒓렐 泥닿껐媛."""
+        d = self.ticks.get(stock_code)
+        if not d:
+            return None
+        return d[-1][1]
+
+    def get_price_around(
+        self,
+        stock_code: str,
+        seconds_ago: float,
+        now: float = None,
+    ) -> Optional[int]:
+        """N珥???媛寃?= 洹??쒖젏 ?댁쟾??媛??理쒓렐 泥닿껐媛.
+
+        ?대떦 ?쒖젏蹂대떎 怨쇨굅 ?곗씠?곌? ?놁쑝硫?None.
+        """
+        now = now if now is not None else time.time()
+        target = now - seconds_ago
+        d = self.ticks.get(stock_code)
+        if not d:
+            return None
+        # 理쒓렐 ??怨쇨굅濡?walking. target ?댄븯??泥???= N珥???媛寃?
+        for ts, price, side, vol in reversed(d):
+            if ts <= target:
+                return price
+        return None
+
+    def get_price_change_pct(
+        self,
+        stock_code: str,
+        seconds_ago: float = 60,
+        now: float = None,
+    ) -> Optional[float]:
+        """N珥????鍮??꾩옱媛 蹂?붿쑉 (%). ?묒닔=?곸듅, ?뚯닔=?섎씫. ?뚮┝ 媛먯???"""
+        cur = self.get_latest_price(stock_code)
+        past = self.get_price_around(stock_code, seconds_ago, now)
+        if cur is None or past is None or past == 0:
+            return None
+        return (cur - past) / past * 100
+    # ??????????????????????????????????????????
+
+    def reset(self, stock_code: str):
+        self.ticks.pop(stock_code, None)
+
+    # ??? 媛以묒튂 ?⑥닔????????????????????????????????
+    @staticmethod
+    def linear_weight(age: float, window: float) -> float:
+        """?좏삎 媛먯뇿: age=0 ??1.0, age=window ??0.0."""
+        if window <= 0:
+            return 0.0
+        return max(0.0, 1.0 - age / window)
+
+    @staticmethod
+    def exponential_weight(tau: float) -> Callable[[float, float], float]:
+        """吏??媛먯뇿 factory. tau媛 ?묒쓣?섎줉 理쒓렐 媛以묒튂 ??"""
+        def fn(age: float, window: float) -> float:
+            return math.exp(-age / tau)
+        return fn
+
+
+=== FILE: C:\Users\rober\OneDrive\문서\vscode\AutoTrader_Project\core\strategy\wall_detector.py ===
+
+"""留ㅻ룄踰??곹깭癒몄떊 ???깆옣 ??異뺤냼 ???뚯떎 異붿쟻.
+
+OrderbookTracker瑜?李몄“?댁꽌 留ㅻ룄 1~2?멸????붾웾 蹂?붾? 媛먯떆.
+"""
+from enum import Enum
+from typing import Optional
+
+from core.strategy.orderbook import OrderbookTracker
+
+
+class WallState(str, Enum):
+    IDLE = "idle"             # 踰??놁쓬
+    DETECTED = "detected"     # 踰??깆옣
+    SHRINKING = "shrinking"   # 踰?異뺤냼 以?
+    DISAPPEARED = "disappeared"  # 踰??뚯떎 ??留ㅼ닔 ?좏샇
+
+
+class WallDetector:
+    """
+    留ㅻ룄踰?lifecycle:
+      IDLE ??(?붾웾 ???댁쟾 baseline 횞 N諛? ??DETECTED
+      DETECTED ??(?붾웾 ??珥덇린 횞 shrink_ratio) ??SHRINKING
+      SHRINKING ??(?붾웾 ??珥덇린 횞 disappear_ratio) ??DISAPPEARED
+
+    ?뚮씪誘명꽣???쇰떒 placeholder (?ㅻ뜲?댄꽣 諛쏄퀬 ?쒕떇 ?덉젙).
+    """
+
+    def __init__(
+        self,
+        ob_tracker: OrderbookTracker,
+        detect_multiplier: float = 5.0,     # TBD: ?ㅻ뜲?댄꽣 遺꾪룷 蹂닿퀬
+        shrink_ratio: float = 0.7,           # TBD
+        disappear_ratio: float = 0.2,        # TBD
+        avg_window_sec: float = 60,
+        watch_levels: tuple[int, ...] = (1, 2),
+    ):
+        self.ob = ob_tracker
+        self.detect_multiplier = detect_multiplier
+        self.shrink_ratio = shrink_ratio
+        self.disappear_ratio = disappear_ratio
+        self.avg_window_sec = avg_window_sec
+        self.watch_levels = watch_levels
+
+        # {code: {state, initial_volume, level, ts_detected}}
+        self._state: dict[str, dict] = {}
+
+    def on_orderbook(self, stock_code: str, now: float = None) -> WallState:
+        """0D ?섏떊 ??OrderbookTracker.update媛 ?앸궃 ?ㅼ쓬???몄텧."""
+        info = self._state.get(stock_code)
+        st = info["state"] if info else WallState.IDLE
+
+        if st == WallState.IDLE:
+            return self._try_detect(stock_code, now)
+
+        if st == WallState.DETECTED:
+            return self._try_shrink(stock_code, now)
+
+        if st == WallState.SHRINKING:
+            return self._try_disappear(stock_code, now)
+
+        # DISAPPEARED ?댄썑???몃??먯꽌 reset() ?몄텧 ?꾧퉴吏 ?좎?
+        return st
+
+    def _try_detect(self, code: str, now: float) -> WallState:
+        for level in self.watch_levels:
+            vol_now = self.ob.get_ask_volume(code, level)
+            # ??exclude_latest=True: baseline? ?꾩옱 ?ㅽ뙆?댄겕瑜??쒖쇅???댁쟾 ?됯퇏
+            vol_avg = self.ob.get_ask_volume_avg(
+                code, level, self.avg_window_sec, exclude_latest=True
+            )
+            if vol_avg <= 0 or vol_now <= 0:
+                continue
+            if vol_now >= vol_avg * self.detect_multiplier:
+                self._state[code] = {
+                    "state": WallState.DETECTED,
+                    "initial_volume": vol_now,
+                    "level": level,
+                    "ts_detected": now,
+                }
+                return WallState.DETECTED
+        return WallState.IDLE
+
+    def _try_shrink(self, code: str, now: float) -> WallState:
+        info = self._state[code]
+        level = info["level"]
+        vol_now = self.ob.get_ask_volume(code, level)
+        # 踰쎌씠 ??而ㅼ?硫?珥덇린媛?媛깆떊
+        if vol_now > info["initial_volume"]:
+            info["initial_volume"] = vol_now
+            return WallState.DETECTED
+        if info["initial_volume"] > 0 and vol_now <= info["initial_volume"] * self.shrink_ratio:
+            info["state"] = WallState.SHRINKING
+            return WallState.SHRINKING
+        return WallState.DETECTED
+
+    def _try_disappear(self, code: str, now: float) -> WallState:
+        info = self._state[code]
+        level = info["level"]
+        vol_now = self.ob.get_ask_volume(code, level)
+        if info["initial_volume"] > 0 and vol_now <= info["initial_volume"] * self.disappear_ratio:
+            info["state"] = WallState.DISAPPEARED
+            return WallState.DISAPPEARED
+        return WallState.SHRINKING
+
+    def get_state(self, stock_code: str) -> WallState:
+        info = self._state.get(stock_code)
+        return info["state"] if info else WallState.IDLE
+
+    def get_info(self, stock_code: str) -> Optional[dict]:
+        return self._state.get(stock_code)
+
+    def reset(self, stock_code: str):
+        self._state.pop(stock_code, None)
+
+
+=== FILE: C:\Users\rober\OneDrive\문서\vscode\AutoTrader_Project\core\strategy\__init__.py ===
+

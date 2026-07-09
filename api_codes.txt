@@ -1,0 +1,1304 @@
+﻿
+
+=== FILE: C:\Users\rober\OneDrive\문서\vscode\AutoTrader_Project\api\auth.py ===
+
+import requests
+import json
+from config import settings
+from utils.logger import logger
+
+
+def get_access_token():
+    """?ㅼ? REST API 紐⑥쓽?ъ옄???묎렐?좏겙 諛쒓툒"""
+    url = "https://mockapi.kiwoom.com/oauth2/token"
+
+    payload = {
+        "grant_type": "client_credentials",
+        "appkey": settings.APP_KEY,
+        "secretkey": settings.SECRET_KEY,
+    }
+    headers = {"Content-Type": "application/json;charset=UTF-8"}
+
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=10)
+        res_json = response.json()
+
+        token = res_json.get("token")
+
+        if token:
+            logger.info("?뵎 [?깃났] 紐⑥쓽?ъ옄??REST API ?좏겙 諛쒓툒 ?꾨즺!")
+            return token
+        else:
+            logger.error(f"???좏겙??李얠? 紐삵뻽?듬땲?? {res_json.get('return_msg')}")
+            return None
+
+    except Exception as e:
+        logger.error(f"???몄쬆 ?쒕쾭 ?곌껐 ?ㅻ쪟: {e}")
+        return None
+
+
+def send_telegram(message, target='signal'):
+    """
+    ?붾젅洹몃옩 ?뚮┝ ?꾩넚
+    
+    Args:
+        message: 蹂대궪 硫붿떆吏 蹂몃Ц
+        target: 'signal' (媛쒖씤 梨꾪똿) ?먮뒗 'order' (二쇰Ц 洹몃９ 梨꾪똿)
+    """
+    chat_id = (settings.TELEGRAM_CHAT_ID_ORDER 
+               if target == 'order' 
+               else settings.TELEGRAM_CHAT_ID_SIGNAL)
+    url = f"https://api.telegram.org/bot{settings.TELEGRAM_TOKEN}/sendMessage"
+
+    try:
+        response = requests.post(
+            url,
+            json={"chat_id": chat_id, "text": message},
+            timeout=5,
+        )
+        result = response.json()
+
+        if not result.get("ok"):
+            logger.warning(
+                f"?좑툘 ?붾젅洹몃옩 ?꾩넚 ?ㅽ뙣 (target={target}): "
+                f"{result.get('description', '?????녿뒗 ?ㅻ쪟')}"
+            )
+            return False
+        return True
+
+    except requests.Timeout:
+        logger.warning(f"?좑툘 ?붾젅洹몃옩 ?꾩넚 ??꾩븘??(target={target})")
+        return False
+    except Exception as e:
+        logger.warning(f"?좑툘 ?붾젅洹몃옩 ?꾩넚 ?덉쇅 (target={target}): {e}")
+        return False
+
+
+=== FILE: C:\Users\rober\OneDrive\문서\vscode\AutoTrader_Project\api\candle_cache.py ===
+
+# api/candle_cache.py
+"""
+遺꾨큺 罹먯떆 ?덉씠??(CandleCache)
+================================
+紐⑹쟻: ka10080 遺꾨큺 ?몄텧 ??＜ ??429 ??2珥?blocking ?ъ떆????strategy 猷⑦봽 ?뺤?(?딄?)/?쒓컙李??꾪솕
+
+?숈옉 ?먮━
+  1) ?꾩꽦??遺꾨큺? 媛숈? 遺?minute) ?덉뿉??蹂?섏? ?딅뒗??
+     ??TTL(湲곕낯 8珥? ?숈븞? 媛숈? 醫낅ぉ ?ъ슂泥?쓣 罹먯떆濡??묐떟?섏뿬 ka10080 ?몄텧 ?먯껜瑜?以꾩엫.
+  2) ?몄텧 ?ㅽ뙣(429/??꾩븘???덉쇅) ??留덉?留??뺤긽 罹먯떆(stale)瑜?洹몃?濡?諛섑솚.
+     ???ㅽ듃?뚰겕媛 ?붾뱾?ㅻ룄 猷⑦봽媛 硫덉텛吏 ?딆쓬(?딄? 諛⑹?). ?ロ뙣?ㅼ쓽 2珥?blocking ?ъ떆???쒓굅.
+  3) hit / miss / stale / error ?듦퀎瑜??④꺼, ????dry-run ???ㅼ젣 ?몄텧 ?덇컧?됱쓣 ?뺤씤.
+
+二쇱쓽
+  - ?꾩옱 ?뺤꽦 以묒씤 遊?[0], newest-first)? 遺??덉뿉??close/high/low/volume??蹂?쒕떎.
+    60MA ?깆? '?꾩꽦遊? 湲곗??대?濡?8珥?staleness??臾댄빐. ?꾩옱媛??罹먯떆 留먭퀬 WebSocket tick???ъ슜.
+  - ?쎌? 罹먯떆 議고쉶/湲곕줉留?蹂댄샇?섍퀬, ?ㅼ젣 ?ㅽ듃?뚰겕 ?몄텧? ??諛뽰뿉???섑뻾(?ㅻⅨ 醫낅ぉ 釉붾줈??諛⑹?).
+    ?숈씪 醫낅ぉ ?숈떆 miss ??以묐났 ?몄텧???????덉쑝??10~30醫낅ぉ 洹쒕え?먯꽑 臾댁떆 媛??
+
+?곌껐 諛⑸쾿 (?? api/kiwoom_rest.py)
+    from api.candle_cache import CandleCache
+
+    # 湲곗〈 ?먮낯 ?몄텧??_raw 濡??④꺼?먭퀬:
+    #   def _raw_get_minute_candles(self, stock_code, ...): ... (吏湲덉쓽 get_minute_candles 蹂몃Ц)
+    self._candle_cache = CandleCache(self._raw_get_minute_candles, ttl_sec=8.0, logger=log)
+
+    # ?몄텧遺 援먯껜:
+    def get_minute_candles(self, stock_code, *args, **kwargs):
+        return self._candle_cache.get(stock_code, *args, **kwargs)
+
+    # MA??'理쒖떊 ?뺤꽦遊???瑗??꾩슂??洹뱁엳 ?쇰? 吏?먮쭔:
+    candles = self._candle_cache.get(stock_code, force=True)
+
+    # Phase ?꾪솚 濡쒓렇(????醫낅즺 ?쒖젏??1??
+    self._candle_cache.log_stats()
+"""
+
+from __future__ import annotations
+
+import time
+import threading
+from typing import Any, Callable, Dict, List, Optional
+
+
+class CandleCache:
+    def __init__(
+        self,
+        fetch_fn: Callable[..., List[Dict[str, Any]]],
+        ttl_sec: float = 8.0,
+        stale_on_error: bool = True,
+        logger: Any = None,
+    ) -> None:
+        """
+        fetch_fn       : ?ㅼ젣 遺꾨큺??媛?몄삤??肄쒕윭釉? (stock_code, *args, **kwargs) -> list[dict]
+                         利?吏湲덉쓽 get_minute_candles 蹂몃Ц(_raw)??洹몃?濡??ｌ쑝硫???
+        ttl_sec        : 罹먯떆 ?좏슚?쒓컙(珥?. 8珥덈㈃ ?꾩꽦遊?湲곗? 臾댄빐?섎㈃??ka10080 ?몄텧???ш쾶 ?덇컧.
+        stale_on_error : True硫??몄텧 ?ㅽ뙣/鍮덉쓳????留덉?留??뺤긽 罹먯떆瑜?諛섑솚(?딄? 諛⑹?).
+        logger         : 湲곗〈 'AutoTrader'/root 濡쒓굅. None?대㈃ 臾댁쓬.
+        """
+        self._fetch_fn = fetch_fn
+        self._ttl = float(ttl_sec)
+        self._stale_on_error = stale_on_error
+        self._log = logger
+        self._lock = threading.RLock()
+        # key -> {"data": list, "ts": float}
+        self._store: Dict[str, Dict[str, Any]] = {}
+        self._hit = 0
+        self._miss = 0
+        self._stale = 0
+        self._error = 0
+
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _key(stock_code: str, args: tuple, kwargs: dict) -> str:
+        if not args and not kwargs:
+            return stock_code
+        return f"{stock_code}|{args}|{tuple(sorted(kwargs.items()))}"
+
+    def get(self, stock_code: str, *args, force: bool = False, **kwargs):
+        """
+        罹먯떆媛 ?좎꽑?섎㈃ 罹먯떆 諛섑솚, ?꾨땲硫??ㅼ젣 ?몄텧.
+        ?ㅽ뙣 ??stale_on_error???곕씪 吏곸쟾 罹먯떆 諛섑솚(?놁쑝硫?None).
+        諛섑솚 ?뺤떇? fetch_fn怨??숈씪 (candle dict 由ъ뒪?? newest-first).
+        """
+        key = self._key(stock_code, args, kwargs)
+        now = time.time()
+
+        with self._lock:
+            entry = self._store.get(key)
+            if (not force) and entry and (now - entry["ts"] < self._ttl):
+                self._hit += 1
+                return entry["data"]
+
+        # ---- 罹먯떆 誘몄뒪: ?ㅼ젣 ?몄텧 (??諛뽰뿉???섑뻾) ----
+        try:
+            data = self._fetch_fn(stock_code, *args, **kwargs)
+        except Exception as e:  # noqa: BLE001  (429 ?ы븿 紐⑤뱺 ?몄텧 ?ㅽ뙣)
+            self._error += 1
+            with self._lock:
+                entry = self._store.get(key)
+            if self._stale_on_error and entry:
+                self._stale += 1
+                self._dbg(
+                    f"?뱤 遺꾨큺 ?몄텧 ?ㅽ뙣({e}) ??stale 罹먯떆 諛섑솚 [{stock_code}] "
+                    f"(age={now - entry['ts']:.1f}s)"
+                )
+                return entry["data"]
+            self._warn(f"?뱤 遺꾨큺 ?몄텧 ?ㅽ뙣 & 罹먯떆?놁쓬 [{stock_code}]: {e}")
+            return None
+
+        if data:
+            with self._lock:
+                self._store[key] = {"data": data, "ts": time.time()}
+                self._miss += 1
+            return data
+
+        # 鍮??묐떟([] / None): 媛?ν븯硫?吏곸쟾 罹먯떆 ?좎?(?쇱떆??鍮덉쓳?듭쑝濡??명븳 '遺꾨큺遺議? ?ㅽ뙋 諛⑹?)
+        with self._lock:
+            entry = self._store.get(key)
+        if self._stale_on_error and entry:
+            self._stale += 1
+            return entry["data"]
+        self._miss += 1
+        return data  # [] ?먮뒗 None 洹몃?濡????몄텧遺??'遺꾨큺遺議? 泥섎━ ?먮쫫 ?좎?
+
+    # ------------------------------------------------------------------ #
+    def invalidate(self, stock_code: Optional[str] = None) -> None:
+        """?뱀젙 醫낅ぉ(?먮뒗 ?꾩껜) 罹먯떆 臾댄슚?? 泥?궛 吏곹썑 ?щℓ???먮떒 ?깆뿉??媛뺤젣 媛깆떊??"""
+        with self._lock:
+            if stock_code is None:
+                self._store.clear()
+                return
+            for k in [
+                k for k in self._store
+                if k == stock_code or k.startswith(stock_code + "|")
+            ]:
+                self._store.pop(k, None)
+
+    def stats(self) -> Dict[str, Any]:
+        total = self._hit + self._miss
+        rate = (self._hit / total * 100.0) if total else 0.0
+        return {
+            "hit": self._hit,
+            "miss": self._miss,
+            "stale": self._stale,
+            "error": self._error,
+            "hit_rate_pct": round(rate, 1),
+            "cached_codes": len(self._store),
+        }
+
+    def log_stats(self) -> None:
+        s = self.stats()
+        self._info(
+            f"?뱤 遺꾨큺罹먯떆 ?듦퀎 hit={s['hit']} miss={s['miss']} "
+            f"stale={s['stale']} err={s['error']} "
+            f"hit??{s['hit_rate_pct']}% 醫낅ぉ??{s['cached_codes']}"
+        )
+
+    # ---- 濡쒓퉭 ?ы띁 (logger ?놁쑝硫?臾댁쓬) ----
+    def _info(self, msg: str) -> None:
+        if self._log:
+            self._log.info(msg)
+
+    def _warn(self, msg: str) -> None:
+        if self._log:
+            self._log.warning(msg)
+
+    def _dbg(self, msg: str) -> None:
+        if self._log:
+            self._log.debug(msg)
+
+
+=== FILE: C:\Users\rober\OneDrive\문서\vscode\AutoTrader_Project\api\kiwoom_rest.py ===
+
+"""
+?ㅼ? REST API ?몄텧 紐⑤뱢
+?????????????????????????????????????
+??븷: 二쇰Ц, ?붽퀬/?덉닔湲?議고쉶, ?꾩옱媛 議고쉶, 遺꾨큺 李⑦듃 議고쉶
+"""
+import logging
+import json
+import time
+import requests
+from datetime import datetime
+
+from utils.logger import logger
+
+
+class KiwoomREST:
+    """?ㅼ? REST API ?대씪?댁뼵??""
+
+    MOCK_HOST = "https://mockapi.kiwoom.com"
+    REAL_HOST = "https://api.kiwoom.com"
+
+    # ?몄텧 鍮덈룄 ?쒖뼱 (1珥?5???쒗븳 ??0.6珥??덉쟾留덉쭊)
+    MIN_INTERVAL = 0.6
+
+    def __init__(self, token: str, is_mock: bool = True):
+        self.token = token
+        self.host = self.MOCK_HOST if is_mock else self.REAL_HOST
+        self._last_request_ts = 0.0
+
+    # ?????????????????????????????????????
+    # 怨듯넻 ?몄텧
+    # ?????????????????????????????????????
+    def _throttle(self):
+        elapsed = time.time() - self._last_request_ts
+        if elapsed < self.MIN_INTERVAL:
+            time.sleep(self.MIN_INTERVAL - elapsed)
+        self._last_request_ts = time.time()
+
+    def _request(self, path: str, api_id: str, body: dict,
+                 cont_yn: str = "N", next_key: str = "") -> dict:
+        """怨듯넻 POST ?붿껌. 429???먮룞 ?ъ떆??"""
+        self._throttle()
+        url = f"{self.host}{path}"
+        headers = {
+            "Content-Type": "application/json;charset=UTF-8",
+            "authorization": f"Bearer {self.token}",
+            "cont-yn": cont_yn,
+            "next-key": next_key,
+            "api-id": api_id,
+        }
+
+        try:
+            res = requests.post(url, headers=headers,
+                                data=json.dumps(body), timeout=10)
+            res.raise_for_status()
+            data = res.json()
+
+            if data.get("return_code") != 0:
+                logger.warning(
+                    f"?좑툘 [{api_id}] ?묐떟 ?ㅽ뙣: "
+                    f"code={data.get('return_code')} "
+                    f"msg={data.get('return_msg')}"
+                )
+            return data
+
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code
+            if status == 429:
+                logger.warning(f"?좑툘 [{api_id}] 429 ?몄텧鍮덈룄 珥덇낵, 2珥??湲????ъ떆??)
+                time.sleep(2)
+                try:
+                    res = requests.post(url, headers=headers,
+                                        data=json.dumps(body), timeout=10)
+                    res.raise_for_status()
+                    return res.json()
+                except Exception as e2:
+                    logger.error(f"??[{api_id}] ?ъ떆???ㅽ뙣: {e2}")
+                    return {"return_code": -1, "return_msg": "rate_limit_retry_failed"}
+            logger.error(f"??[{api_id}] HTTP ?먮윭 {status}: {e.response.text[:200]}")
+            return {"return_code": -1, "return_msg": str(e)}
+        except Exception as e:
+            logger.error(f"??[{api_id}] ?붿껌 ?덉쇅: {e}")
+            return {"return_code": -1, "return_msg": str(e)}
+
+    # ?????????????????????????????????????
+    # 二쇰Ц
+    # ?????????????????????????????????????
+    def buy_market_order(self, stock_code: str, qty: int,
+                         price: int = 0, trde_tp: str = "3") -> dict:
+        """留ㅼ닔 二쇰Ц (kt10000)"""
+        body = {
+            "dmst_stex_tp": "KRX",
+            "stk_cd": stock_code,
+            "ord_qty": str(qty),
+            "ord_uv": str(price) if price > 0 else "",
+            "trde_tp": trde_tp,
+            "cond_uv": "",
+        }
+        result = self._request("/api/dostk/ordr", "kt10000", body)
+        if result.get("return_code") == 0:
+            logger.info(
+                f"??留ㅼ닔二쇰Ц ?깃났 | {stock_code} | {qty}二?| "
+                f"?④?={price if price > 0 else '?쒖옣媛'} | ord_no={result.get('ord_no')}"
+            )
+        return result
+
+    def sell_market_order(self, stock_code: str, qty: int,
+                          price: int = 0, trde_tp: str = "3") -> dict:
+        """留ㅻ룄 二쇰Ц (kt10001)"""
+        body = {
+            "dmst_stex_tp": "KRX",
+            "stk_cd": stock_code,
+            "ord_qty": str(qty),
+            "ord_uv": str(price) if price > 0 else "",
+            "trde_tp": trde_tp,
+            "cond_uv": "",
+        }
+        result = self._request("/api/dostk/ordr", "kt10001", body)
+        if result.get("return_code") == 0:
+            logger.info(
+                f"??留ㅻ룄二쇰Ц ?깃났 | {stock_code} | {qty}二?| "
+                f"?④?={price if price > 0 else '?쒖옣媛'} | ord_no={result.get('ord_no')}"
+            )
+        return result
+
+    def cancel_order(self, orig_ord_no: str, stock_code: str,
+                     cancel_qty: int = 0) -> dict:
+        """二쇰Ц 痍⑥냼 (kt10003)"""
+        body = {
+            "dmst_stex_tp": "KRX",
+            "orig_ord_no": orig_ord_no,
+            "stk_cd": stock_code,
+            "mdfy_qty": "",
+            "cncl_qty": str(cancel_qty),
+        }
+        result = self._request("/api/dostk/ordr", "kt10003", body)
+        if result.get("return_code") == 0:
+            logger.info(f"??二쇰Ц 痍⑥냼 | orig_ord_no={orig_ord_no} | {stock_code}")
+        return result
+
+    # ?????????????????????????????????????
+    # ?쒖꽭 議고쉶
+    # ?????????????????????????????????????
+    def get_current_price(self, stock_code: str) -> int:
+        """二쇱떇湲곕낯?뺣낫 (ka10001) ???꾩옱媛"""
+        result = self._request("/api/dostk/stkinfo", "ka10001",
+                               {"stk_cd": stock_code})
+        if result.get("return_code") != 0:
+            return 0
+        return self._safe_price(result.get("cur_prc", "0"))
+
+    def get_stock_info(self, stock_code: str) -> dict:
+        """二쇱떇湲곕낯?뺣낫 ?꾩껜 (ka10001)"""
+        return self._request("/api/dostk/stkinfo", "ka10001",
+                             {"stk_cd": stock_code})
+
+    # ?????????????????????????????????????
+    # 遺꾨큺 李⑦듃 議고쉶 (ka10080)
+    # ?????????????????????????????????????
+    def get_minute_candles(self, stock_code: str, interval: int = 1,
+                           count: int = 60, base_date: str = None) -> list:
+        """遺꾨큺 議고쉶 (ka10080). candles[0]???대뒓 ?쒖젏?몄????뱤 濡쒓렇濡??뺤씤.
+        諛섑솚: [{time_str(14?먮━), open, high, low, close, volume}, ...]"""
+        if not base_date:
+            base_date = datetime.now().strftime("%Y%m%d")
+
+        body = {
+            "stk_cd": stock_code,
+            "tic_scope": str(interval),
+            "upd_stkpc_tp": "1",
+            "base_dt": base_date,
+        }
+
+        result = self._request("/api/dostk/chart", "ka10080", body)
+        if result.get("return_code") != 0:
+            return []
+
+        rows = result.get("stk_min_pole_chart_qry", []) or []
+        candles = []
+        for row in rows[:count]:
+            time_str = row.get("cntr_tm", "")
+            if len(time_str) != 14:
+                continue
+            candles.append({
+                "time_str": time_str,
+                "open":   self._safe_price(row.get("open_pric")),
+                "high":   self._safe_price(row.get("high_pric")),
+                "low":    self._safe_price(row.get("low_pric")),
+                "close":  self._safe_price(row.get("cur_prc")),
+                "volume": self._safe_int(row.get("trde_qty")),
+            })
+
+        if candles:
+            logger.info("[%s] ?뱤 遺꾨큺 %d媛? [0]=%s ~ [-1]=%s",
+                        stock_code, len(candles),
+                        candles[0]["time_str"], candles[-1]["time_str"])
+        return candles
+        
+        
+    # ?????????????????????????????????????
+    # 怨꾩쥖 議고쉶
+    # ?????????????????????????????????????
+    def get_deposit(self) -> dict:
+        """?덉닔湲덉긽?명쁽??(kt00001)"""
+        return self._request("/api/dostk/acnt", "kt00001",
+                             {"qry_tp": "3"})
+
+    def get_orderable_amount(self) -> int:
+        """二쇰Ц媛?κ툑??""
+        result = self.get_deposit()
+        if result.get("return_code") != 0:
+            return 0
+        return self._safe_int(result.get("ord_alow_amt", "0"))
+
+    def get_balance(self) -> dict:
+        """怨꾩쥖?됯??붽퀬?댁뿭 (kt00018)"""
+        return self._request("/api/dostk/acnt", "kt00018",
+                             {"qry_tp": "1", "dmst_stex_tp": "KRX"})
+
+    def get_holdings(self) -> dict:
+        """蹂댁쑀 醫낅ぉ ??{醫낅ぉ肄붾뱶: {?뺣낫}}"""
+        result = self.get_balance()
+        if result.get("return_code") != 0:
+            return {}
+
+        holdings = {}
+        for item in result.get("acnt_evlt_remn_indv_tot", []):
+            code = (item.get("stk_cd") or "").strip()
+            if code.startswith("A"):
+                code = code[1:]
+            if not code:
+                continue
+            holdings[code] = {
+                "name": item.get("stk_nm", ""),
+                "qty": self._safe_int(item.get("rmnd_qty", "0")),
+                "avg_price": self._safe_price(item.get("pur_pric", "0")),
+                "cur_price": self._safe_price(item.get("cur_prc", "0")),
+                "eval_amt": self._safe_int(item.get("evlt_amt", "0")),
+                "pnl": self._safe_int(item.get("evltv_prft", "0")),
+                "pnl_rate": self._safe_float(item.get("prft_rt", "0")),
+            }
+        return holdings
+
+    def get_unfilled_orders(self) -> dict:
+        """誘몄껜寃?(ka10075)"""
+        body = {
+            "all_stk_tp": "0",
+            "trde_tp": "0",
+            "stex_tp": "0",
+            "stk_cd": "",
+        }
+        return self._request("/api/dostk/acnt", "ka10075", body)
+
+    # ?????????????????????????????????????
+    # ?좏떥
+    # ?????????????????????????????????????
+    @staticmethod
+    def _safe_int(v) -> int:
+        """
+        臾몄옄?????뺤닔. ?뚯닔 蹂댁〈.
+        ?먯씡(pnl), 嫄곕옒???깆뿉 ?ъ슜.
+        """
+        if v is None:
+            return 0
+        s = str(v).replace(",", "").replace("+", "").strip()
+        try:
+            return int(float(s))
+        except (ValueError, TypeError):
+            return 0
+
+    @staticmethod
+    def _safe_float(v) -> float:
+        """
+        臾몄옄?????ㅼ닔. ?뚯닔 蹂댁〈.
+        ?먯씡瑜?pnl_rate) ?깆뿉 ?ъ슜.
+        """
+        if v is None:
+            return 0.0
+        s = str(v).replace(",", "").replace("+", "").strip()
+        try:
+            return float(s)
+        except (ValueError, TypeError):
+            return 0.0
+
+    @staticmethod
+    def _safe_price(v) -> int:
+        """
+        媛寃??꾩슜 蹂??
+        ?ㅼ? API??媛寃??묐떟?먮뒗 ?깅씫 遺??'+'/'-')媛 遺숈뼱?덉쓬:
+        - '+78800' = ?꾩씪?鍮??곸듅, 媛寃?78,800??
+        - '-78800' = ?꾩씪?鍮??섎씫, 媛寃?78,800??
+        遺?몃뒗 ?깅씫 ?쒖떆??肉?吏꾩쭨 ?뚯닔媛 ?꾨땲誘濡??덈뙎媛믪쑝濡?泥섎━.
+        """
+        if v is None:
+            return 0
+        s = str(v).replace(",", "").replace("+", "").replace("-", "").strip()
+        try:
+            return int(float(s))
+        except (ValueError, TypeError):
+            return 0
+
+
+=== FILE: C:\Users\rober\OneDrive\문서\vscode\AutoTrader_Project\api\kiwoom_ws.py ===
+
+"""
+?ㅼ? WebSocket ?대씪?댁뼵??(?뺤옣??
+?????????????????????????????????????
+??븷:
+  - WS ?곌껐, 濡쒓렇?? PING ?먮룞 ?묐떟, ?먮룞 ?ъ뿰寃?
+  - 議곌굔寃???ㅼ떆媛?(CNSRREQ search_type=1): ?몄엯/?댄깉 ?좏샇 肄쒕갚
+  - 議곌굔寃??利됱떆 寃??(CNSRREQ search_type=0): ?꾩옱 吏꾩엯 醫낅ぉ ?ㅻ깄?? ???좉퇋
+  - 醫낅ぉ蹂??ㅼ떆媛?(REG): 二쇱떇泥닿껐(0B) + 二쇱떇?멸??붾웾(0D) 肄쒕갚
+  - ?ъ젒????議곌굔??+ ?ㅼ떆媛??먮룞 ?щ벑濡?
+  - REG 援щ룆 ?ъ씠 sleep?쇰줈 鍮덈룄 ?쒗븳 ?뚰뵾  ???좉퇋
+"""
+import asyncio
+import json
+import websockets
+
+from config import settings
+from utils.logger import logger
+
+
+TYPE_TRADE = "0B"
+TYPE_ORDERBOOK = "0D"
+
+# WS REG 鍮덈룄 ?쒗븳 ?뚰뵾 (?ㅼ? ?뺤콉)
+REG_INTERVAL_SEC = 0.3
+
+
+class KiwoomWS:
+    MOCK_URL = "wss://mockapi.kiwoom.com:10000/api/dostk/websocket"
+    REAL_URL = "wss://api.kiwoom.com:10000/api/dostk/websocket"
+
+    def __init__(
+        self,
+        token: str,
+        is_mock: bool = True,
+        on_signal=None,
+        on_trade=None,
+        on_orderbook=None,
+    ):
+        self.token = token
+        self.url = self.MOCK_URL if is_mock else self.REAL_URL
+        self.on_signal = on_signal
+        self.on_trade = on_trade
+        self.on_orderbook = on_orderbook
+
+        self.ws = None
+        self.connected = False
+        self._stop = False
+
+        self._subscribed_seqs: list[str] = []
+        self.condition_map: dict[str, str] = {}
+        self._subscribed_realtime: dict[str, set[str]] = {}
+        self._cond_keys_logged = False   # ?ㅼ떆媛?議곌굔 raw ??1??濡쒓퉭??
+
+        # REG ?몄텧 吏곷젹??+ 鍮덈룄 ?쒗븳
+        self._reg_lock = asyncio.Lock()
+        self._last_reg_ts = 0.0
+
+    # ?????????????????????????????????????????
+    # 1. ?곌껐 & 濡쒓렇??
+    # ?????????????????????????????????????????
+    async def connect(self):
+        logger.info(f"?뵆 WebSocket ?곌껐 ?쒕룄: {self.url}")
+        self.ws = await websockets.connect(self.url, ping_interval=None)
+
+        login_msg = {"trnm": "LOGIN", "token": self.token}
+        await self.ws.send(json.dumps(login_msg))
+
+        raw = await asyncio.wait_for(self.ws.recv(), timeout=10)
+        resp = json.loads(raw)
+
+        if resp.get("trnm") != "LOGIN":
+            raise RuntimeError(f"LOGIN ?묐떟???꾨땶 硫붿떆吏 ?섏떊: {resp}")
+        if resp.get("return_code") != 0:
+            raise RuntimeError(
+                f"LOGIN ?ㅽ뙣: code={resp.get('return_code')} msg={resp.get('return_msg')}"
+            )
+
+        self.connected = True
+        logger.info("??WebSocket 濡쒓렇???깃났")
+
+    # ?????????????????????????????????????????
+    # 2. 議곌굔??紐⑸줉 議고쉶
+    # ?????????????????????????????????????????
+    async def fetch_condition_list(self) -> dict[str, str]:
+        await self._send({"trnm": "CNSRLST"})
+        resp = await self._wait_for("CNSRLST", timeout=10)
+
+        items = resp.get("data") or []
+        result = {}
+        for it in items:
+            if isinstance(it, list):
+                seq, name = str(it[0]), str(it[1])
+            elif isinstance(it, dict):
+                seq = str(it.get("seq") or it.get("Seq") or "")
+                name = str(it.get("name") or it.get("Name") or "")
+            else:
+                continue
+            if seq:
+                result[seq] = name
+
+        self.condition_map = result
+        logger.info(f"?뱥 議곌굔??紐⑸줉 {len(result)}媛?議고쉶 ?꾨즺")
+        for seq, name in result.items():
+            logger.info(f"   seq={seq}  name={name}")
+
+        if not result:
+            logger.warning(
+                "?좑툘 議곌굔?앹씠 0媛쒖엯?덈떎! ?곸썒臾? [0150]?먯꽌 議곌굔?앹쓣 留뚮뱾怨?"
+                "'??議곌굔????????뚮??붿? ?뺤씤?섏꽭??"
+            )
+        return result
+
+    # ?????????????????????????????????????????
+    # 3. 議곌굔???ㅼ떆媛??깅줉/?댁젣
+    # ?????????????????????????????????????????
+    async def subscribe_condition(self, seq: str, stex_tp: str = "K"):
+        seq = str(seq)
+        msg = {
+            "trnm": "CNSRREQ", "seq": seq, "search_type": "1",
+            "stex_tp": stex_tp, "cont_yn": "N", "next_key": "",
+        }
+        await self._send(msg)
+        if seq not in self._subscribed_seqs:
+            self._subscribed_seqs.append(seq)
+        name = self.condition_map.get(seq, "?")
+        logger.info(f"?뱻 議곌굔???ㅼ떆媛??깅줉: seq={seq} ({name})")
+
+    async def unsubscribe_condition(self, seq: str):
+        seq = str(seq)
+        await self._send({"trnm": "CNSRCLR", "seq": seq})
+        if seq in self._subscribed_seqs:
+            self._subscribed_seqs.remove(seq)
+        logger.info(f"?벖 議곌굔???ㅼ떆媛??댁젣: seq={seq}")
+
+    # ?????????????????????????????????????????
+    # ???좉퇋: 議곌굔??利됱떆 寃??(?꾩옱 吏꾩엯 醫낅ぉ ?ㅻ깄??
+    # ?????????????????????????????????????????
+    async def fetch_condition_snapshot(
+        self, seq: str, stex_tp: str = "K", timeout: int = 10,
+    ) -> list[str]:
+        """search_type=0?쇰줈 ?꾩옱 ?쒖젏??議곌굔?앹뿉 ?ㅼ뼱?덈뒗 醫낅ぉ 紐⑸줉 1??議고쉶.
+
+        Returns: 醫낅ぉ肄붾뱶 由ъ뒪??(?? ['005930', '003690', ...])
+        """
+        seq = str(seq)
+        await self._send({
+            "trnm": "CNSRREQ", "seq": seq, "search_type": "0",
+            "stex_tp": stex_tp, "cont_yn": "N", "next_key": "",
+        })
+
+        try:
+            resp = await self._wait_for("CNSRREQ", timeout=timeout)
+        except RuntimeError as e:
+            logger.warning(f"?좑툘 議곌굔???ㅻ깄??[seq={seq}] ?묐떟 ?놁쓬: {e}")
+            return []
+
+        data = resp.get("data") or []
+        if isinstance(data, dict):
+            data = [data]
+
+        codes = []
+        for item in data:
+            code = (
+                item.get("9001") or item.get("jmcode") or item.get("stk_cd") or ""
+            ).strip()
+            if code.startswith("A"):
+                code = code[1:]
+            if code:
+                codes.append(code)
+
+        name = self.condition_map.get(seq, "?")
+        logger.info(f"?벝 議곌굔???ㅻ깄??[seq={seq} {name}]: {len(codes)}醫낅ぉ ??{codes}")
+        return codes
+
+    # ?????????????????????????????????????????
+    # 4. 醫낅ぉ蹂??ㅼ떆媛??깅줉 (0B/0D) ??鍮덈룄 ?쒗븳 ?뚰뵾
+    # ?????????????????????????????????????????
+    async def subscribe_realtime(
+        self, items: list[str], types: list[str], grp_no: str = "1"
+    ):
+        if not items or not types:
+            return
+        async with self._reg_lock:
+            # 吏곸쟾 REG ?몄텧怨쇱쓽 媛꾧꺽 蹂댁옣
+            loop = asyncio.get_event_loop()
+            now = loop.time()
+            elapsed = now - self._last_reg_ts
+            if elapsed < REG_INTERVAL_SEC:
+                await asyncio.sleep(REG_INTERVAL_SEC - elapsed)
+
+            msg = {
+                "trnm": "REG", "grp_no": grp_no,
+                "refresh": "1",
+                "data": [{"item": items, "type": types}],
+            }
+            await self._send(msg)
+            self._last_reg_ts = asyncio.get_event_loop().time()
+
+            for code in items:
+                self._subscribed_realtime.setdefault(code, set()).update(types)
+            logger.info(f"?뱻 ?ㅼ떆媛??깅줉: {items} types={types}")
+
+    async def unsubscribe_realtime(
+        self, items: list[str], types: list[str], grp_no: str = "1"
+    ):
+        if not items or not types:
+            return
+        msg = {
+            "trnm": "REMOVE", "grp_no": grp_no,
+            "data": [{"item": items, "type": types}],
+        }
+        await self._send(msg)
+        for code in items:
+            if code in self._subscribed_realtime:
+                self._subscribed_realtime[code].difference_update(types)
+                if not self._subscribed_realtime[code]:
+                    del self._subscribed_realtime[code]
+        logger.info(f"?벖 ?ㅼ떆媛??댁젣: {items} types={types}")
+
+    # ?????????????????????????????????????????
+    # 5. ?섏떊 猷⑦봽
+    # ?????????????????????????????????????????
+    async def listen(self):
+        backoff = 1
+        while not self._stop:
+            try:
+                if not self.connected:
+                    await self.connect()
+                    await self.fetch_condition_list()
+                    for seq in list(self._subscribed_seqs):
+                        await self.subscribe_condition(seq)
+                    for code, types in list(self._subscribed_realtime.items()):
+                        await self.subscribe_realtime([code], list(types))
+                    backoff = 1
+
+                async for raw in self.ws:
+                    if self._stop:
+                        break
+                    await self._handle_message(raw)
+
+            except websockets.ConnectionClosed as e:
+                logger.warning(f"?뵆 ?곌껐 ?딄? (code={e.code}, reason={e.reason})")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.exception(f"???섏떊 猷⑦봽 ?덉쇅: {e}")
+
+            self.connected = False
+            if self._stop:
+                break
+
+            logger.info(f"?삼툘 {backoff}珥????ъ뿰寃??쒕룄...")
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 60)
+
+    async def _handle_message(self, raw: str):
+        try:
+            msg = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning(f"?좑툘 JSON ?뚯떛 ?ㅽ뙣: {raw[:200]}")
+            return
+
+        trnm = msg.get("trnm")
+
+        if trnm == "PING":
+            await self.ws.send(raw)
+            return
+
+        if trnm in ("REAL", "CNSRREQ"):
+            await self._dispatch_signal(msg)
+            return
+
+        logger.info(f"?뱿 WS msg trnm={trnm}: {str(msg)[:300]}")
+
+    # ?????????????????????????????????????????
+    # 6. ?붿뒪?⑥튂
+    # ?????????????????????????????????????????
+    async def _dispatch_signal(self, msg: dict):
+        data = msg.get("data")
+        if not data:
+            return
+        if isinstance(data, dict):
+            data = [data]
+
+        for item in data:
+            item_type = item.get("type")
+            if item_type == TYPE_TRADE:
+                await self._dispatch_trade_item(item)
+            elif item_type == TYPE_ORDERBOOK:
+                await self._dispatch_orderbook_item(item)
+            else:
+                await self._dispatch_condition_item(item)
+
+    async def _dispatch_condition_item(self, item: dict):
+        stock_code = (
+            item.get("9001") or item.get("jmcode") or item.get("stk_cd") or ""
+        ).strip()
+        if stock_code.startswith("A"):
+            stock_code = stock_code[1:]
+        signal_type = item.get("843") or item.get("insert_delete_tp") or "I"
+        if not stock_code:
+            return
+        mark = "?뱢" if signal_type == "I" else "?뱣"
+        kind = "?몄엯" if signal_type == "I" else "?댄깉"
+        logger.info(f"{mark} {kind} ?좏샇: {stock_code}")
+        if self.on_signal:
+            try:
+                await self.on_signal(stock_code, signal_type, item)
+            except Exception:
+                logger.exception(f"on_signal 肄쒕갚 ?덉쇅: {stock_code}")
+
+    async def _dispatch_trade_item(self, item: dict):
+        if not self.on_trade:
+            return
+        stock_code = (item.get("item") or "").lstrip("A").strip()
+        values = item.get("values") or {}
+
+        price = self._parse_signed_int(values.get("10"))
+        volume_signed = self._parse_signed_int(values.get("15"))
+
+        if volume_signed > 0:
+            side = "buy"
+        elif volume_signed < 0:
+            side = "sell"
+        else:
+            side = "neutral"
+
+        parsed = {
+            "stock_code": stock_code,
+            "price": abs(price),
+            "volume": abs(volume_signed),
+            "side": side,
+            "strength": self._parse_float(values.get("228")),
+            "time": values.get("20", ""),
+            "raw": values,
+        }
+        try:
+            await self.on_trade(parsed)
+        except Exception:
+            logger.exception(f"on_trade 肄쒕갚 ?덉쇅: {stock_code}")
+
+    async def _dispatch_condition_item(self, item: dict):
+        stock_code = (
+            item.get("9001") or item.get("jmcode") or item.get("stk_cd") or ""
+        ).strip()
+        if stock_code.startswith("A"):
+            stock_code = stock_code[1:]
+        signal_type = item.get("843") or item.get("insert_delete_tp") or "I"
+        # 議곌굔 ?쇰젴踰덊샇(?대뒓 議곌굔?먯꽌 ?붾뒗吏). ?꾨뱶 異붿젙: 841 ???덈릺硫??ㅼ쓬 ??raw ??濡쒓렇濡??뺤젙
+        cond_seq = str(
+            item.get("841") or item.get("cond_idx") or item.get("seq") or ""
+        ).strip()
+        if not stock_code:
+            return
+
+        # ?ㅼ떆媛?議곌굔 ?꾩씠???ㅻ? 1?뚮쭔 濡쒓퉭 (seq ?꾨뱶 ?뺤젙??
+        if not self._cond_keys_logged:
+            logger.info(f"?뵎 議곌굔 ?ㅼ떆媛?raw ?? {list(item.keys())}")
+            self._cond_keys_logged = True
+
+        mark = "?뱢" if signal_type == "I" else "?뱣"
+        kind = "?몄엯" if signal_type == "I" else "?댄깉"
+        logger.info(f"{mark} {kind} ?좏샇: {stock_code} (seq={cond_seq or '?'})")
+        if self.on_signal:
+            try:
+                await self.on_signal(stock_code, signal_type, item, cond_seq or None)
+            except Exception:
+                logger.exception(f"on_signal 肄쒕갚 ?덉쇅: {stock_code}")
+    # ?????????????????????????????????????????
+    # 7. ?뚯떛 ?좏떥
+    # ?????????????????????????????????????????
+    @staticmethod
+    def _parse_signed_int(s) -> int:
+        if not s:
+            return 0
+        try:
+            return int(str(s).strip())
+        except ValueError:
+            return 0
+
+    @staticmethod
+    def _parse_uint(s) -> int:
+        if not s:
+            return 0
+        try:
+            return abs(int(str(s).strip()))
+        except ValueError:
+            return 0
+
+    @staticmethod
+    def _parse_float(s) -> float:
+        if not s:
+            return 0.0
+        try:
+            return float(str(s).strip())
+        except ValueError:
+            return 0.0
+
+    # ?????????????????????????????????????????
+    # 8. ?≪떊/?湲??좏떥
+    # ?????????????????????????????????????????
+    async def _send(self, payload: dict):
+        if not self.ws:
+            raise RuntimeError("WebSocket 誘몄뿰寃??곹깭")
+        await self.ws.send(json.dumps(payload))
+
+    async def _wait_for(self, trnm: str, timeout: int = 10) -> dict:
+        loop = asyncio.get_event_loop()
+        end = loop.time() + timeout
+        while loop.time() < end:
+            remaining = end - loop.time()
+            try:
+                raw = await asyncio.wait_for(self.ws.recv(), timeout=remaining)
+            except asyncio.TimeoutError:
+                raise RuntimeError(f"{trnm} ?묐떟 ??꾩븘??({timeout}s)")
+            msg = json.loads(raw)
+            if msg.get("trnm") == "PING":
+                await self.ws.send(raw)
+                continue
+            if msg.get("trnm") == trnm:
+                return msg
+        raise RuntimeError(f"{trnm} ?묐떟 ??꾩븘??)
+
+    async def close(self):
+        self._stop = True
+        if self.ws:
+            try:
+                for seq in list(self._subscribed_seqs):
+                    await self.unsubscribe_condition(seq)
+                for code, types in list(self._subscribed_realtime.items()):
+                    await self.unsubscribe_realtime([code], list(types))
+            except Exception:
+                pass
+            await self.ws.close()
+        logger.info("?몝 WebSocket 醫낅즺")
+
+
+=== FILE: C:\Users\rober\OneDrive\문서\vscode\AutoTrader_Project\api\test_minute_candles.py ===
+
+"""
+遺꾨큺 議고쉶 硫붿꽌???뚯뒪??
+
+?ㅽ뻾: python test_minute_candles.py
+"""
+from api.auth import get_access_token
+from api.kiwoom_rest import KiwoomREST
+from config import settings
+
+
+def main():
+    # ?좏겙 諛쒓툒
+    token = get_access_token()
+    if not token:
+        print("???좏겙 諛쒓툒 ?ㅽ뙣")
+        return
+    print(f"???좏겙 諛쒓툒 ?꾨즺: {token[:20]}...")
+
+    rest = KiwoomREST(token, is_mock=settings.IS_MOCK)
+
+    # ????? ?뚯뒪??1: 1遺꾨큺 5媛??????
+    print("\n" + "=" * 60)
+    print("?뚯뒪??1: ?쇱꽦?꾩옄(005930) 1遺꾨큺 5媛?(理쒖떊??")
+    print("=" * 60)
+
+    candles = rest.get_minute_candles("005930", interval=1, count=5)
+    print(f"諛쏆? 遊?媛쒖닔: {len(candles)}")
+
+    for i, c in enumerate(candles):
+        diff = c["close"] - c["open"]
+        if diff > 0:
+            sign = f"?묐큺 +{diff:,}??
+        elif diff < 0:
+            sign = f"?뚮큺 {diff:,}??
+        else:
+            sign = "蹂댄빀"
+        print(f"\n[{i}] {c['time_str']}")
+        print(f"  ??{c['open']:>9,}  怨?{c['high']:>9,}  "
+              f"?:{c['low']:>9,}  醫?{c['close']:>9,}")
+        print(f"  嫄곕옒?? {c['volume']:>10,}  ({sign})")
+
+    # ????? ?뚯뒪??2: 60遺꾨큺 5媛??????
+    print("\n" + "=" * 60)
+    print("?뚯뒪??2: ?쇱꽦?꾩옄(005930) 60遺꾨큺 5媛?)
+    print("=" * 60)
+
+    candles_60 = rest.get_minute_candles("005930", interval=60, count=5)
+    print(f"諛쏆? 遊?媛쒖닔: {len(candles_60)}")
+
+    for i, c in enumerate(candles_60):
+        print(f"  [{i}] {c['time_str']}  "
+              f"??{c['open']:,}  怨?{c['high']:,}  "
+              f"?:{c['low']:,}  醫?{c['close']:,}")
+
+    # ????? ?뚯뒪??3: 09:00 60遺꾨큺 ?쒓? (李멸퀬?? ?????
+    print("\n" + "=" * 60)
+    print("?뚯뒪??3: 09:00 60遺꾨큺 ?쒓? 議고쉶")
+    print("=" * 60)
+
+    targets = [
+        ("005930", "?쇱꽦?꾩옄"),
+        ("000660", "SK?섏씠?됱뒪"),
+        ("042700", "?쒕?諛섎룄泥?),
+    ]
+    for code, name in targets:
+        op = rest.get_today_60min_open(code)
+        print(f"  {name:8s} ({code}): {op:>10,}??)
+
+    # ????? ?뚯뒪??4: ?대룞?됯퇏??怨꾩궛 ?????
+    print("\n" + "=" * 60)
+    print("?뚯뒪??4: 5MA / 60MA 怨꾩궛 (?쇱꽦?꾩옄)")
+    print("=" * 60)
+
+    candles_70 = rest.get_minute_candles("005930", interval=1, count=70)
+    print(f"諛쏆? 1遺꾨큺 媛쒖닔: {len(candles_70)}")
+
+    if len(candles_70) >= 5:
+        ma5_closes = [c["close"] for c in candles_70[:5]]
+        ma5 = sum(ma5_closes) / 5
+        print(f"  5MA  = {ma5:>10,.0f}?? (理쒓렐 5遊??됯퇏)")
+
+    if len(candles_70) >= 60:
+        ma60_closes = [c["close"] for c in candles_70[:60]]
+        ma60 = sum(ma60_closes) / 60
+        print(f"  60MA = {ma60:>10,.0f}?? (理쒓렐 60遊??됯퇏)")
+
+    if len(candles_70) > 0:
+        current = candles_70[0]["close"]
+        print(f"  ?꾩옱媛  = {current:>10,}??)
+        if len(candles_70) >= 5:
+            diff5 = (current - ma5) / ma5 * 100
+            print(f"  5MA  ?鍮? {diff5:+.2f}%")
+        if len(candles_70) >= 60:
+            diff60 = (current - ma60) / ma60 * 100
+            print(f"  60MA ?鍮? {diff60:+.2f}%")
+
+    print("\n??紐⑤뱺 ?뚯뒪???꾨즺")
+
+
+if __name__ == "__main__":
+    main()
+
+
+=== FILE: C:\Users\rober\OneDrive\문서\vscode\AutoTrader_Project\api\ws_supervisor.py ===
+
+# ws_supervisor.py
+"""
+WebSocket ?ъ뿰寃??덊띁諛붿씠? (WSSupervisor)
+==========================================
+紐⑹쟻: WS ?딄? ?????(a)?먮룞 ?ъ뿰寃?諛깆삤?? (b)half-open(?먮윭 ?놁씠 ?곗씠?곕쭔 ?딄?) 媛먯?,
+      (c)?ъ뿰寃곕쭏??議곌굔寃???щ벑濡?媛뺤젣.
+
+??媛??以묒슂 ??
+  ?ㅼ? WS???딄꼈???ㅼ떆 遺숈쑝硫?議곌굔寃??0150] ?깅줉(CNSRREQ seq=6/7/8)???좎븘媛꾨떎.
+  ?ъ뿰寃곕뤌???щ벑濡앹쓣 ???섎㈃ ?곌껐? 硫姨≫빐 蹂댁뿬???듭?媛 0嫄댁씠 ?쒕떎.
+  ??議곌굔?깅줉 肄붾뱶??run_once_fn '??, ?곌껐+濡쒓렇??吏곹썑??'留ㅻ쾲' ?ｌ쓣 寃?
+  (利앹긽 '議곌굔寃?됯낵 肄붾뵫 遺덉씪移?/ ?딄? / ?ㅻ깄??0醫낅ぉ'???좊젰?????먯씤.)
+
+?쇱씠釉뚮윭由?鍮꾩쓽議?
+  websocket-client(WebSocketApp)??websockets(asyncio)???곴??놁씠,
+  '?곌껐 + 濡쒓렇??+ 議곌굔?깅줉 + ?섏떊猷⑦봽(釉붾줈??' ???⑹뼱由щ? run_once_fn?쇰줈 媛먯떥硫???
+
+half-open 媛먯? (諛섏? 二쎌? ?뚯폆)
+  - ?섏떊 肄쒕갚?먯꽌 留?硫붿떆吏留덈떎 sup.mark_alive() ?몄텧(?ㅼ? PINGPONG echo 吏?먯씠硫?異⑸텇).
+  - heartbeat_timeout ?숈븞 ??嫄대룄 ???ㅻ㈃ 二쎌? ?곌껐濡?蹂닿퀬 媛뺤젣 ?ъ뿰寃?
+  - ??釉붾줈??ws.recv()??stop_event留뚯쑝濡???源⑥쭊?? ??以??섎굹 ?꾩슂:
+      (1) ?섏떊 ?뚯폆????꾩븘???ㅼ젙(ws.settimeout(5)) ??recv媛 二쇨린?곸쑝濡????stop_event ?뺤씤
+      (2) on_force_close 肄쒕갚 ?쒓났 ???뚯튂?낆씠 ws.close()濡?媛뺤젣濡?源⑥?
+    媛?ν븯硫?(1)+(2) ????沅뚯옣.
+
+?곌껐 諛⑸쾿
+  1) 湲곗〈 WS 肄붾뱶瑜??⑥닔 ?섎굹濡?臾띔린 (stop_event ?몄옄 諛쏄쾶):
+       def _run_ws_once(stop_event):
+           ws = connect()                 # ?곌껐
+           ws.settimeout(5)               # ??沅뚯옣: recv媛 二쇨린?곸쑝濡??由ш쾶
+           login(ws)                      # 濡쒓렇??
+           register_conditions(ws)        # ?끸쁾 seq=6/7/8 議곌굔寃???щ벑濡?(留??곌껐留덈떎!)
+           while not stop_event.is_set():
+               try:
+                   msg = ws.recv()        # 釉붾줈????꾩븘??5s)
+               except TimeoutError:
+                   continue               # ??꾩븘?껋? ?뺤긽 ??猷⑦봽 ?ы솗??
+               sup.mark_alive()           # half-open 媛먯???
+               handle(msg)                # PINGPONG echo / REAL / 議곌굔?듭? 泥섎━
+           ws.close()
+
+  2) ?덊띁諛붿씠? (遊?湲곕룞 ??:
+       from ws_supervisor import WSSupervisor
+       sup = WSSupervisor(
+           _run_ws_once,
+           heartbeat_timeout=30,          # 30s 臾댁닔????媛뺤젣 ?ъ뿰寃?(0?대㈃ ??
+           on_force_close=lambda: ws_ref and ws_ref.close(),  # ?좏깮: 釉붾줈??recv 源⑥슦湲?
+           logger=log,
+       )
+       sup.start()
+
+  3) 醫낅즺: sup.stop()
+"""
+
+from __future__ import annotations
+
+import time
+import random
+import threading
+from typing import Any, Callable, Optional
+
+
+class WSSupervisor:
+    def __init__(
+        self,
+        run_once_fn: Callable[[threading.Event], Any],
+        on_state: Optional[Callable[[str], None]] = None,
+        on_force_close: Optional[Callable[[], None]] = None,
+        base_backoff: float = 1.0,
+        max_backoff: float = 30.0,
+        healthy_reset_sec: float = 60.0,
+        heartbeat_timeout: float = 0.0,   # 0?대㈃ half-open 媛먯? ??
+        logger: Any = None,
+    ) -> None:
+        """
+        run_once_fn(stop_event): ?곌껐+濡쒓렇??議곌굔?깅줉+?섏떊猷⑦봽(釉붾줈??. ?딄린硫?由ы꽩/?덉쇅 ???ъ뿰寃?
+        on_state(state)        : 'connecting'/'connected'/'disconnected'/'reconnecting' 肄쒕갚(?좏깮).
+        on_force_close()       : ?뚯튂??醫낅즺 ??釉붾줈??recv瑜?源⑥슦湲??꾪븳 媛뺤젣 close(?좏깮, 沅뚯옣).
+        base/max_backoff       : ?ъ뿰寃??湲?1s??s??s...??0s(jitter ?ы븿).
+        healthy_reset_sec      : ???쒓컙 ?댁긽 遺숈뼱?덈떎 ?딄린硫?諛깆삤?꾨? base濡?由ъ뀑.
+        heartbeat_timeout      : 臾댁닔?????쒓컙 珥덇낵 ??half-open?쇰줈 蹂닿퀬 媛뺤젣 ?ъ뿰寃?
+        """
+        self._run_once = run_once_fn
+        self._on_state = on_state
+        self._on_force_close = on_force_close
+        self._base = float(base_backoff)
+        self._max = float(max_backoff)
+        self._healthy = float(healthy_reset_sec)
+        self._hb_timeout = float(heartbeat_timeout)
+        self._log = logger
+
+        self._running = False
+        self._sup_thread: Optional[threading.Thread] = None
+        self._session_stop: Optional[threading.Event] = None
+        self._last_alive = 0.0
+        self._lock = threading.RLock()
+        self._reconnects = 0
+
+    # ---- lifecycle ----
+    def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        self._sup_thread = threading.Thread(target=self._supervise, name="ws_supervisor", daemon=True)
+        self._sup_thread.start()
+        self._info("?㏊ ws_supervisor ?쒖옉")
+
+    def stop(self, timeout: float = 5.0) -> None:
+        if not self._running:
+            return
+        self._running = False
+        if self._session_stop:
+            self._session_stop.set()
+        self._force_close()   # 釉붾줈??recv 源⑥슦湲?
+        if self._sup_thread:
+            self._sup_thread.join(timeout=timeout)
+        self._info(f"?㏊ ws_supervisor 醫낅즺 (?ъ뿰寃?{self._reconnects}??")
+
+    def mark_alive(self) -> None:
+        """?섏떊 肄쒕갚?먯꽌 留?硫붿떆吏留덈떎 ?몄텧. half-open 媛먯???湲곗???"""
+        with self._lock:
+            self._last_alive = time.time()
+
+    def reconnect_count(self) -> int:
+        return self._reconnects
+
+    # ---- core loop ----
+    def _supervise(self) -> None:
+        backoff = self._base
+        first = True
+        while self._running:
+            self._session_stop = threading.Event()
+            self.mark_alive()
+            self._emit_state("connecting" if first else "reconnecting")
+            first = False
+            t0 = time.time()
+
+            wd = None
+            if self._hb_timeout > 0:
+                wd = threading.Thread(
+                    target=self._watchdog, args=(self._session_stop,),
+                    name="ws_heartbeat", daemon=True,
+                )
+                wd.start()
+
+            try:
+                self._emit_state("connected")
+                self._run_once(self._session_stop)   # 釉붾줈?? ?딄린硫?由ы꽩/?덉쇅
+            except Exception as e:  # noqa: BLE001
+                self._err(f"?뵶 WS ?몄뀡 ?덉쇅: {e}")
+            finally:
+                self._session_stop.set()
+                if wd:
+                    wd.join(timeout=2.0)
+
+            if not self._running:
+                break
+
+            self._reconnects += 1
+            self._emit_state("disconnected")
+            alive = time.time() - t0
+            if alive >= self._healthy:
+                backoff = self._base   # ?ㅻ옒 遺숈뼱?덉뿀?쇰㈃ 諛깆삤??由ъ뀑
+            self._warn(f"?뵆 WS ?딄? (?좎? {alive:.0f}s) ??{backoff:.1f}s ???ъ뿰寃?(#{self._reconnects})")
+            self._sleep_backoff(backoff)
+            backoff = min(backoff * 2, self._max)
+
+    def _watchdog(self, session_stop: threading.Event) -> None:
+        while not session_stop.is_set() and self._running:
+            time.sleep(1.0)
+            with self._lock:
+                silent = time.time() - self._last_alive
+            if silent > self._hb_timeout:
+                self._warn(f"?뮘 WS {silent:.0f}s 臾댁닔??half-open ?섏떖) ??媛뺤젣 ?ъ뿰寃?)
+                session_stop.set()
+                self._force_close()
+                return
+
+    # ---- helpers ----
+    def _sleep_backoff(self, backoff: float) -> None:
+        delay = backoff + random.uniform(0, backoff * 0.3)   # jitter
+        end = time.time() + delay
+        while time.time() < end and self._running:
+            time.sleep(0.2)
+
+    def _force_close(self) -> None:
+        if self._on_force_close:
+            try:
+                self._on_force_close()
+            except Exception as e:  # noqa: BLE001
+                self._err(f"on_force_close ?덉쇅: {e}")
+
+    def _emit_state(self, state: str) -> None:
+        if self._on_state:
+            try:
+                self._on_state(state)
+            except Exception as e:  # noqa: BLE001
+                self._err(f"on_state 肄쒕갚 ?덉쇅: {e}")
+
+    def _info(self, m: str):
+        if self._log: self._log.info(m)
+    def _warn(self, m: str):
+        if self._log: self._log.warning(m)
+    def _err(self, m: str):
+        if self._log: self._log.error(m)
