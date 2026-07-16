@@ -1,0 +1,42 @@
+name: Auto Update Naver Themes
+
+on:
+  schedule:
+    # ⏰ 매일 아침 6시 실행 (KST 기준)
+    # GitHub 서버는 UTC(협정세계시) 기준이므로 KST에서 9시간을 빼야 합니다.
+    # 즉, UTC 기준 전날 21:00 (밤 9시)에 실행하도록 설정합니다.
+    - cron: '0 21 * * *'
+  
+  # 🔘 수동 실행 버튼 활성화 (테스트용)
+  workflow_dispatch: 
+
+jobs:
+  build-and-update:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: 1️⃣ 저장소 코드 가져오기 (Checkout)
+      uses: actions/checkout@v3
+
+    - name: 2️⃣ 파이썬 환경 설정
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: 3️⃣ 필수 라이브러리 설치
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests beautifulsoup4
+
+    - name: 4️⃣ 파이썬 크롤링 스크립트 실행
+      run: python fetch_themes.py
+
+    - name: 5️⃣ 변경된 JSON 파일 깃허브에 자동 커밋 및 푸시
+      run: |
+        # 봇 계정으로 깃허브 세팅
+        git config --local user.email "github-actions[bot]@users.noreply.github.com"
+        git config --local user.name "github-actions[bot]"
+        git add theme_data.json
+        
+        # 데이터가 변경되었을 때만 커밋(에러 방지)
+        git diff-index --quiet HEAD || (git commit -m "🤖 Auto-update Naver themes [skip ci]" && git push)
