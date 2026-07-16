@@ -2,10 +2,9 @@ import requests
 from bs4 import BeautifulSoup
 import json
 import time
-import os
 
 def fetch_all_naver_themes():
-    # 네이버 서버의 봇 차단 방어용 헤더 (일반 브라우저로 위장)
+    # 네이버 서버의 봇 차단 방어용 헤더
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     all_themes = []
     page = 1
@@ -15,8 +14,8 @@ def fetch_all_naver_themes():
         response = requests.get(url, headers=headers)
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # 테마명 추출
-        themes = soup.select('.theme_name')
+        # 🔥 수정된 부분: 네이버 실제 HTML 구조에 맞게 돋보기(선택자) 변경
+        themes = soup.select('td.col_type1 > a')
         
         # 마지막 페이지 도달 시 종료
         if not themes: 
