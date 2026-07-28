@@ -59,7 +59,7 @@ class TradeFlowTracker:
         w_buy = 0.0
         w_sell = 0.0
         for ts, price, side, vol in d:
-            if ts < cutoff:
+            if ts < cutoff or ts > now:
                 continue
             w = weight_fn(now - ts, window_sec)
             if side == "buy":
@@ -163,3 +163,36 @@ class TradeFlowTracker:
         def fn(age: float, window: float) -> float:
             return math.exp(-age / tau)
         return fn
+    def is_intensity_sustained(
+        self,
+        stock_code: str,
+        threshold: float,
+        duration_sec: int,
+        now: float = None,
+        sample_window_sec: float = 10,
+        min_ticks: int = 5,
+    ) -> bool:
+        """특정 체결강도(threshold) 이상이 duration_sec 동안 끊기지 않고 유지됐는지 확인.
+        duration_sec 구간을 sample_window_sec 간격으로 샘플링하며, 각 샘플 시점의
+        시간가중 체결강도(compute_strength)가 전부 threshold 이상이어야 True.
+        한 구간이라도 threshold 밑으로 떨어지면(또는 틱이 비어 0으로 계산되면) False."""
+        now = now if now is not None else time.time()
+        d = self.ticks.get(stock_code)
+        if not d:
+            return False
+
+        cutoff = now - duration_sec
+        recent = [t for t in d if t[0] >= cutoff]
+        if len(recent) < min_ticks:
+            return False
+
+        step = max(sample_window_sec, 1)
+        sample_time = now
+        end_time = now - duration_sec
+        while sample_time >= end_time:
+            strength = self.compute_strength(stock_code, sample_window_sec, now=sample_time)
+            if strength < threshold:
+                return False
+            sample_time -= step
+
+        return True

@@ -12,6 +12,7 @@ StrategyManager 통합:
     `buy()` / `sell()` 단순 wrapper 메서드를 통해 호출.
   - 기존 try_buy / check_and_sell_positions / force_close_all은 호환을 위해 유지.
 """
+
 import time
 from datetime import datetime
 from typing import Optional
@@ -21,24 +22,23 @@ from api.auth import send_telegram
 from utils.logger import logger
 from utils.price_helper import add_ticks, round_to_tick
 
-
 # ─────────────────────────────────────
 # 전략 파라미터
 # ─────────────────────────────────────
-BUY_AMOUNT_PER_STOCK = 2_000_000     # 종목당 매수금액 (200만원)
-MAX_POSITIONS = 5                    # 동시 보유 최대 종목수
-BUY_COOLDOWN_SEC = 300               # 같은 종목 재매수 쿨다운 (5분)
+BUY_AMOUNT_PER_STOCK = 2_000_000  # 종목당 기본 매수금액 (200만원)
+MAX_POSITIONS = 6  # 동시 보유 최대 종목수 (strategy_manager.MAX_HOLDINGS와 일치, 2026-07-27)
+BUY_COOLDOWN_SEC = 300  # 같은 종목 재매수 쿨다운 (5분)
 
-TAKE_PROFIT_PCT = 2.5                # +2.5% 익절
-STOP_LOSS_PCT = -1.5                 # -1.5% 손절
-TIME_STOP_MIN = 30                   # 30분 보유 후 0% 미만이면 정리
+TAKE_PROFIT_PCT = 2.5  # +2.5% 익절
+STOP_LOSS_PCT = -1.5  # -1.5% 손절
+TIME_STOP_MIN = 30  # 30분 보유 후 0% 미만이면 정리
 
-TRADING_START = "09:03"              # 거래 시작
-TRADING_END = "15:10"                # 거래 종료 (이후 신규매수 X)
-FORCE_CLOSE_TIME = "15:15"           # 강제 청산 시각
+TRADING_START = "09:03"  # 거래 시작
+TRADING_END = "15:10"  # 거래 종료 (이후 신규매수 X)
+FORCE_CLOSE_TIME = "15:15"  # 강제 청산 시각
 
-BUY_PRICE_OFFSET_TICKS = 1           # 현재가 +1틱 매수
-SELL_PRICE_OFFSET_TICKS = -1         # 현재가 -1틱 매도
+BUY_PRICE_OFFSET_TICKS = 1  # 현재가 +1틱 매수
+SELL_PRICE_OFFSET_TICKS = -1  # 현재가 -1틱 매도
 
 
 class OrderManager:
@@ -77,6 +77,10 @@ class OrderManager:
                 "avg_price": info["avg_price"],
                 "name": info["name"] or self.get_stock_name(code),
                 "bought_at": self.positions.get(code, {}).get("bought_at", time.time()),
+                "sizing": self.positions.get(code, {}).get("sizing", "REGULAR_VOLUME"),
+                "exit_strategy": self.positions.get(code, {}).get(
+                    "exit_strategy", "REGULAR"
+                ),
             }
             if info["name"]:
                 self._name_cache[code] = info["name"]
@@ -85,15 +89,24 @@ class OrderManager:
         return new_positions
 
     # ─────────────────────────────────────
-    # ★ StrategyManager용 단순 wrapper
+    # ★ StrategyManager용 단순 wrapper (확장형)
     # ─────────────────────────────────────
-    def buy(self, stock_code: str, qty: int, price: int = 0) -> dict:
+    def buy(
+        self,
+        stock_code: str,
+        qty: int,
+        price: int = 0,
+        sizing: str = "REGULAR",
+        exit_strategy: str = "REGULAR",
+    ) -> dict:
         """단순 매수 wrapper (StrategyManager 호출용).
 
         Args:
             stock_code: 종목코드
             qty: 매수 수량
             price: 0이면 현재가 +1틱, >0이면 그 가격 지정가
+            sizing: "MAX_VOLUME" | "REGULAR_VOLUME" | "MIN_VOLUME"
+            exit_strategy: "REGULAR" | "TRAILING_EXIT" (특수 청산 필요시 사용)
 
         Returns:
             {"success": bool, "ord_no"?: str, "price"?: int, "error"?: str}
@@ -114,7 +127,6 @@ class OrderManager:
             if rc != 0:
                 return {"success": False, "error": result.get("return_msg", f"rc={rc}")}
 
-            # 포지션 기록 (StrategyManager도 자체 holdings 관리하지만 sync 일관성 위해)
             name = self.get_stock_name(stock_code)
             self.positions[stock_code] = {
                 "qty": qty,
@@ -122,6 +134,8 @@ class OrderManager:
                 "bought_at": time.time(),
                 "name": name,
                 "ord_no": result.get("ord_no", ""),
+                "sizing": sizing,
+                "exit_strategy": exit_strategy,
             }
             self.last_buy_ts[stock_code] = time.time()
 
@@ -162,8 +176,10 @@ class OrderManager:
             rc = result.get("return_code")
             if rc != 0:
                 err_msg = result.get("return_msg", f"rc={rc}")
-                # 영구 실패 판단
-                if any(kw in str(err_msg) for kw in ["수량", "잔고", "보유", "체결", "부족"]):
+                if any(
+                    kw in str(err_msg)
+                    for kw in ["수량", "잔고", "보유", "체결", "부족"]
+                ):
                     self._sell_failed.add(stock_code)
                     self.positions.pop(stock_code, None)
                 return {"success": False, "error": err_msg}
@@ -178,61 +194,93 @@ class OrderManager:
             logger.exception(f"[{stock_code}] sell() 예외")
             return {"success": False, "error": str(e)}
 
-    # ─────────────────────────────────────
-    # 기존 매수 (호환용, ConditionManager 흐름 등에서 사용 가능)
-    # ─────────────────────────────────────
-    def try_buy(self, stock_code: str) -> bool:
+    # ========================================
+    # 직접 매수 (ConditionManager 및 내부 호출용)
+    # ========================================
+    def try_buy(
+        self,
+        stock_code: str,
+        sizing: str = "REGULAR_VOLUME",
+        exit_strategy: str = "REGULAR",
+    ) -> bool:
+        """
+        Args:
+            sizing: "MAX_VOLUME" (1.5배) | "REGULAR_VOLUME" (1.0배) | "MIN_VOLUME" (0.5배)
+            exit_strategy: "REGULAR" | "TRAILING_EXIT"
+        """
         if not self._is_trading_time():
-            logger.debug(f"[매수보류] {stock_code} - 거래시간 외")
+            logger.debug(f"[매수거부] {stock_code} - 장외 시간 외")
             return False
         if stock_code in self.buying:
             return False
         if stock_code in self.positions:
-            logger.debug(f"[매수보류] {stock_code} - 이미 보유")
+            logger.debug(f"[매수거부] {stock_code} - 이미 보유")
             return False
         if len(self.positions) >= MAX_POSITIONS:
-            logger.info(f"[매수보류] {stock_code} - 최대 보유 {MAX_POSITIONS}종목 도달")
+            logger.info(f"[매수거부] {stock_code} - 최대 보유 {MAX_POSITIONS}종목 초과")
             return False
 
         last = self.last_buy_ts.get(stock_code, 0)
         if time.time() - last < BUY_COOLDOWN_SEC:
             return False
 
+        # 비중에 따른 동적 투자금액 산정
+        multiplier = 1.0
+        if sizing == "MAX_VOLUME":
+            multiplier = 1.5
+        elif sizing == "MIN_VOLUME":
+            multiplier = 0.5
+        required_amount = int(BUY_AMOUNT_PER_STOCK * multiplier)
+
         orderable = self.rest.get_orderable_amount()
-        if orderable < BUY_AMOUNT_PER_STOCK:
+        if orderable < required_amount:
             logger.warning(
-                f"[매수보류] {stock_code} - 주문가능금액 부족 "
-                f"(필요 {BUY_AMOUNT_PER_STOCK:,} / 가용 {orderable:,})"
+                f"[매수거부] {stock_code} - 주문가능 금액 부족 "
+                f"(필요 {required_amount:,} / 가능 {orderable:,})"
             )
             return False
 
         self.buying.add(stock_code)
         try:
-            return self._execute_buy_legacy(stock_code)
+            return self._execute_buy_legacy(stock_code, sizing, exit_strategy)
         finally:
             self.buying.discard(stock_code)
 
-    def _execute_buy_legacy(self, stock_code: str) -> bool:
+    def _execute_buy_legacy(
+        self,
+        stock_code: str,
+        sizing: str = "REGULAR_VOLUME",
+        exit_strategy: str = "REGULAR",
+    ) -> bool:
         cur_price = self.rest.get_current_price(stock_code)
         if cur_price <= 0:
             logger.warning(f"[매수실패] {stock_code} - 현재가 조회 실패")
             return False
 
         order_price = round_to_tick(add_ticks(cur_price, BUY_PRICE_OFFSET_TICKS))
-        qty = BUY_AMOUNT_PER_STOCK // order_price
+
+        multiplier = 1.0
+        if sizing == "MAX_VOLUME":
+            multiplier = 1.5
+        elif sizing == "MIN_VOLUME":
+            multiplier = 0.5
+
+        target_amount = int(BUY_AMOUNT_PER_STOCK * multiplier)
+        qty = target_amount // order_price
         if qty <= 0:
             logger.warning(f"[매수실패] {stock_code} - 수량 0 (price={order_price})")
             return False
 
         name = self.get_stock_name(stock_code)
-
         result = self.rest.buy_market_order(
             stock_code, qty=qty, price=order_price, trde_tp="0"
         )
 
         if result.get("return_code") != 0:
-            msg = (f"❌ [매수실패] {name}({stock_code}) {qty}주 @ {order_price:,}원\n"
-                   f"사유: {result.get('return_msg')}")
+            msg = (
+                f"❌[매수실패] {name}({stock_code}) {qty}주 @ {order_price:,}원\n"
+                f"사유: {result.get('return_msg')}"
+            )
             logger.error(msg)
             send_telegram(msg, target="order")
             return False
@@ -243,20 +291,87 @@ class OrderManager:
             "bought_at": time.time(),
             "name": name,
             "ord_no": result.get("ord_no", ""),
+            "sizing": sizing,
+            "exit_strategy": exit_strategy,
         }
         self.last_buy_ts[stock_code] = time.time()
 
-        msg = (f"🚀 [매수주문] {name} ({stock_code})\n"
-               f"수량: {qty}주\n"
-               f"주문가: {order_price:,}원 (현재가 {cur_price:,}+{BUY_PRICE_OFFSET_TICKS}틱)\n"
-               f"금액: {qty * order_price:,}원\n"
-               f"ord_no: {result.get('ord_no')}")
+        sizing_tag = (
+            "🔥비중확대"
+            if sizing == "MAX_VOLUME"
+            else ("⚠️비중축소" if sizing == "MIN_VOLUME" else "정상비중")
+        )
+        msg = (
+            f"🟢 [매수주문] {name} ({stock_code}) - {sizing_tag}\n"
+            f"수량: {qty}주\n"
+            f"주문가: {order_price:,}원(현재가 {cur_price:,}+{BUY_PRICE_OFFSET_TICKS}틱)\n"
+            f"금액: {qty * order_price:,}원\n"
+            f"ord_no: {result.get('ord_no')}"
+        )
+        logger.info(msg)
+        send_telegram(msg, target="order")
+        return True
+
+    def add_position_on_bounce(self, stock_code: str) -> bool:
+        """
+        20MA 이탈 후 체결강도 터졌을 때 추가 매수(평단가 내리기)
+        StrategyManager에서 호출하여 사용합니다.
+        """
+        if stock_code not in self.positions:
+            return False
+
+        last = self.last_buy_ts.get(stock_code, 0)
+        if time.time() - last < 1.0:
+            return False
+
+        cur_price = self.rest.get_current_price(stock_code)
+        if cur_price <= 0:
+            return False
+
+        add_amount = BUY_AMOUNT_PER_STOCK // 2
+        qty = add_amount // cur_price
+        if qty <= 0:
+            return False
+
+        name = self.get_stock_name(stock_code)
+        result = self.rest.buy_market_order(
+            stock_code, qty=qty, price=cur_price, trde_tp="0"
+        )
+
+        if result.get("return_code") != 0:
+            msg = (
+                f"❌ [20MA 반등 추가매수 실패] {name}({stock_code}) {qty}주 @ {cur_price:,}원\n"
+                f"사유: {result.get('return_msg')}"
+            )
+            logger.error(msg)
+            send_telegram(msg, target="order")
+            return False
+
+        old_pos = self.positions[stock_code]
+        old_qty = old_pos["qty"]
+        old_avg = old_pos["avg_price"]
+
+        new_qty = old_qty + qty
+        new_avg = int((old_avg * old_qty + cur_price * qty) / new_qty)
+
+        self.positions[stock_code]["qty"] = new_qty
+        self.positions[stock_code]["avg_price"] = new_avg
+        self.positions[stock_code][
+            "last_add_at"
+        ] = time.time()  # 추가매수 타임스탬프 분리 관리
+        self.last_buy_ts[stock_code] = time.time()
+
+        msg = (
+            f"🚀 [20MA 반등 추가매수] {name} ({stock_code})\n"
+            f"추가수량: {qty}주 @ {cur_price:,}원\n"
+            f"총보유: {new_qty}주 (새 평단가: {new_avg:,}원)"
+        )
         logger.info(msg)
         send_telegram(msg, target="order")
         return True
 
     # ─────────────────────────────────────
-    # 매도 (자체 청산 로직, 현재 사용 안 함 — StrategyManager가 담당)
+    # 매도 (자체 청산 로직, 레거시 호환용)
     # ─────────────────────────────────────
     def check_and_sell_positions(self):
         if not self.positions:
@@ -294,7 +409,9 @@ class OrderManager:
             self._execute_sell(stock_code, reason=f"손절 {pnl_pct:.2f}%")
             return
         if held_min >= TIME_STOP_MIN and pnl_pct < 0:
-            self._execute_sell(stock_code, reason=f"시간정리 {pnl_pct:.2f}% ({held_min:.0f}분)")
+            self._execute_sell(
+                stock_code, reason=f"시간정리 {pnl_pct:.2f}% ({held_min:.0f}분)"
+            )
             return
 
     def _execute_sell(self, stock_code: str, reason: str = "") -> bool:
@@ -308,7 +425,6 @@ class OrderManager:
             order_price = cur_price
 
         name = pos.get("name") or self.get_stock_name(stock_code)
-
         result = self.rest.sell_market_order(
             stock_code, qty=pos["qty"], price=order_price, trde_tp="0"
         )
@@ -330,12 +446,14 @@ class OrderManager:
         pnl = (order_price - pos["avg_price"]) * pos["qty"]
         pnl_pct_actual = (order_price - pos["avg_price"]) / pos["avg_price"] * 100
 
-        msg = (f"💰 [매도주문] {name} ({stock_code})\n"
-               f"사유: {reason}\n"
-               f"수량: {pos['qty']}주\n"
-               f"주문가: {order_price:,}원\n"
-               f"평균단가: {pos['avg_price']:,}원\n"
-               f"예상손익: {pnl:+,}원 ({pnl_pct_actual:+.2f}%)")
+        msg = (
+            f"💰 [매도주문] {name} ({stock_code})\n"
+            f"사유: {reason}\n"
+            f"수량: {pos['qty']}주\n"
+            f"주문가: {order_price:,}원\n"
+            f"평균단가: {pos['avg_price']:,}원\n"
+            f"예상손익: {pnl:+,}원 ({pnl_pct_actual:+.2f}%)"
+        )
         logger.info(msg)
         send_telegram(msg, target="order")
 
@@ -351,7 +469,9 @@ class OrderManager:
             return
 
         logger.info(f"🔔 장마감 강제청산: {len(self.positions)}종목")
-        send_telegram(f"🔔 장마감 강제청산 시작: {len(self.positions)}종목", target="order")
+        send_telegram(
+            f"🔔 장마감 강제청산 시작: {len(self.positions)}종목", target="order"
+        )
 
         for stock_code in list(self.positions.keys()):
             self._execute_sell(stock_code, reason="장마감 강제청산")
@@ -378,6 +498,8 @@ class OrderManager:
         for code, pos in self.positions.items():
             held = (time.time() - pos["bought_at"]) / 60
             name = pos.get("name", "?")
-            lines.append(f"  {name}({code}): {pos['qty']}주 @ {pos['avg_price']:,}원 "
-                         f"({held:.0f}분 보유)")
+            lines.append(
+                f"  {name}({code}): {pos['qty']}주 @ {pos['avg_price']:,}원 "
+                f"({held:.0f}분 보유)"
+            )
         return "\n".join(lines)

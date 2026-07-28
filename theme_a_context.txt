@@ -1,0 +1,175 @@
+﻿===== fetch_themes.py =====
+(로컬에 없음 — GitHub Actions repo에서 확인 필요)
+
+===== theme_data.json 샘플 (현재 구조 확인용, 앞부분만) =====
+(로컬에 theme_data.json 없음)
+
+===== core/theme_manager.py 전체 =====
+import time
+import threading
+import requests
+from datetime import date
+import psycopg2.extras
+
+from utils.logger import logger
+from db.connection import get_cursor
+
+
+class ThemeManager:
+    """源껎뿀釉뚯뿉??二쇰룄 ?뚮쭏瑜?媛?몄???醫낅ぉ??二쇰룄 ?뚮쭏?몄? ?먮퀎?섎뒗 ?대옒??
+
+    二쇰룄?뚮쭏 ?먮퀎 (2026-07-06 ?ъ꽕怨?:
+      - 湲곗〈 ?꾨줈洹몃옩 ?쒕ℓ??湲곕컲 ?먮퀎? 濡쒖뺄?쒕쾭(127.0.0.1:5000 誘몄〈??濡??쒓굅.
+      - ?뚮쭏蹂??곸쐞 N醫낅ぉ???ㅼ떆媛??깅씫瑜?以?理쒓퀬媛믪씠 ?꾧퀎媛??댁긽?대㈃
+        ?대떦 ?뚮쭏瑜?'二쇰룄?뚮쭏'濡??몄젙. rest_api(KiwoomREST).get_stock_change_rate() ?ъ슜.
+    """
+
+    LEADER_THRESHOLD = 13.0  # ??μ＜ ?깅씫瑜??꾧퀎媛?%)
+    TOP_N_PER_THEME = 5  # ?뚮쭏???깅씫瑜?議고쉶???곸쐞 醫낅ぉ ??
+    POLL_INTERVAL_SEC = 60  # 二쇰룄?뚮쭏 ?ш퀎??二쇨린(珥?
+
+    def __init__(self, rest_api=None):
+        """rest_api: KiwoomREST ?몄뒪?댁뒪. get_stock_change_rate(code) ?몄텧??
+        None?대㈃ ?깅씫瑜?議고쉶 遺덇? ??二쇰룄?뚮쭏 ?먮퀎 ??긽 False."""
+        self.rest_api = rest_api
+        self.themes = []
+        self.code_to_theme: dict[str, str] = {}
+        self.theme_top_codes: dict[str, list] = {}  # theme_name -> ?곸쐞 N醫낅ぉ
+        self.leading_themes: set[str] = set()  # ?꾩옱 二쇰룄?뚮쭏濡??먯젙??theme_name
+        self.last_update = 0.0
+
+    def fetch_themes_from_github(self):
+        url = "https://raw.githubusercontent.com/jokings76/AutoTrader_Project/main/theme_data.json"
+        try:
+            response = requests.get(url, timeout=10)
+            data = response.json()
+
+            if "themes" in data:
+                self.themes = data["themes"]
+                self.code_to_theme = {}
+                self.theme_top_codes = {}
+
+                for theme in self.themes:
+                    if not isinstance(theme, dict):
+                        continue
+
+                    code_list = None
+                    for key in ["codes", "stocks", "items", "data"]:
+                        if key in theme and isinstance(theme[key], list):
+                            code_list = theme[key]
+                            break
+
+                    if not code_list:
+                        continue
+
+                    theme_name = theme.get("name", "?????놁쓬")
+                    clean_codes = []
+                    for code in code_list:
+                        clean_code = str(code).lstrip("A")
+                        if clean_code.isdigit() and len(clean_code) == 6:
+                            self.code_to_theme[clean_code] = theme_name
+                            clean_codes.append(clean_code)
+
+                    if clean_codes:
+                        self.theme_top_codes[theme_name] = clean_codes[
+                            : self.TOP_N_PER_THEME
+                        ]
+
+                self.last_update = time.time()
+                self.save_themes_to_db()
+                logger.info(
+                    f"??二쇰룄?뚮쭏 {len(self.themes)}媛?濡쒕뱶?꾨즺 (醫낅ぉ ?? {len(self.code_to_theme)}媛?"
+                )
+
+                # 濡쒕뱶 吏곹썑 利됱떆 1??二쇰룄?뚮쭏 怨꾩궛
+                self.update_leading_themes()
+
+            else:
+                logger.warning(
+                    "?좑툘 theme_data.json 援ъ“媛 ?ㅻ쫭?덈떎. 'themes' ?ㅺ? ?덈뒗吏 ?뺤씤??二쇱꽭??"
+                )
+
+        except Exception as e:
+            logger.error(f"??二쇰룄?뚮쭏 媛?몄삤湲??ㅽ뙣: {e}")
+
+    def save_themes_to_db(self):
+        """?꾩옱 濡쒕뱶???뚮쭏 ?뺣낫瑜?daily_themes ?뚯씠釉붿뿉 ???""
+        today = date.today()
+        sql_delete = "DELETE FROM daily_themes WHERE trade_date = %s"
+        sql_insert = """
+            INSERT INTO daily_themes (trade_date, stock_code, theme_name)
+            VALUES (%s, %s, %s)
+        """
+        data_list = [(today, code, theme) for code, theme in self.code_to_theme.items()]
+        if not data_list:
+            return
+        try:
+            with get_cursor() as cur:
+                cur.execute(sql_delete, (today,))
+                psycopg2.extras.execute_values(cur, sql_insert, data_list)
+            logger.info(f"?뮶 {len(data_list)}媛?醫낅ぉ ?뚮쭏 ?곗씠??DB ????꾨즺")
+        except Exception as e:
+            logger.error(f"??DB ????ㅽ뙣: {e}")
+
+    def update_leading_themes(self):
+        """?뚮쭏蹂??곸쐞 N醫낅ぉ ?깅씫瑜?議고쉶 ??理쒓퀬媛믪씠 ?꾧퀎媛??댁긽?대㈃ 二쇰룄?뚮쭏濡??몄젙."""
+        if not self.theme_top_codes:
+            return
+        if not self.rest_api:
+            logger.warning(
+                "?좑툘 [二쇰룄?뚮쭏] rest_api 誘몄꽕?????깅씫瑜?議고쉶 遺덇?, ?먮퀎 ?ㅽ궢"
+            )
+            return
+
+        logger.info("?봽 [二쇰룄?뚮쭏] ?깅씫瑜?湲곕컲 ?ш퀎???쒖옉...")
+        start_time = time.time()
+        new_leading = set()
+
+        for theme_name, codes in self.theme_top_codes.items():
+            max_rate = 0.0
+            for code in codes:
+                try:
+                    rate = self.rest_api.get_stock_change_rate(code)
+                    if rate > max_rate:
+                        max_rate = rate
+                except Exception as e:
+                    logger.error(f"??[{code}] ?깅씫瑜?議고쉶 ?ㅽ뙣: {e}")
+                time.sleep(0.05)
+
+            if max_rate >= self.LEADER_THRESHOLD:
+                new_leading.add(theme_name)
+                logger.info(
+                    f"?? [二쇰룄?뚮쭏 ?먯젙] {theme_name} (??μ＜ 理쒓퀬?깅씫瑜? {max_rate:.2f}%)"
+                )
+
+        self.leading_themes = new_leading
+        logger.info(
+            f"?뮶 [二쇰룄?뚮쭏] ?ш퀎???꾨즺 (二쇰룄?뚮쭏 {len(new_leading)}媛?/ "
+            f"?꾩껜 {len(self.theme_top_codes)}媛? ?뚯슂 {time.time()-start_time:.2f}珥?"
+        )
+
+    def is_leading_theme_stock(self, stock_code: str) -> bool:
+        """??醫낅ぉ???꾩옱 二쇰룄?뚮쭏 ?뚯냽?몄? O(1) 議고쉶."""
+        theme_name = self.code_to_theme.get(stock_code)
+        if not theme_name:
+            return False
+        return theme_name in self.leading_themes
+
+    def start_auto_update(self, interval_seconds: int = None):
+        """諛깃렇?쇱슫???ㅻ젅?쒕줈 二쇨린??二쇰룄?뚮쭏 ?ш퀎??"""
+        interval = interval_seconds or self.POLL_INTERVAL_SEC
+
+        def _scheduler():
+            logger.info(
+                f"?? [二쇰룄?뚮쭏 ?ㅼ?以꾨윭] 諛깃렇?쇱슫??媛깆떊 ?쒖꽦??(二쇨린: {interval}珥?"
+            )
+            while True:
+                try:
+                    time.sleep(interval)
+                    self.update_leading_themes()
+                except Exception as e:
+                    logger.error(f"??[二쇰룄?뚮쭏 ?ㅼ?以꾨윭] 媛깆떊 以??ㅻ쪟: {e}")
+
+        updater_thread = threading.Thread(target=_scheduler, daemon=True)
+        updater_thread.start()
+

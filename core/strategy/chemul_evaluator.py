@@ -65,8 +65,12 @@ class ChemulEvaluator:
             s = {"state": ChemulState.WAITING_PULLBACK, "ts": now}
             self._state[stock_code] = s
 
-        # 타임아웃 체크 (PULLBACK / READY_TO_BUY는 제외)
-        if s["state"] not in (ChemulState.WAITING_PULLBACK, ChemulState.READY_TO_BUY):
+        # 타임아웃 체크 (PULLBACK만 제외 — 초기 대기라 타임아웃 없이 계속 관찰).
+        # READY_TO_BUY도 타임아웃 대상에 포함: 슬롯이 꽉 차 매수가 지연되는 동안
+        # 판정 시점의 체결강도 조건이 낡아버리는 문제가 실거래에서 확인됨
+        # (2026-07-28, 최대 15분 지연 사례). 타임아웃 지나면 WAITING_PULLBACK으로
+        # 되돌려 처음부터 다시 조건을 확인하게 함.
+        if s["state"] != ChemulState.WAITING_PULLBACK:
             if now - s["ts"] > self.state_timeout_sec:
                 s["state"] = ChemulState.WAITING_PULLBACK
                 s["ts"] = now

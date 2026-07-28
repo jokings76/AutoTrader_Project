@@ -13,6 +13,8 @@
 """
 import asyncio
 import json
+import random
+import time
 import websockets
 
 from config import settings
@@ -36,20 +38,30 @@ class KiwoomWS:
     def __init__(
         self,
         token: str,
+        condition_manager,  # 👈 여기 추가!
         is_mock: bool = True,
         on_signal=None,
         on_trade=None,
         on_orderbook=None,
+        on_disconnect=None,
+        on_reconnect=None,
     ):
         self.token = token
+        self.condition_manager = condition_manager  # 👈 여기 추가! (초기화)
         self.url = self.MOCK_URL if is_mock else self.REAL_URL
         self.on_signal = on_signal
         self.on_trade = on_trade
         self.on_orderbook = on_orderbook
+        self.on_disconnect = on_disconnect  # 단절 감지 직후 1회 호출 (인자 없음)
+        self.on_reconnect = on_reconnect  # 재연결+재구독 완료 직후 1회 호출(outage_seconds: float)
+
+        # ... (이후 기존 코드 유지)
 
         self.ws = None
         self.connected = False
         self._stop = False
+        self._ever_connected = False
+        self._disconnected_at: float | None = None
 
         self._subscribed_seqs: list[str] = []
         self.condition_map: dict[str, str] = {}
@@ -157,6 +169,22 @@ class KiwoomWS:
             return []
 
         logger.info(f"🔍 CNSRREQ 응답원본 [seq={seq}]: {str(resp)[:500]}")
+        # [수정] 159번 라인 아래에 추가
+        logger.info(f"📸 CNSRREQ 응답원본 [seq={seq}]: {str(resp)[:500]}")
+
+        # --- [추가 시작] ---
+        try:
+            # 1. 데이터에서 종목코드 리스트 추출 (A 제거)
+            jm_list = [item["jmcode"].replace("A", "") for item in resp.get("data", [])]
+            # 2. 조건식 이름 가져오기
+            name = self.condition_map.get(seq, "알수없음")
+
+            # 3. ConditionManager 인스턴스에 전달 (self에 연결되어 있다고 가정)
+            if hasattr(self, "condition_manager") and self.condition_manager:
+                self.condition_manager.update_snapshot(seq, name, jm_list)
+        except Exception as e:
+            logger.error(f"스냅샷 매핑 처리 실패: {e}")
+        # --- [추가 끝] ---
 
         data = resp.get("data") or []
         if isinstance(data, dict):
@@ -228,6 +256,14 @@ class KiwoomWS:
         while not self._stop:
             try:
                 if not self.connected:
+                    # 재연결 판정에 쓸 상태를 connect() 직후 스냅샷으로 고정 —
+                    # 재구독 단계(fetch_condition_list/subscribe_*) 중 예외가 나서
+                    # 이 블록을 다시 타게 되더라도 원래 단절 시각을 잃지 않게 함.
+                    # (2026-07-28: 실전에서 on_reconnect 콜백이 원인 미상으로 한 번
+                    # 호출 안 된 사고 발생 — 재현은 못 했으나 방어 차원에서 강화)
+                    was_ever_connected = self._ever_connected
+                    disconnected_since = self._disconnected_at
+
                     await self.connect()
                     await self.fetch_condition_list()
                     for seq in list(self._subscribed_seqs):
@@ -235,6 +271,19 @@ class KiwoomWS:
                     for code, types in list(self._subscribed_realtime.items()):
                         await self.subscribe_realtime([code], list(types))
                     backoff = 1
+
+                    logger.info(
+                        "🔍 재연결 콜백 판정: ever_connected=%s disconnected_since=%s",
+                        was_ever_connected, disconnected_since,
+                    )
+                    if was_ever_connected and disconnected_since is not None:
+                        outage = time.time() - disconnected_since
+                        self._disconnected_at = None
+                        logger.info("📞 on_reconnect 콜백 호출 (단절 %.1f초)", outage)
+                        await self._fire_callback(self.on_reconnect, outage)
+                    else:
+                        logger.info("⏭️ on_reconnect 콜백 스킵 (최초 연결 또는 단절 기록 없음)")
+                    self._ever_connected = True
 
                 while not self._stop:
                     try:
@@ -262,9 +311,25 @@ class KiwoomWS:
             if self._stop:
                 break
 
-            logger.info(f"♻️ {backoff}초 후 재연결 시도...")
-            await asyncio.sleep(backoff)
+            if self._disconnected_at is None:
+                self._disconnected_at = time.time()
+                await self._fire_callback(self.on_disconnect, None)
+
+            jitter = random.uniform(0, backoff * 0.3)
+            logger.info(f"♻️ {backoff + jitter:.1f}초 후 재연결 시도...")
+            await asyncio.sleep(backoff + jitter)
             backoff = min(backoff * 2, 60)
+
+    async def _fire_callback(self, cb, arg):
+        """on_disconnect/on_reconnect 콜백 안전 호출 (async/sync 자동 판별)."""
+        if not cb:
+            return
+        try:
+            result = cb() if arg is None else cb(arg)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            logger.exception("WS 상태 콜백 예외")
 
     async def _handle_message(self, raw: str):
         try:

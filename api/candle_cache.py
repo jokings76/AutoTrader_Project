@@ -1,4 +1,3 @@
-# api/candle_cache.py
 """
 분봉 캐시 레이어 (CandleCache)
 ================================

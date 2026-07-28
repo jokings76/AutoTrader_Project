@@ -31,7 +31,8 @@ CREATE TABLE trades (
     buy_quantity    INT,
     buy_amount      BIGINT,  -- 👈 새로 추가 (매수 금액)
     strategy_phase  INT,
-    entry_reason    VARCHAR(100),
+    sub_strategy    VARCHAR(20),
+    entry_reason    VARCHAR(255),
     buy_time        TIMESTAMP DEFAULT NOW(),
     
     -- 상태 관리
@@ -41,7 +42,7 @@ CREATE TABLE trades (
     sell_price      INT,
     sell_quantity   INT,
     sell_amount     BIGINT,  -- 👈 새로 추가 (매도 금액)
-    exit_reason     VARCHAR(100),
+    exit_reason     VARCHAR(255),
     sell_time       TIMESTAMP,
     
     -- 비용 및 수익
@@ -76,6 +77,7 @@ CREATE TABLE watch_list_log (
     surge_rate           NUMERIC(6,2),
     volume_ratio         NUMERIC(10,2),
     ma5                  NUMERIC(10,2),
+    reason_not_bought    VARCHAR(255),
     is_bought            BOOLEAN DEFAULT FALSE,
     
     -- 등록 시 상태
@@ -151,44 +153,62 @@ CREATE INDEX idx_events_timestamp ON system_events(timestamp);
 CREATE INDEX idx_events_type      ON system_events(event_type);
 """
 
+CREATE_DAILY_THEMES = """
+DROP TABLE IF EXISTS daily_themes;
+
+CREATE TABLE daily_themes (
+    id              SERIAL PRIMARY KEY,
+    trade_date      DATE NOT NULL,
+    stock_code      VARCHAR(10) NOT NULL,
+    theme_name      VARCHAR(100),
+    created_at      TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_daily_themes_date ON daily_themes(trade_date);
+CREATE INDEX idx_daily_themes_code ON daily_themes(stock_code);
+"""
+
 # ───────────────────────────────────────────────────
 # 실행 로직
 # ───────────────────────────────────────────────────
 
 TABLES = [
-    ("trades",          CREATE_TRADES,           "매매 기록"),
-    ("watch_list_log",  CREATE_WATCH_LIST_LOG,   "Watch List 기록"),
-    ("daily_summary",   CREATE_DAILY_SUMMARY,    "일일 요약"),
-    ("system_events",   CREATE_SYSTEM_EVENTS,    "시스템 이벤트"),
+    ("trades", CREATE_TRADES, "매매 기록"),
+    ("watch_list_log", CREATE_WATCH_LIST_LOG, "Watch List 기록"),
+    ("daily_summary", CREATE_DAILY_SUMMARY, "일일 요약"),
+    ("system_events", CREATE_SYSTEM_EVENTS, "시스템 이벤트"),
+    ("daily_themes", CREATE_DAILY_THEMES, "일일 주도 테마"),
 ]
+
 
 def create_tables():
     print("=" * 60)
     print("autotrader_db 테이블 생성 (초기화 및 재설정)")
     print("=" * 60)
-    
+
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
-        
+
         for table_name, sql, description in TABLES:
             print(f"\n[{table_name}] {description}")
             try:
                 cur.execute(sql)
                 conn.commit()
-                print(f"  ✅ 생성/확인 완료")
+                print("  ✅ 생성/확인 완료")
             except Exception as e:
                 conn.rollback()
                 print(f"  ❌ 실패: {e}")
                 raise
-        
+
         cur.close()
         conn.close()
         print("\n✅ 모든 테이블 생성 완료")
-        
+
     except Exception as e:
         print(f"\n❌ 에러: {type(e).__name__}: {e}")
         raise
+
 
 if __name__ == "__main__":
     create_tables()

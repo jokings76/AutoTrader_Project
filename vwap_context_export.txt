@@ -1,0 +1,331 @@
+﻿===== core/strategy/vwap_strategy.py =====
+"""
+VWAP(嫄곕옒?됯?以묓룊洹좉?) 湲곕컲 ?꾪꽣 ?꾨왂.
+
+?⑸룄: ?뚮┝紐?pullback) ??湲곗〈 ?먯닔 寃뚯씠?몃? ?듦낵??醫낅ぉ?????
+      "吏湲?媛寃⑹씠 ?뱀씪 ?됯퇏 泥닿껐?④?蹂대떎 ?꾩뿉 ?덈뒗媛"瑜?留덉?留?AND ?꾪꽣濡?
+      異붽? ?곸슜?댁꽌 異붿꽭 ?댄깉 醫낅ぉ??嫄몃윭?몃떎.
+
+湲곗〈 ScoreConfig(湲됰벑/?묐큺/嫄곕옒??媛뺣룄 媛以묓빀?? 泥닿퀎??嫄대뱶由ъ? ?딄퀬,
+洹??꾩뿉 ?밸뒗 ?낅┰ 寃뚯씠?몃줈 ?ㅺ퀎?????먯닔 怨꾩궛 濡쒖쭅 ?섏젙 ?놁씠 ?덉쟾?섍쾶 異붽?.
+"""
+
+from __future__ import annotations
+from dataclasses import dataclass
+
+
+@dataclass
+class VWAPConfig:
+    # VWAP ??紐?% ?댁긽?대㈃ 媛뺤꽭濡?蹂?寃껋씤吏
+    strong_zone_pct: float = 0.005  # 0.5%
+    # VWAP ?댄깉 ?덉슜 (??媛믩낫?????꾨옒濡??⑥뼱吏硫??쎌꽭)
+    weak_zone_pct: float = -0.003  # -0.3%
+    # 理쒕? ?먯닔
+    max_score: int = 5
+
+
+class VWAPStrategy:
+    def __init__(self, config: VWAPConfig | None = None):
+        self.config = config or VWAPConfig()
+
+    def calculate_score(self, price: float, vwap: float) -> int:
+        if vwap <= 0:
+            return 0
+        gap = (price - vwap) / vwap
+
+        # 媛뺥븳 ?곸듅
+        if gap >= self.config.strong_zone_pct:
+            return 5
+        # ?곸듅
+        elif gap >= 0:
+            return 4
+        # VWAP 洹쇱쿂
+        elif gap >= self.config.weak_zone_pct:
+            return 2
+        # ?쎌꽭
+        return 0
+
+    def is_bullish(self, price: float, vwap: float) -> bool:
+        return self.calculate_score(price, vwap) >= 4
+
+    def evaluate(self, data: dict) -> dict:
+        score = self.calculate_score(
+            price=data["price"],
+            vwap=data["vwap"],
+        )
+        return {
+            "name": "VWAP",
+            "score": score,
+            "bullish": score >= 4,
+        }
+
+
+def calc_vwap(candles: list[dict]) -> float:
+    """遺꾨큺 由ъ뒪?몃줈 VWAP(嫄곕옒?됯?以묓룊洹좉?) 怨꾩궛.
+
+    VWAP = 誇(醫낃? 횞 嫄곕옒?? / 誇(嫄곕옒??
+
+    candles: [{"close": float, "volume": float, ...}, ...] ???쒖꽌 臾닿?
+             (?뱀씪 09:00遺???꾩옱源뚯????꾩껜 遺꾨큺???섍꺼???뺥솗??
+              理쒓렐 N媛쒕쭔 ?섍린硫?'理쒓렐 N遺??됯퇏媛'媛 ?섏뼱 VWAP 蹂몃옒
+              ?섎?(?뱀씪 ?꾩쟻 ?됯퇏)? ?щ씪吏??二쇱쓽.)
+
+    嫄곕옒???⑹씠 0?닿굅??candles媛 鍮꾩뼱?덉쑝硫?0.0 諛섑솚
+    (?몄텧遺?먯꽌 vwap<=0 ??calculate_score媛 0??泥섎━?섎?濡??덉쟾).
+    """
+    if not candles:
+        return 0.0
+
+    total_value = 0.0
+    total_volume = 0.0
+    for c in candles:
+        vol = c.get("volume", 0) or 0
+        close = c.get("close", 0) or 0
+        if vol <= 0 or close <= 0:
+            continue
+        total_value += close * vol
+        total_volume += vol
+
+    if total_volume <= 0:
+        return 0.0
+    return total_value / total_volume
+
+
+===== core/strategy_manager.py (VWAP 관련 부분 검색용 - _execute_buy 및 VWAP 호출 지점) =====
+
+  core\strategy_manager.py:43:from core.strategy.entries.registry import EntryRegistry
+  core\strategy_manager.py:44:from core.strategy.entries.surge import SurgeStrategy
+  core\strategy_manager.py:45:from core.strategy.entries.pullback import PullbackStrategy
+  core\strategy_manager.py:46:from core.strategy.entries.phase3 import Phase3Strategy
+  core\strategy_manager.py:47:from core.strategy.entries.base import EntryContext
+> core\strategy_manager.py:48:from core.strategy.vwap_strategy import VWAPStrategy, calc_vwap
+  core\strategy_manager.py:49:from db import TradeRepository, WatchListRepository, SystemEventRepository
+  core\strategy_manager.py:50:
+  core\strategy_manager.py:51:try:
+  core\strategy_manager.py:52:    from api.auth import send_telegram
+  core\strategy_manager.py:53:except Exception as e:
+  core\strategy_manager.py:54:    logging.getLogger(__name__).warning("send_telegram 사용 불가: %s", e)
+  core\strategy_manager.py:55:    send_telegram = None
+  core\strategy_manager.py:56:
+  core\strategy_manager.py:57:logger = logging.getLogger(__name__)
+  core\strategy_manager.py:58:
+  core\strategy_manager.py:206:        self.holdings: dict[str, dict] = {}
+  core\strategy_manager.py:207:        self.watch_list_today: set[str] = set()
+  core\strategy_manager.py:208:        self.pending: set[str] = set()
+  core\strategy_manager.py:209:        self._stock_names: dict[str, str] = {}
+  core\strategy_manager.py:210:        self._cond_names: dict[str, str] = {}  # stock_code -> 최초 편입 조건검색식 이름
+> core\strategy_manager.py:211:        self.vwap_strategy = VWAPStrategy()  # 눌림목(1A) VWAP AND 필터
+  core\strategy_manager.py:212:
+  core\strategy_manager.py:213:        # ▼▼▼ 여기에 추가 ▼▼▼
+  core\strategy_manager.py:214:        # HTS에서 넘어온 1차 합격 종목들의 타점을 기다리는 대기열 {종목코드: 포착시간}
+  core\strategy_manager.py:215:        self.watch_candidates: dict[str, datetime] = {}
+  core\strategy_manager.py:216:
+  core\strategy_manager.py:217:        # 🚨 주도테마 초기화 (등락률 기반 재설계, 로컬서버 불필요 — 2026-07-06)
+  core\strategy_manager.py:218:        self.theme_mgr = ThemeManager(rest_api=kiwoom_rest)
+  core\strategy_manager.py:219:        self.theme_mgr.fetch_themes_from_github()
+  core\strategy_manager.py:220:        self.theme_mgr.start_auto_update()
+  core\strategy_manager.py:221:
+  core\strategy_manager.py:395:                    logger.info(
+  core\strategy_manager.py:396:                        f"🎯 [%s] %s 10MA 눌림목 타점 포착! 매수 실행"
+  core\strategy_manager.py:397:                        % (code, stock_name)
+  core\strategy_manager.py:398:                    )
+  core\strategy_manager.py:399:
+> core\strategy_manager.py:400:                    self._execute_buy(
+  core\strategy_manager.py:401:                        code=code,
+  core\strategy_manager.py:402:                        stock_name=stock_name,
+  core\strategy_manager.py:403:                        phase=cur_phase or 1,
+  core\strategy_manager.py:404:                        info=info,
+  core\strategy_manager.py:405:                        sub_strategy="1N",
+  core\strategy_manager.py:406:                    )
+  core\strategy_manager.py:407:                    del self.watch_candidates[code]
+  core\strategy_manager.py:408:
+  core\strategy_manager.py:409:            except Exception as e:
+  core\strategy_manager.py:410:                logger.warning(f"[{code}] 관찰 종목 타점 평가 중 에러: {e}")
+  core\strategy_manager.py:665:                        )
+  core\strategy_manager.py:666:                        self._record_watch_list(stock_code, stock_name, phase, info)
+  core\strategy_manager.py:667:
+  core\strategy_manager.py:668:                        if ok:
+  core\strategy_manager.py:669:                            if self.can_buy_phase1a():
+> core\strategy_manager.py:670:                                self._execute_buy(stock_code, stock_name, phase, info, sub_strategy="1A")
+  core\strategy_manager.py:671:                                return  # 신규 로직 매수 성공 시 종료
+  core\strategy_manager.py:672:                except Exception as e:
+  core\strategy_manager.py:673:                    logger.debug(f"[{stock_code}] 신규 로직 예외: {e}")
+  core\strategy_manager.py:674:
+  core\strategy_manager.py:675:            # ==========================================
+  core\strategy_manager.py:676:            # [우선순위 2] 기존 전략 평가 (surge는 무시, pullback은 유지)
+  core\strategy_manager.py:677:            # ==========================================
+  core\strategy_manager.py:678:            for strat in active:
+  core\strategy_manager.py:679:                # 🚨 surge 전략은 무시하고 건너뜀
+  core\strategy_manager.py:680:                if strat.name == "surge":
+  core\strategy_manager.py:684:                if strat.name == "pullback":
+  core\strategy_manager.py:685:                    self._record_watch_list(stock_code, stock_name, phase, info)
+  core\strategy_manager.py:686:
+  core\strategy_manager.py:687:                if ok:
+  core\strategy_manager.py:688:                    current_price = ctx.candles[0]["close"] if ctx.candles else 0
+> core\strategy_manager.py:689:                    if not self._apply_vwap_filter(
+  core\strategy_manager.py:690:                        stock_code, strat.name, current_price, info
+  core\strategy_manager.py:691:                    ):
+  core\strategy_manager.py:692:                        continue
+  core\strategy_manager.py:693:                    if strat.can_buy(self):
+> core\strategy_manager.py:694:                        self._execute_buy(
+  core\strategy_manager.py:695:                            stock_code,
+  core\strategy_manager.py:696:                            stock_name,
+  core\strategy_manager.py:697:                            phase,
+  core\strategy_manager.py:698:                            info,
+  core\strategy_manager.py:699:                            sub_strategy=strat.sub_strategy,
+  core\strategy_manager.py:700:                        )
+  core\strategy_manager.py:701:                        return
+  core\strategy_manager.py:702:
+  core\strategy_manager.py:703:            # 1) 즉시매수형 전략 평가 (등록 순서 = 우선순위)
+  core\strategy_manager.py:704:            for strat in active:
+  core\strategy_manager.py:705:                ok, info = strat.evaluate(self, ctx)
+  core\strategy_manager.py:706:                if strat.name in ("surge", "pullback"):
+  core\strategy_manager.py:707:                    self._record_watch_list(stock_code, stock_name, phase, info)
+  core\strategy_manager.py:708:                if ok:
+  core\strategy_manager.py:709:                    current_price = ctx.candles[0]["close"] if ctx.candles else 0
+> core\strategy_manager.py:710:                    if not self._apply_vwap_filter(
+  core\strategy_manager.py:711:                        stock_code, strat.name, current_price, info
+  core\strategy_manager.py:712:                    ):
+  core\strategy_manager.py:713:                        continue
+  core\strategy_manager.py:714:                    if strat.can_buy(self):
+> core\strategy_manager.py:715:                        self._execute_buy(
+  core\strategy_manager.py:716:                            stock_code,
+  core\strategy_manager.py:717:                            stock_name,
+  core\strategy_manager.py:718:                            phase,
+  core\strategy_manager.py:719:                            info,
+  core\strategy_manager.py:720:                            sub_strategy=strat.sub_strategy,
+  core\strategy_manager.py:721:                        )
+  core\strategy_manager.py:722:                        return
+  core\strategy_manager.py:723:                    else:
+  core\strategy_manager.py:724:                        logger.info(
+  core\strategy_manager.py:725:                            "[%s] %s 조건 OK but 슬롯 부족", stock_code, strat.name
+  core\strategy_manager.py:771:                            code,
+  core\strategy_manager.py:772:                            theme_name,
+  core\strategy_manager.py:773:                            strength,
+  core\strategy_manager.py:774:                        )
+  core\strategy_manager.py:775:                        info = {"current_price": price, "theme": theme_name}
+> core\strategy_manager.py:776:                        self._execute_buy(
+  core\strategy_manager.py:777:                            code, stock_name, phase=1, info=info, sub_strategy="1L"
+  core\strategy_manager.py:778:                        )
+  core\strategy_manager.py:779:                        return
+  core\strategy_manager.py:780:
+  core\strategy_manager.py:781:        if self.phase1b and self.phase1b.is_watching(code):
+  core\strategy_manager.py:782:            state = self.phase1b.on_trade(parsed_trade, now=now)
+  core\strategy_manager.py:783:            if state == ChemulState.READY_TO_BUY:
+  core\strategy_manager.py:784:                self._try_phase1b_buy(code, now)
+  core\strategy_manager.py:785:
+  core\strategy_manager.py:786:        if self.phase3 and self.phase3.is_watching(code):
+  core\strategy_manager.py:821:            logger.warning("[%s] Phase 1B 매수 시도 but 가격 없음", stock_code)
+  core\strategy_manager.py:822:            return
+  core\strategy_manager.py:823:
+  core\strategy_manager.py:824:        stock_name = self._stock_names.get(stock_code, stock_code)
+  core\strategy_manager.py:825:        info = {"current_price": current_price, "volume_ratio": 0.0}
+> core\strategy_manager.py:826:        self._execute_buy(stock_code, stock_name, phase=1, info=info, sub_strategy="1B")
+  core\strategy_manager.py:827:        self.phase1b.stop_watching(stock_code)
+  core\strategy_manager.py:828:
+  core\strategy_manager.py:829:    def _try_phase3_buy(self, stock_code: str):
+  core\strategy_manager.py:830:        if not self.can_buy_phase3():
+  core\strategy_manager.py:831:            logger.info("[%s] Phase 3 READY but 슬롯 부족", stock_code)
+  core\strategy_manager.py:832:            self.phase3.stop_watching(stock_code)
+  core\strategy_manager.py:833:            return
+  core\strategy_manager.py:834:        if stock_code in self.holdings or stock_code in self.pending:
+  core\strategy_manager.py:835:            return
+  core\strategy_manager.py:836:        blocked, reason = self._is_rebuy_blocked(stock_code)
+  core\strategy_manager.py:878:            trigger or "?",
+  core\strategy_manager.py:879:            opening_price,
+  core\strategy_manager.py:880:        )
+  core\strategy_manager.py:881:
+  core\strategy_manager.py:882:        stock_name = self._stock_names.get(stock_code, stock_code)
+> core\strategy_manager.py:883:        self._execute_buy(
+  core\strategy_manager.py:884:            stock_code, stock_name, phase=3, info=score_info, sub_strategy="3"
+  core\strategy_manager.py:885:        )
+  core\strategy_manager.py:886:        self.phase3.stop_watching(stock_code)
+  core\strategy_manager.py:887:
+  core\strategy_manager.py:888:    # ========================================
+  core\strategy_manager.py:889:    # 진입 평가 (점수 기반 — scoring.py 위임)
+  core\strategy_manager.py:890:    # ========================================
+  core\strategy_manager.py:891:    def evaluate_phase1(self, candles, stock_code):
+  core\strategy_manager.py:892:        return score_phase1(
+  core\strategy_manager.py:893:            candles,
+  core\strategy_manager.py:1026:            self._volume_ratio(candles),
+  core\strategy_manager.py:1027:            self._current_strength(stock_code),
+  core\strategy_manager.py:1028:            self._adjusted_cfg(self.score_cfg),
+  core\strategy_manager.py:1029:        )
+  core\strategy_manager.py:1030:
+> core\strategy_manager.py:1031:    def _apply_vwap_filter(
+  core\strategy_manager.py:1032:        self, stock_code: str, strat_name: str, current_price: float, info: dict
+  core\strategy_manager.py:1033:    ) -> bool:
+> core\strategy_manager.py:1034:        """눌림목(pullback) 전용 VWAP AND 필터. 다른 전략은 항상 통과.
+> core\strategy_manager.py:1035:        반환 True = 매수 진행, False = VWAP 탈락으로 매수 보류.
+> core\strategy_manager.py:1036:        주의: VWAP은 당일 09:00~현재 누적이라야 정확함. 전일 데이터가
+  core\strategy_manager.py:1037:        섞이는 _get_merged_candles는 절대 쓰지 않고, get_minute_candles를
+  core\strategy_manager.py:1038:        직접 호출해서 당일 데이터만 사용함."""
+  core\strategy_manager.py:1039:        if strat_name != "pullback":
+  core\strategy_manager.py:1040:            return True
+  core\strategy_manager.py:1041:        try:
+> core\strategy_manager.py:1042:            vwap_candles = self.api.get_minute_candles(
+  core\strategy_manager.py:1043:                stock_code, interval=1, count=400
+  core\strategy_manager.py:1044:            )
+> core\strategy_manager.py:1045:            vwap = calc_vwap(vwap_candles)
+  core\strategy_manager.py:1046:        except Exception as e:
+> core\strategy_manager.py:1047:            logger.warning("[%s] VWAP 계산 실패, 필터 스킵: %s", stock_code, e)
+  core\strategy_manager.py:1048:            return True  # 계산 실패 시 필터로 막지 않음 (기존 로직 유지)
+  core\strategy_manager.py:1049:
+> core\strategy_manager.py:1050:        result = self.vwap_strategy.evaluate({"price": current_price, "vwap": vwap})
+> core\strategy_manager.py:1051:        info["vwap"] = vwap
+> core\strategy_manager.py:1052:        info["vwap_score"] = result["score"]
+  core\strategy_manager.py:1053:
+  core\strategy_manager.py:1054:        if not result["bullish"]:
+  core\strategy_manager.py:1055:            logger.info(
+> core\strategy_manager.py:1056:                "[%s] pullback 조건 OK but VWAP 필터 탈락 (price=%.0f vwap=%.0f score=%d)",
+  core\strategy_manager.py:1057:                stock_code,
+  core\strategy_manager.py:1058:                current_price,
+> core\strategy_manager.py:1059:                vwap,
+  core\strategy_manager.py:1060:                result["score"],
+  core\strategy_manager.py:1061:            )
+  core\strategy_manager.py:1062:            return False
+  core\strategy_manager.py:1063:        return True
+  core\strategy_manager.py:1064:
+  core\strategy_manager.py:1065:    def evaluate_phase3_rank(self, candles, stock_code):
+  core\strategy_manager.py:1066:        return score_phase3_rank(
+  core\strategy_manager.py:1067:            candles,
+  core\strategy_manager.py:1068:            self._volume_ratio(candles),
+  core\strategy_manager.py:1069:            self._current_strength(stock_code),
+  core\strategy_manager.py:1109:            return amount, opt_info
+  core\strategy_manager.py:1110:        except Exception:
+  core\strategy_manager.py:1111:            logger.exception(f"[{stock_code}] 비중 계산 실패, fallback")
+  core\strategy_manager.py:1112:            return POSITION_AMOUNT, None
+  core\strategy_manager.py:1113:
+> core\strategy_manager.py:1114:    def _execute_buy(self, stock_code, stock_name, phase, info, sub_strategy):
+  core\strategy_manager.py:1115:        current_price = info["current_price"]
+  core\strategy_manager.py:1116:        sc = info.get("score")
+  core\strategy_manager.py:1117:        if sc is not None:
+  core\strategy_manager.py:1118:            logger.info(
+  core\strategy_manager.py:1119:                "[%s] %s 매수평가 통과 | score=%.2f/%.2f | %s",
+  core\strategy_manager.py:1120:                stock_code,
+  core\strategy_manager.py:1121:                stock_name,
+  core\strategy_manager.py:1122:                sc,
+  core\strategy_manager.py:1123:                info.get("score_threshold", 0),
+  core\strategy_manager.py:1124:                info.get("score_breakdown", ""),
+  core\strategy_manager.py:1181:                if sub_strategy == "1A":
+  core\strategy_manager.py:1182:                    entry_reason += f" | 시초가+{info.get('surge_rate', 0)*100:.2f}%"
+  core\strategy_manager.py:1183:            if opt_info:
+  core\strategy_manager.py:1184:                entry_reason += f" | 비중x{opt_info.get('final_weight', 1.0):.2f}"
+  core\strategy_manager.py:1185:
+> core\strategy_manager.py:1186:            if "vwap" in info:
+> core\strategy_manager.py:1187:                vwap = info["vwap"]
+> core\strategy_manager.py:1188:                gap_pct = ((current_price - vwap) / vwap * 100) if vwap > 0 else 0.0
+> core\strategy_manager.py:1189:                entry_reason += f" | VWAP {vwap:,.0f} (gap {gap_pct:+.2f}%, {info.get('vwap_score', 0)}점)"
+  core\strategy_manager.py:1190:
+  core\strategy_manager.py:1191:            # 조건검색식 이름 프리픽스 (2026-07-06)
+  core\strategy_manager.py:1192:            cond_name = self._cond_names.get(stock_code, "알수없음")
+  core\strategy_manager.py:1193:            entry_reason = f"[{cond_name}] {entry_reason}"
+  core\strategy_manager.py:1194:
+  core\strategy_manager.py:1195:            result = self.order_manager.buy(stock_code, quantity, price=0)
+  core\strategy_manager.py:1196:            if not result or not result.get("success"):
+  core\strategy_manager.py:1197:                err = (result or {}).get("error", "unknown")
+  core\strategy_manager.py:1198:                logger.error("[%s] 매수 실패: %s", stock_code, err)
+  core\strategy_manager.py:1199:                SystemEventRepository.log(
+
+
+

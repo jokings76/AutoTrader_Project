@@ -11,10 +11,9 @@
 켈리 계수는 거래 데이터가 부족할 때 (< min_trades) 1.0x로 대체.
 즉 봇 초기엔 변동성 타겟팅만 동작, 데이터 쌓이면 자동 활성화.
 """
-import logging
 from typing import Optional
 
-logger = logging.getLogger(__name__)
+from utils.logger import logger
 
 try:
     from db import TradeRepository

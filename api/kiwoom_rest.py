@@ -5,6 +5,7 @@
 """
 import logging
 import json
+import threading
 import time
 import requests
 from datetime import datetime
@@ -26,6 +27,11 @@ class KiwoomREST:
         self.token = token
         self.host = self.MOCK_HOST if is_mock else self.REAL_HOST
         self._last_request_ts = 0.0
+        # _throttle()의 check-then-sleep-then-set이 여러 스레드에서 동시에 돌면
+        # 레이스가 나서 간격 제어가 무력화될 수 있음 — main.py에서 여러 호출부를
+        # asyncio.to_thread로 감싸면서(2026-07-28) 이 클라이언트가 실제로 멀티스레드
+        # 접근을 받게 됨. CandleCache가 이미 같은 이유로 락을 쓰고 있던 것과 동일하게 보호.
+        self._throttle_lock = threading.Lock()
         self._candle_cache = CandleCache(
             self._raw_get_minute_candles, ttl_sec=8.0, logger=logger)
 
@@ -33,10 +39,11 @@ class KiwoomREST:
     # 공통 호출
     # ─────────────────────────────────────
     def _throttle(self):
-        elapsed = time.time() - self._last_request_ts
-        if elapsed < self.MIN_INTERVAL:
-            time.sleep(self.MIN_INTERVAL - elapsed)
-        self._last_request_ts = time.time()
+        with self._throttle_lock:
+            elapsed = time.time() - self._last_request_ts
+            if elapsed < self.MIN_INTERVAL:
+                time.sleep(self.MIN_INTERVAL - elapsed)
+            self._last_request_ts = time.time()
 
     def _request(self, path: str, api_id: str, body: dict,
                  cont_yn: str = "N", next_key: str = "") -> dict:
@@ -156,12 +163,14 @@ class KiwoomREST:
         return self._request("/api/dostk/stkinfo", "ka10001",
                              {"stk_cd": stock_code})
 
+    
     def get_index_change_rate(self, sector_code: str = "001") -> float:
         """업종 현재가 (ka20001) → 전일 대비 등락률(%).
         sector_code: 001=코스피, 101=코스닥. 실패 시 0.0(정상 간주)."""
-        result = self._request("/api/dostk/sect", "ka20001",
-                               {"mrkt_tp": "0", "inds_cd": sector_code})
-        
+        result = self._request(
+            "/api/dostk/sect", "ka20001", {"mrkt_tp": "0", "inds_cd": sector_code}
+        )
+
         if result.get("return_code") != 0:
             return 0.0
         raw = result.get("flu_rt") or result.get("prdy_ctrt") or "0"
@@ -169,6 +178,38 @@ class KiwoomREST:
             return float(str(raw).replace("+", "").strip())
         except (ValueError, TypeError):
             return 0.0
+
+    def get_stock_change_rate(self, stock_code: str) -> float:
+        """주식기본정보 (ka10001) → 종목 전일 대비 등락률(%).
+        실패 시 0.0(정상 간주)."""
+        result = self._request("/api/dostk/stkinfo", "ka10001", {"stk_cd": stock_code})
+        if result.get("return_code") != 0:
+            return 0.0
+        raw = result.get("flu_rt") or result.get("prdy_ctrt") or "0"
+        try:
+            return float(str(raw).replace("+", "").strip())
+        except (ValueError, TypeError):
+            return 0.0
+
+    def get_change_rate_ranking(self, mrkt_tp: str = "001") -> list:
+        """전일대비등락률상위요청 (ka10027) → 시장 전체 등락률 상위 종목 리스트(최대 200개).
+        mrkt_tp: 001=코스피, 101=코스닥. 주도테마 판별용 (ThemeManager).
+        실패 시 빈 리스트."""
+        body = {
+            "mrkt_tp": mrkt_tp,
+            "sort_tp": "1",
+            "trde_qty_cnd": "0000",
+            "stk_cnd": "0",
+            "crd_cnd": "0",
+            "updown_incls": "1",
+            "pric_cnd": "0",
+            "trde_prica_cnd": "0",
+            "stex_tp": "1",
+        }
+        result = self._request("/api/dostk/rkinfo", "ka10027", body)
+        if result.get("return_code") != 0:
+            return []
+        return result.get("pred_pre_flu_rt_upper") or []
 
     # ─────────────────────────────────────
     # 분봉 차트 조회 (ka10080)
@@ -178,7 +219,7 @@ class KiwoomREST:
         """분봉 조회 (캐시 경유). 8초 TTL + 429/실패 시 직전 캐시 반환."""
         return self._candle_cache.get(
             stock_code, interval=interval, count=count, base_date=base_date) or []
-    
+
     def _raw_get_minute_candles(self, stock_code: str, interval: int = 1,
                                 count: int = 60, base_date: str = None) -> list:
         """분봉 조회 (ka10080) - 페이징 자동 대응 버전.
@@ -200,12 +241,12 @@ class KiwoomREST:
         # ★ 원하는 개수(count)가 채워질 때까지 루프 (최대 안전장치 10회)
         max_loops = 10 
         loop_count = 0
-        
+
         while len(all_candles) < count and loop_count < max_loops:
             loop_count += 1
             result = self._request("/api/dostk/chart", "ka10080", body,
                                    cont_yn=cont_yn, next_key=next_key)
-            
+
             if result.get("return_code") != 0:
                 break  # 에러 시 중단
 
@@ -243,8 +284,7 @@ class KiwoomREST:
                 final_candles[0]["time_str"], final_candles[-1]["time_str"]
             )
         return final_candles
-        
-        
+
     # ─────────────────────────────────────
     # 계좌 조회
     # ─────────────────────────────────────

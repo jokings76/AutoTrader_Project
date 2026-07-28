@@ -5,22 +5,28 @@
 """
 import asyncio
 import time
-from datetime import datetime, time as dtime
+import os
+from datetime import datetime, timedelta
 
 from api.auth import get_access_token, send_telegram
 from api.kiwoom_rest import KiwoomREST
 from api.kiwoom_ws import KiwoomWS
 from core.order_manager import OrderManager, FORCE_CLOSE_TIME, MAX_POSITIONS
+from core.condition_manager import ConditionManager
 from core.phase1b_controller import Phase1BController
 from core.strategy_manager import StrategyManager
 from core.strategy.portfolio_optimizer import PortfolioOptimizer
 from config import settings
 from utils.logger import logger
+from db import TradeRepository
 
 
 POSITION_CHECK_INTERVAL = 30
-SYNC_INTERVAL = 60
+SYNC_INTERVAL = 15
 STATUS_REPORT_INTERVAL = 1800
+# 매수 직후 서버 잔고 반영 지연으로 인한 오탐(수동매도로 착각) 방지 유예시간.
+# SYNC_INTERVAL(15초)보다 넉넉히 커야 최소 1회 이상의 정상 동기화 주기를 보장함. (2026-07-28)
+RECONCILE_GRACE_SECONDS = 45
 TOKEN_REFRESH_INTERVAL = 23 * 3600
 SIGNAL_WATCHDOG_INTERVAL = 300
 SIGNAL_TIMEOUT = 1800
@@ -58,6 +64,7 @@ class TradingBot:
         self._raw_keys_logged = False
         self.surge_seqs: set[str] = set()   # 급등 즉시매수 대상 조건 seq
         self._known_hits: dict[str, set[str]] = {}  # cond_seq -> 이미 본 종목 (폴링 diff용)
+        self._last_signal_time = time.time()  # task_signal_watchdog와 WS 재연결 핸들러가 공유
 
     async def setup(self):
         logger.info("=" * 60)
@@ -76,22 +83,23 @@ class TradingBot:
 
         self.phase1b_ctrl = Phase1BController()
         self.optimizer = PortfolioOptimizer(rest_api=self.rest)
-        from core.strategy.phase3_controller import Phase3Controller
-        self.phase3_ctrl = Phase3Controller()
         self.strategy_mgr = StrategyManager(
             kiwoom_rest=self.rest,
             order_manager=self.order_mgr,
             phase1b_controller=self.phase1b_ctrl,
-            phase3_controller=self.phase3_ctrl,
             portfolio_optimizer=self.optimizer,
         )
 
+        self.condition_manager = ConditionManager(self.order_mgr)
         self.ws = KiwoomWS(
             self.token,
+            condition_manager=self.condition_manager,
             is_mock=settings.IS_MOCK,
             on_signal=self._on_signal,
             on_trade=self._on_trade,
             on_orderbook=self._on_orderbook,
+            on_disconnect=self._on_ws_disconnect,
+            on_reconnect=self._on_ws_reconnect,
         )
         await self.ws.connect()
         await self.ws.fetch_condition_list()
@@ -108,9 +116,9 @@ class TradingBot:
                f"주문가능: {deposit:,}원\n"
                f"보유: {len(self.strategy_mgr.holdings)}종목 "
                f"(1A={self.strategy_mgr.count_holdings_by_strategy('1A')}, "
+               f"눌림={self.strategy_mgr.count_holdings_by_strategy('1A_눌림')}, "
                f"1B={self.strategy_mgr.count_holdings_by_strategy('1B')}, "
-               f"2={self.strategy_mgr.count_holdings_by_strategy('2')}, "
-                f"3={self.strategy_mgr.count_holdings_by_strategy('3')})\n"
+               f"1L={self.strategy_mgr.count_holdings_by_strategy('1L')})\n"
                f"동적 비중: 활성 (Kelly+Volatility)\n"
                f"초기 스냅샷: {self._signal_stats['snapshot']}종목 처리")
         send_telegram(msg, target="signal")
@@ -126,7 +134,7 @@ class TradingBot:
         logger.info(f"⚡ 급등 조건 seq: {sorted(self.surge_seqs)} (대상: {surge_names})")
         if missing:
             logger.warning(f"⚠️ 급등 조건 이름 매칭 실패: {missing} (영웅문 이름과 대조)")
-  
+
     async def _subscribe_conditions(self):
         cond_map = self.ws.condition_map
         name_to_seq = {name: seq for seq, name in cond_map.items()}
@@ -148,7 +156,6 @@ class TradingBot:
         """봇 시작 시 조건식에 이미 들어있는 종목들을 가져와서 처리.
         키움 실시간 구독은 등록 이후 신규 편입만 알려주므로 이게 없으면 첫 윈도우를 놓침.
         조건별 출처(급등 여부)를 종목에 태깅해서 strategy로 전달."""
-       
 
         cond_map = self.ws.condition_map
         name_to_seq = {name: seq for seq, name in cond_map.items()}
@@ -161,12 +168,16 @@ class TradingBot:
             is_surge = seq in self.surge_seqs
             try:
                 codes = await self.ws.fetch_condition_snapshot(seq)
+
+                # 👇 [추가된 부분] seq=3 데이터가 None으로 올 때 튕김 방지
+                if codes is None:
+                    codes = []
+
             except Exception:
                 logger.exception(f"조건식 스냅샷 실패: {name}")
                 continue
             self._known_hits[seq] = set(codes)  # 폴링이 중복 잡지 않도록 미리 등록
             for c in codes:
-                # 같은 종목이 여러 조건에 들면 급등(True)을 우선
                 code_is_surge[c] = code_is_surge.get(c, False) or is_surge
 
         if not code_is_surge:
@@ -179,7 +190,10 @@ class TradingBot:
             stock_name = self._fetch_stock_name(code)
 
             try:
-                self.strategy_mgr.on_condition_hit(code, stock_name, is_surge=is_surge)
+                await asyncio.to_thread(
+                    self.strategy_mgr.on_condition_hit,
+                    code, stock_name, is_surge=is_surge, cond_name="초기스냅샷",
+                )
             except Exception:
                 logger.exception(f"[{code}] 스냅샷 on_condition_hit 예외")
 
@@ -242,6 +256,11 @@ class TradingBot:
                     continue
                 try:
                     codes = await self.ws.fetch_condition_snapshot(seq)
+
+                    # 👇 [추가된 부분] seq=3 데이터가 None으로 올 때 튕김 방지
+                    if codes is None:
+                        codes = []
+
                 except Exception:
                     logger.exception(f"폴링 스냅샷 실패: {name}")
                     continue
@@ -258,7 +277,9 @@ class TradingBot:
                     self._signal_stats["poll"] += 1
                     stock_name = self._fetch_stock_name(c)
                     try:
-                        self.strategy_mgr.on_condition_hit(c, stock_name, is_surge=is_surge)
+                        await asyncio.to_thread(
+                            self.strategy_mgr.on_condition_hit, c, stock_name, is_surge=is_surge
+                        )
                     except Exception:
                         logger.exception(f"[{c}] on_condition_hit 예외")
                     await self._enqueue_subscribe(c)
@@ -270,37 +291,43 @@ class TradingBot:
         except Exception:
             return stock_code
 
-    async def _on_signal(self, stock_code: str, signal_type: str,
-                         raw: dict = None, cond_seq: str = None):
-        if signal_type == 'I':
+    async def _on_signal(
+        self, stock_code: str, signal_type: str, raw: dict = None, cond_seq: str = None
+    ):
+        if signal_type == "I":
             self._signal_stats["insert"] += 1
             self._signal_stats["buy_attempted"] += 1
 
             is_surge = bool(cond_seq) and str(cond_seq) in self.surge_seqs
 
             stock_name = _extract_stock_name(raw, stock_code)
-            # raw에 종목명이 없으면 REST로 조회 (모의투자 fallback)
             if stock_name == stock_code:
                 stock_name = self._fetch_stock_name(stock_code)
                 if not self._raw_keys_logged and raw:
                     logger.info(
                         f"[{stock_code}] raw에 종목명 없음 (키: {list(raw.keys())}), "
-                        f"REST 조회 → '{stock_name}'"
+                        f"REST 조회 -> '{stock_name}'"
                     )
-                    self._raw_keys_logged = True
-            
+                self._raw_keys_logged = True
+
             if cond_seq:
                 self._known_hits.setdefault(str(cond_seq), set()).add(stock_code)
-            
+
+            # [추가] cond_seq를 이름으로 변환
+            cond_name = self.ws.condition_map.get(str(cond_seq), "기타")
+
             try:
-                self.strategy_mgr.on_condition_hit(
-                    stock_code, stock_name, is_surge=is_surge
+                # [수정] cond_name을 추가로 전달
+                await asyncio.to_thread(
+                    self.strategy_mgr.on_condition_hit,
+                    stock_code, stock_name, is_surge=is_surge, cond_name=cond_name,
                 )
             except Exception:
                 logger.exception(f"[{stock_code}] on_condition_hit 예외")
+
             await self._enqueue_subscribe(stock_code)
 
-        elif signal_type == 'D':
+        elif signal_type == "D":
             self._signal_stats["delete"] += 1
 
     async def _on_trade(self, parsed_trade: dict):
@@ -328,7 +355,9 @@ class TradingBot:
             await asyncio.sleep(POSITION_CHECK_INTERVAL)
             try:
                 for code in list(self.strategy_mgr.holdings.keys()):
-                    candles = self.rest.get_minute_candles(code, interval=1, count=1)
+                    candles = await asyncio.to_thread(
+                        self.rest.get_minute_candles, code, interval=1, count=1
+                    )
                     if candles:
                         self.strategy_mgr.on_price_update(code, candles[0]["close"])
             except Exception:
@@ -338,9 +367,160 @@ class TradingBot:
         while not self._stop:
             await asyncio.sleep(SYNC_INTERVAL)
             try:
-                self.order_mgr.sync_positions_from_server()
+                server_positions = await asyncio.to_thread(
+                    self.order_mgr.sync_positions_from_server
+                )
+                self._reconcile_manual_sells(server_positions)
             except Exception:
-                logger.exception("잔고 동기화 예외")
+                logger.exception("잔고 동기화 실패")
+
+    def _reconcile_manual_sells(self, server_positions: dict):
+        """서버 잔고와 strategy_mgr.holdings를 대조해 수동 매도를 반영.
+        1) 전량 매도: 서버 잔고에 종목 자체가 없음 -> 슬롯 즉시 해제. (2026-07-26)
+        2) 일부 매도: 서버 잔고 수량이 봇이 기억하는 수량보다 적음 -> 보유수량만
+           서버 값으로 축소 갱신 (전량 매도로 착각해 슬롯을 빼진 않음). (2026-07-27)
+        매수 직후 RECONCILE_GRACE_SECONDS 이내인 종목은 검사 대상에서 제외 —
+        모의API 잔고 반영 지연을 실제 매도로 오판해 방금 산 포지션을 놓치는
+        사고가 실전에서 확인됨. (2026-07-28)
+        """
+        strat = self.strategy_mgr
+        if not strat:
+            return
+
+        now = datetime.now()
+
+        def _in_grace(pos: dict) -> bool:
+            buy_time = pos.get("buy_time")
+            return bool(
+                buy_time
+                and (now - buy_time).total_seconds() < RECONCILE_GRACE_SECONDS
+            )
+
+        manually_sold = [
+            code
+            for code in list(strat.holdings.keys())
+            if code not in server_positions and not _in_grace(strat.holdings[code])
+        ]
+        for code in manually_sold:
+            info = strat.holdings.pop(code, None)
+            strat.pending.discard(code)
+            name = (info or {}).get("stock_name", code)
+            logger.info("[%s] %s 수동 매도 감지 -> 슬롯 즉시 해제", code, name)
+
+            # DB status를 'closed'로 갱신 안 하면 재시작 시 _restore_from_db()가
+            # 이미 팔린 종목을 다시 보유중으로 불러오는 사고로 이어짐 (2026-07-28 실전 확인).
+            # 실제 매도가는 알 수 없어 매수가로 대체(수익률 0%) — status 정합성이 우선.
+            trade_id = (info or {}).get("trade_id")
+            if trade_id:
+                try:
+                    buy_price = (info or {}).get("buy_price", 0)
+                    buy_qty = (info or {}).get("buy_quantity", 0)
+                    TradeRepository.update_sell(
+                        trade_id,
+                        sell_price=buy_price,
+                        sell_quantity=buy_qty,
+                        exit_reason="수동 매도 감지 (실제 체결가 미상, 매수가로 대체 기록)",
+                    )
+                except Exception as e:
+                    logger.warning("[%s] 수동 매도 DB 정리 실패: %s", code, e)
+
+            if send_telegram:
+                send_telegram(
+                    f"수동 매도 감지\n{name} ({code})\n슬롯 해제 완료, 다음 시퀀스 진행",
+                    target="order",
+                )
+
+        for code, pos in list(strat.holdings.items()):
+            if _in_grace(pos):
+                continue
+            server_info = server_positions.get(code)
+            if not server_info:
+                continue
+            server_qty = server_info.get("qty", 0)
+            tracked_qty = pos.get("qty", pos.get("buy_quantity", 0))
+            if 0 < server_qty < tracked_qty:
+                pos["qty"] = server_qty
+                name = pos.get("stock_name", code)
+                logger.info(
+                    "[%s] %s 일부 수동 매도 감지 -> 보유수량 %d주 -> %d주로 갱신",
+                    code, name, tracked_qty, server_qty,
+                )
+                if send_telegram:
+                    send_telegram(
+                        f"일부 수동 매도 감지\n{name} ({code})\n"
+                        f"보유수량 {tracked_qty}주 -> {server_qty}주로 갱신 (남은 수량 자동청산 계속)",
+                        target="order",
+                    )
+
+    def _on_ws_disconnect(self):
+        """WS 단절 감지 직후 1회 호출 (KiwoomWS 콜백, 동기)."""
+        logger.warning("🔌 WS 연결 끊김 감지 — 재연결 대기 중")
+        send_telegram("⚠️ WS 연결 끊김 감지 — 재연결 시도 중", target="signal")
+
+    async def _on_ws_reconnect(self, outage_seconds: float):
+        """WS 재연결(+조건/실시간 재구독) 완료 직후 1회 호출.
+        단절 시간대별로 대응강도를 차등 적용:
+          - 짧은 순단(<30s): 격리 10초
+          - 중간 단절(30s~5분): 격리 60초
+          - 긴 단절(5분+): 격리 10분 + 조건검색 스냅샷 재확인
+        매수만 보류하고(StrategyManager.can_buy_more) 청산 감시(on_price_update 등)는
+        그대로 유지된다 — can_buy_more()는 진입 판정에서만 쓰이기 때문."""
+        if outage_seconds < 30:
+            tier, quarantine_sec = "짧은 순단", 10
+        elif outage_seconds < 300:
+            tier, quarantine_sec = "중간 단절", 60
+        else:
+            tier, quarantine_sec = "긴 단절", 600
+
+        logger.info(f"✅ WS 재연결 완료 ({tier}, 단절 {outage_seconds:.0f}초)")
+
+        resolved_during_outage = []
+        still_unfilled = set()
+        try:
+            # 1) 포지션 즉시 재동기화 (수동매도/단절중 체결분 반영, 15초 대기 안 하고 즉시)
+            server_positions = self.order_mgr.sync_positions_from_server()
+            self._reconcile_manual_sells(server_positions)
+
+            # 2) 미체결 주문 상태 확인 — 무조건 취소하지 않고, 결론난 것만 pending 해제
+            unfilled = self.rest.get_unfilled_orders()
+            for item in unfilled.get("oso") or []:
+                code = (item.get("stk_cd") or item.get("stock_code") or "").strip().lstrip("A")
+                if code:
+                    still_unfilled.add(code)
+
+            for code in list(self.strategy_mgr.pending):
+                if code not in still_unfilled:
+                    resolved_during_outage.append(code)
+            self.strategy_mgr.pending -= set(resolved_during_outage)
+
+            if still_unfilled:
+                logger.warning(
+                    "⚠️ 재연결 후에도 미체결 남은 종목(자동취소 안 함, 수동확인 권장): %s",
+                    still_unfilled,
+                )
+        except Exception:
+            logger.exception("재연결 후 주문/포지션 재확인 실패")
+
+        # 3) 격리기간 설정 (신규매수 보류, 청산감시는 계속)
+        self.strategy_mgr.quarantine_until = datetime.now() + timedelta(seconds=quarantine_sec)
+
+        # 4) 긴 단절이면 조건검색 스냅샷 재확인 + signal watchdog 타이머 리셋
+        if outage_seconds >= 300:
+            try:
+                await self._process_initial_snapshot()
+            except Exception:
+                logger.exception("재연결 후 스냅샷 재확인 실패")
+        self._last_signal_time = time.time()
+
+        msg = (
+            f"🔌 WS 재연결 완료 ({tier}, {outage_seconds:.0f}초)\n"
+            f"신규매수 {quarantine_sec}초 보류 (청산감시는 계속 작동)\n"
+        )
+        if resolved_during_outage:
+            msg += f"단절 중 결론난 주문 정리: {resolved_during_outage}\n"
+        if still_unfilled:
+            msg += f"⚠️ 아직 미체결(자동취소 안 함): {sorted(still_unfilled)}\n"
+        send_telegram(msg, target="signal")
 
     async def task_status_report(self):
         while not self._stop:
@@ -357,9 +537,11 @@ class TradingBot:
                     f"폴링 {self._signal_stats['poll']}건",
                     f"매수시도: {self._signal_stats['buy_attempted']}건",
                     f"보유: {len(h)}종목 "
-                    f"(1A=..., 1B=..., 2=..., 3={self.strategy_mgr.count_holdings_by_strategy('3')})",
-                    f"감시 중 (1B FSM): {len(self.phase1b_ctrl.watched)}종목, "
-                    f"(3 FSM): {len(self.phase3_ctrl.watched)}종목",
+                    f"(1A={self.strategy_mgr.count_holdings_by_strategy('1A')}, "
+                    f"눌림={self.strategy_mgr.count_holdings_by_strategy('1A_눌림')}, "
+                    f"1B={self.strategy_mgr.count_holdings_by_strategy('1B')}, "
+                    f"1L={self.strategy_mgr.count_holdings_by_strategy('1L')})",
+                    f"감시 중 (1B FSM): {len(self.phase1b_ctrl.watched)}종목",
                 ]
                 send_telegram("\n".join(lines), target="signal")
             except Exception:
@@ -410,30 +592,224 @@ class TradingBot:
                 await asyncio.sleep(60)
             await asyncio.sleep(10)
 
+    async def task_auto_shutdown(self):
+        target_time = "15:20"
+        while not self._stop:
+            now_str = datetime.now().strftime("%H:%M")
+            if now_str >= target_time:
+                msg = f"⏰ 설정된 시간({target_time}) 도달. 매매를 중지하고 프로그램을 안전하게 자동 종료합니다."
+                logger.info(msg)
+                send_telegram(msg, target="signal")
+
+                self._stop = True
+
+                # 현재 실행 중인 다른 모든 백그라운드 태스크들을 안전하게 취소하여
+                # finally 블록의 bot.shutdown()이 자연스럽게 호출되도록 유도
+                tasks = [
+                    t for t in asyncio.all_tasks() if t is not asyncio.current_task()
+                ]
+                for task in tasks:
+                    task.cancel()
+                break
+
+            await asyncio.sleep(30)  # 30초 후 확실히 종료
+
+    async def task_closing_bet_scanner(self):
+        """매일 14:50에 1회, 조건검색 통과 종목 전체를 대상으로 종가베팅
+        후보 top 10을 스캔해서 텔레그램으로 전송. 2026-07-26 신규.
+        주의: 아래 import는 반드시 try 블록 안에서만 — 코루틴 시작 시점(=봇 기동 시점)에
+        바로 실행되는 최상단 import가 실패하면 asyncio.gather() 전체가 죽어서
+        봇이 통째로 종료된다 (2026-07-27 실제 장애 원인, evaluate_closing_bet_candidate
+        미구현으로 매 기동 시 즉시 크래시)."""
+        done_date = None
+        while not self._stop:
+            await asyncio.sleep(20)  # 20초 주기로 시각 체크 (기존 sleep(5) 관례와 유사)
+            now = datetime.now()
+            trigger_h, trigger_m = 14, 50
+            if now.hour != trigger_h or now.minute < trigger_m:
+                continue
+            if done_date == now.date():
+                continue  # 오늘은 이미 실행함
+
+            done_date = now.date()
+            logger.info("🔔 [종가베팅] 스캔 시작...")
+
+            try:
+                from core.explosion_scorer import evaluate_closing_bet_candidate
+                from core.history_fetcher import fetch_n_days_candles, to_trade_value_bins
+
+                strat = self.strategy_mgr
+                candidates = {}
+                # 오늘 조건검색에 한 번이라도 걸렸던 종목 전체 대상 (2026-07-28:
+                # 거래대금 폭발 이력 준비를 on_condition_hit에서 여기로 이관 —
+                # 하루종일 매번 계산하지 않고 실제 필요한 이 시점에 1회만 계산)
+                target_codes = list(strat._cond_names.keys())
+
+                def _evaluate_one(code: str):
+                    candles_3m = fetch_n_days_candles(strat.api, code, interval=3, target_days=20)
+                    candles_60m = fetch_n_days_candles(strat.api, code, interval=60, target_days=20)
+                    bins_3m = to_trade_value_bins(candles_3m)
+                    bins_60m = to_trade_value_bins(candles_60m)
+                    cache_entry = strat.explosion_scorer.prepare(code, bins_3m, bins_60m)
+
+                    today_raw = strat.api._raw_get_minute_candles(code, interval=3, count=150)
+                    today_bins = to_trade_value_bins(today_raw)
+                    return evaluate_closing_bet_candidate(
+                        today_bins,
+                        cache_entry["baseline"],
+                        cache_entry["bins_60m_hist"],
+                        strat.explosion_scorer.config,
+                    )
+
+                for code in target_codes:
+                    try:
+                        result = await asyncio.to_thread(_evaluate_one, code)
+                        if result.get("eligible"):
+                            candidates[code] = result
+                    except Exception as e:
+                        logger.warning("[%s] 종가베팅 평가 실패: %s", code, e)
+
+                ranked = sorted(
+                    candidates.items(), key=lambda x: x[1]["closing_score"], reverse=True
+                )[:10]
+
+                if not ranked:
+                    logger.info("🔔 [종가베팅] 후보 없음")
+                    continue
+
+                lines = ["🔔 종가베팅 후보 TOP 10", ""]
+                for i, (code, r) in enumerate(ranked, 1):
+                    name = strat._stock_names.get(code, code)
+                    lines.append(
+                        f"{i}. {name}({code}) | 점수 {r['closing_score']:.1f} | "
+                        f"surge {r['surge_ratio']:.2f}배 | 양봉비율 {r['bullish_ratio']*100:.0f}%"
+                    )
+                msg = "\n".join(lines)
+                logger.info(msg)
+                if send_telegram:
+                    send_telegram(msg, target="closing_bet")
+
+            except Exception as e:
+                logger.exception("종가베팅 스캔 중 에러: %s", e)
+
+    async def task_daily_backtest(self):
+        """매일 15:30에 1회, 오늘 신호 종목(watch_list_log+trades) 대상으로
+        라이브 진입/청산 로직을 분봉 기준 재현해 텔레그램(오토트레이더)으로 전송."""
+        done_date = None
+        trigger_h, trigger_m = 15, 30
+        while not self._stop:
+            await asyncio.sleep(20)
+            now = datetime.now()
+            if now.hour != trigger_h or now.minute < trigger_m:
+                continue
+            if done_date == now.date():
+                continue
+
+            done_date = now.date()
+            try:
+                from core.daily_backtest import run_daily_backtest
+
+                # 종목별 REST 순차 조회로 시간이 걸리므로 별도 스레드에서 실행
+                # (동기 호출을 그대로 두면 이벤트루프가 막힘)
+                await asyncio.to_thread(run_daily_backtest, self.rest)
+            except Exception:
+                logger.exception("일일 백테스트 실행 중 에러")
+
+    async def task_slot_replacement(self):
+        """1분마다 정체 종목을 감시종목 고득점 후보로 교체 시도. 2026-07-26 신규."""
+        replacement_count = 0
+        current_date = None
+        while not self._stop:
+            await asyncio.sleep(60)
+            try:
+                from core.slot_replacement import try_slot_replacement
+
+                strat = self.strategy_mgr
+                if not strat:
+                    continue
+                now = datetime.now()
+                if current_date != now.date():
+                    current_date = now.date()
+                    replacement_count = 0
+                replacement_count = try_slot_replacement(
+                    strat, send_telegram, replacement_count, now
+                )
+            except Exception:
+                logger.exception("슬롯 교체 스캔 중 에러")
+
+    async def task_watchlist_reentry(self):
+        """슬롯이 비어있을 때 1A/Pullback watch_list 후보를 재평가해 즉시 매수 시도.
+        2026-07-28 신규: on_condition_hit은 종목당 최초 편입 시점 1회만 평가해서,
+        그때 슬롯이 꽉 차 있으면 이후 슬롯이 비어도 재시도가 안 되던 문제 수정
+        (1B/1L은 실시간 틱 콜백이라 원래도 계속 재시도됨, 이 태스크는 1A/Pullback 전용)."""
+        while not self._stop:
+            await asyncio.sleep(15)
+            try:
+                from core.watchlist_reentry import try_watchlist_reentry
+
+                strat = self.strategy_mgr
+                if not strat:
+                    continue
+                await asyncio.to_thread(try_watchlist_reentry, strat, datetime.now())
+            except Exception:
+                logger.exception("watchlist 재진입 스캔 중 에러")
+
+    async def task_stop_signal_watcher(self):
+
+        """STOP_SIGNAL 파일이 감지되면 안전하게 봇 종료.
+        수동 종료용: New-Item "STOP_SIGNAL" -ItemType File 로 트리거."""
+        signal_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "STOP_SIGNAL"
+        )
+        while not self._stop:
+            await asyncio.sleep(5)
+            if os.path.exists(signal_path):
+                msg = "🛑 종료 신호 파일 감지 - 매매를 중지하고 프로그램을 안전하게 종료합니다."
+                logger.info(msg)
+                send_telegram(msg, target="signal")
+                self._stop = True
+
+                try:
+                    os.remove(signal_path)
+                except Exception:
+                    pass
+
+                # 현재 실행 중인 다른 모든 백그라운드 태스크들을 안전하게 취소하여
+                # finally 블록의 bot.shutdown()이 자연스럽게 호출되도록 유도
+                tasks = [
+                    t for t in asyncio.all_tasks() if t is not asyncio.current_task()
+                ]
+                for task in tasks:
+                    task.cancel()
+                break
+
+            await asyncio.sleep(30)  # 30초 후 확실히 종료
+
     async def task_signal_watchdog(self):
         last_signal_count = 0
-        last_signal_time = time.time()
+        # self._last_signal_time: WS 재연결 핸들러(_on_ws_reconnect)도 리셋하므로
+        # 지역변수가 아닌 인스턴스 속성으로 공유 (__init__에서 초기화됨)
 
         while not self._stop:
             await asyncio.sleep(SIGNAL_WATCHDOG_INTERVAL)
 
             if len(self.strategy_mgr.holdings) >= MAX_POSITIONS:
-                last_signal_time = time.time()
+                self._last_signal_time = time.time()
                 continue
 
             current_count = self._signal_stats["insert"]
             if current_count > last_signal_count:
                 last_signal_count = current_count
-                last_signal_time = time.time()
+                self._last_signal_time = time.time()
                 continue
 
-            elapsed = time.time() - last_signal_time
+            elapsed = time.time() - self._last_signal_time
             if elapsed > SIGNAL_TIMEOUT:
                 minutes = int(elapsed / 60)
                 logger.warning(f"{minutes}분간 신호 없음 -> 조건식 재등록")
                 try:
                     await self._subscribe_conditions()
-                    last_signal_time = time.time()
+                    self._last_signal_time = time.time()
                     send_telegram(
                         f"조건식 자동 재등록 ({minutes}분 무신호 감지)",
                         target="signal"
@@ -454,7 +830,14 @@ class TradingBot:
                 self.task_force_close_watcher(),
                 self.task_signal_watchdog(),
                 self.task_subscribe_flush(),
-                #self.task_condition_snapshot_poll(),
+                # self.task_auto_shutdown(),  # 2026-07-27 임시 비활성화 (백테스트가 15:30에
+                # 자체 실행돼야 해서, 15:20 자동종료와 충돌 — 재활성화 시 순서 조정 필요)
+                self.task_stop_signal_watcher(),
+                self.task_closing_bet_scanner(),
+                self.task_slot_replacement(),
+                self.task_watchlist_reentry(),
+                self.task_daily_backtest(),
+                # self.task_condition_snapshot_poll(),
             )
         except asyncio.CancelledError:
             pass
@@ -469,9 +852,9 @@ class TradingBot:
             logger.info(
                 f"보유: {len(h)}종목 "
                 f"(1A={self.strategy_mgr.count_holdings_by_strategy('1A')}, "
+                f"눌림={self.strategy_mgr.count_holdings_by_strategy('1A_눌림')}, "
                 f"1B={self.strategy_mgr.count_holdings_by_strategy('1B')}, "
-                f"2={self.strategy_mgr.count_holdings_by_strategy('2')}, "
-                f"3={self.strategy_mgr.count_holdings_by_strategy('3')})"
+                f"1L={self.strategy_mgr.count_holdings_by_strategy('1L')})"
             )
 
         if self.ws:
@@ -500,8 +883,10 @@ async def main():
 
 
 if __name__ == "__main__":
+   
+    # ==========================================
+
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\n종료")
-       

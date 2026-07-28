@@ -177,3 +177,28 @@ def calc_rise_pct_from_open(current: int, today_open: int) -> float:
     if today_open == 0:
         return 0.0
     return (current - today_open) / today_open * 100
+
+def is_volume_increasing_streak(candles: list[dict], streak: int = 3) -> bool:
+    """
+    거래량 증가 지속 판정: 최근 `streak`개 봉의 거래량이 과거->최신 방향으로
+    연속 증가했는지 확인.
+
+    Args:
+        candles: 분봉 리스트 (시간 역순, [0]이 최신).
+        streak: 연속 증가를 확인할 구간 길이 (3이면 candles[0]>candles[1]>candles[2]>candles[3]).
+
+    Returns:
+        True면 거래량이 streak개 봉 동안 지속 증가.
+
+    Examples:
+        >>> candles = [{'volume': 400}, {'volume': 300}, {'volume': 200}, {'volume': 100}]
+        >>> is_volume_increasing_streak(candles, 3)
+        True
+    """
+    if not candles or len(candles) < streak + 1:
+        return False
+    recent = [float(c.get("volume", 0) or 0) for c in candles[: streak + 1]]
+    for i in range(streak):
+        if recent[i] <= recent[i + 1]:
+            return False
+    return True

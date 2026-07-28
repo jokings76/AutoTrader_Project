@@ -1,0 +1,1393 @@
+﻿"""
+留ㅻℓ ?꾨왂 留ㅻ땲? ??Phase 1A/1B/2/3 ?듯빀 + ?섏씠釉뚮━??泥?궛 + ?숈쟻 鍮꾩쨷 + ?섏닔猷?諛섏쁺
+
+?쒓컙?:
+  Phase 1A (09:00 ~ 09:20): ?쒖큹媛+5% + 5MA ?곗튂
+  Phase 1B (09:00 ~ 10:40): 泥닿껐媛뺣룄 FSM (Phase 1 ?덈룄???좏샇留?
+  Phase 2  (09:21 ~ 10:40): 30MA ?곗튂  (5/22 60MA->30MA 蹂寃? ?좏샇 鍮덈룄up)
+  Phase 3  (10:41 ~ 15:00): 泥닿껐媛뺣룄 ?⑥“利앷? 1遺??좎?
+
+泥?궛 (5/22 媛쒗렪 - 20MA ?댄깉 泥?궛 ?꾩엯):
+  ?먯젅 -2.5%(媛寃?  <- 湲곗〈 -1.5%?먯꽌 ?꾪솕
+  ?듭젅 罹?+2.5%(?쒖씡)  <- ?좎?
+  20MA ?댄깉 泥?궛: ?꾩옱媛媛 20MA瑜?0.3% ?댁긽 ?섑쉶?섎㈃ 留ㅻ룄  <- ?몃젅?쇰쭅 ?泥?
+  ?쒓컙?뺣━ 30遺?
+  * ?듭젅罹≪? ?섏닔猷?李④컧???쒖닔??湲곗? (紐⑥쓽 0.3% / ?ㅼ쟾 0.015% ?먮룞 遺꾧린)
+  * ?몃젅?쇰쭅 ?쒓굅 (20MA ?댄깉??異붿꽭 泥?궛 ??븷 ?泥?
+  * 20MA??蹂댁쑀醫낅ぉ蹂꾨줈 tick()?먯꽌 二쇨린 媛깆떊/罹먯떆. 遺꾨큺 遺議???20MA 泥?궛留??ㅽ궢(?먯젅/?듭젅罹≪? 怨꾩냽 ?묐룞)
+  留ㅻ룄 3???ㅽ뙣 李⑤떒 / ?щℓ??荑⑤떎??10遺?/ 留ㅼ닔/?ъ떆??60珥??뚮컢??
+
+吏꾩엯 (?먯닔 湲곕컲 ??scoring.py ?꾩엫):
+  evaluate_phase1/surge/phase2 媛 ?섎뱶 AND ???媛以??먯닔濡??듦낵 ?먯젙.
+  score_cfg.threshold_ratio=0.75 ?대㈃ 湲곗〈 AND? (嫄곗쓽) ?숈씪. dry-run 濡쒓렇(score/score_breakdown)
+  蹂닿퀬 ?④퀎?곸쑝濡???떠 near-miss 吏꾩엯 ?덉슜. ?꾧퀎媛???텛硫?留ㅼ닔 湲고쉶??由ъ뒪???몄텧??
+"""
+
+import logging
+from datetime import datetime, time, timedelta
+from dataclasses import replace as _dc_replace
+from typing import Optional
+
+from typing import Optional
+from .theme_manager import ThemeManager
+from core.strategy.indicators import calc_ma
+from core.strategy.chemul_evaluator import ChemulState
+from core.strategy.scoring import (
+    ScoreConfig,
+    score_phase1,
+    score_surge,
+    score_phase2,
+    score_pullback,
+    score_phase3_rank,
+)
+from core.strategy.entries.registry import EntryRegistry
+from core.strategy.entries.surge import SurgeStrategy
+from core.strategy.entries.pullback import PullbackStrategy
+from core.strategy.entries.phase3 import Phase3Strategy
+from core.strategy.entries.base import EntryContext
+from db import TradeRepository, WatchListRepository, SystemEventRepository
+
+try:
+    from api.auth import send_telegram
+except Exception as e:
+    logging.getLogger(__name__).warning("send_telegram ?ъ슜 遺덇?: %s", e)
+    send_telegram = None
+
+logger = logging.getLogger(__name__)
+
+
+# -------------------------------------------------
+# ?섏닔猷?(IS_MOCK ?먮룞 遺꾧린, config??紐낆떆?섎㈃ ?곗꽑)
+# -------------------------------------------------
+def _load_fee_settings():
+    is_mock = True
+    commission = None
+    tax = 0.0018
+    try:
+        import settings
+
+        raw_mock = getattr(settings, "IS_MOCK", True)
+        if isinstance(raw_mock, str):
+            is_mock = raw_mock.strip().lower() in ("true", "1", "yes")
+        else:
+            is_mock = bool(raw_mock)
+        # config?먯꽌 吏곸젒 媛?몄삤硫??곗꽑?쒖쐞
+        c = getattr(settings, "COMMISSION_RATE", None)
+        if c not in (None, "", 0):
+            commission = float(c)
+        if commission is None: commission = 0.00015    
+        t = getattr(settings, "TAX_RATE", None)
+        if t not in (None, ""):
+            tax = float(t)
+    except Exception:
+        pass
+
+    # ?슚 媛뺤젣 ?섏닔猷?怨좎젙 (瑗ъ엫 ?ㅼ젙 諛⑹뼱)
+        if commission is None:
+            commission = 0.002  # 0.2%濡??섏젙
+
+        if tax is None:
+            tax = 0.0018
+
+        # ?몃?(?꾨옒履??대옒???⑥닔)?먯꽌 ??蹂?섎뱾???몄떇?????덈룄濡?global ?좎뼵 異붽?
+        global COMMISSION_RATE, TAX_RATE, ROUND_TRIP_COST
+
+        COMMISSION_RATE = 0.002  # ?슚 ?섏닔猷?0.2%濡?媛뺤젣 怨좎젙 (湲곗〈 0.00015?먯꽌 蹂寃?
+        TAX_RATE = tax
+        ROUND_TRIP_COST = 2 * COMMISSION_RATE + TAX_RATE
+
+        # ?뮕 濡쒓굅 ?ㅼ젙 臾몄젣濡???蹂댁씪 寃쎌슦瑜??鍮꾪빐 吏곴??곸씤 print臾?異붽? (?붾쾭源낆슜)
+        print(
+            f"??[?쒖뒪?? ?섏닔猷??ㅼ젙 ?꾨즺: ?몃룄 {COMMISSION_RATE*100:.3f}% + ?멸툑 {TAX_RATE*100:.3f}% -> ?뺣났 {ROUND_TRIP_COST*100:.3f}%"
+        )
+
+        # 湲곗〈 logger.info ?좎?
+        logger.info(
+            "?섏닔猷??ㅼ젙: ?몃룄 %.3f%% + ?멸툑 %.3f%% -> ?뺣났 鍮꾩슜 %.3f%%",
+            COMMISSION_RATE * 100,
+            TAX_RATE * 100,
+            ROUND_TRIP_COST * 100,
+        )
+
+
+# -------------------------------------------------
+# ??Phase ?ㅼ젙 ?뚯씪 ?곕룞 (?댁젣 ?섏튂 ?섏젙? phase_settings.py ?먯꽌 ?⑸땲??
+# -------------------------------------------------
+from config.phase_settings import COMMON, PHASE_1A, PHASE_1B, PHASE_2, PHASE_3
+from config.phase_settings import EXIT_POLICY, SCORING
+print("??[?쒖뒪??以鍮? 湲곕낯 ?섏닔猷?0.2% ?명똿 ?湲??꾨즺 (留ㅻℓ 諛쒖깮 ???곸슜)")
+# ?쒓컙 ?덈룄??
+PHASE1_START = time(9, 0)
+PHASE1_END = time(9, 21)
+PHASE2_START = time(9, 21)
+PHASE2_END = time(10, 40)
+PHASE3_START = time(10, 41)
+PHASE3_END = time(15, 0)
+
+# 吏꾩엯 議곌굔 (Phase 1A ?ㅼ젙媛??ъ슜)
+SURGE_THRESHOLD = PHASE_1A["surge_threshold"]
+MA_TOUCH_TOLERANCE = PHASE_1A["ma_tolerance"]
+VOLUME_SURGE_RATIO = PHASE_1A["volume_surge_ratio"]
+VOLUME_LOOKBACK = 5
+
+# Phase2 ?대룞?됯퇏 湲곌컙
+PHASE2_MA_PERIOD = PHASE_2["ma_period"]
+
+# 泥?궛 ?뺤콉 (EXIT_POLICY ?뺤뀛?덈━?먯꽌 媛?몄샂)
+TAKE_PROFIT_CAP = EXIT_POLICY["default"]["take_profit_cap"]
+STOP_LOSS_RATE = EXIT_POLICY["default"]["stop_loss_rate"]
+B_STOP_LOSS_FROM_OPEN = EXIT_POLICY["phase3_B"]["stop_loss_from_open"]
+TRAIL_ACTIVATE = EXIT_POLICY["default"]["trail_activate"]
+TRAIL_GIVEBACK = EXIT_POLICY["default"]["trail_giveback"]
+PHASE1A_CUT_OFF_TIME = time(9, 40)  # 9??40遺??μ큹/?μ쨷 援щ텇 ?쒓컙
+# 臾몄옄??"09:30"??time 媛앹껜濡?蹂??
+TRAIL_BUY_CUTOFF = time(
+    *map(int, EXIT_POLICY["default"]["trail_buy_cutoff"].split(":"))
+)
+HOLDING_TIMEOUT = timedelta(minutes=EXIT_POLICY["default"]["holding_timeout_min"])
+
+# 留ㅻ룄 ?ㅽ뙣 & 荑⑤떎??& ?뚮컢??
+MAX_SELL_FAIL = 3
+REBUY_COOLDOWN = timedelta(minutes=COMMON["rebuy_cooldown_min"])
+RESTART_WARMUP = timedelta(seconds=60)
+BUY_WARMUP = timedelta(seconds=COMMON["buy_warmup_sec"])
+
+# 湲덉븸 + ?щ’
+POSITION_AMOUNT = COMMON["position_amount"]
+MAX_HOLDINGS = COMMON["max_holdings"]
+PHASE1A_MAX_SLOTS = PHASE_1A["max_slots"]
+PHASE1B_MAX_SLOTS = PHASE_1B["max_slots"]
+PHASE3_MAX_SLOTS = PHASE_3["max_slots"]
+
+MAX_WATCH_SLOTS = 10
+WATCH_TIMEOUT = timedelta(minutes=10)
+
+# 湲됰벑 利됱떆 吏꾩엯
+SURGE_ENTRY_MIN = 0.03
+SURGE_MAX_SLOTS = 2
+SURGE_END = time(9, 30)
+
+# MDD ?쇱넀??李⑤떒
+DAILY_LOSS_LIMIT = COMMON["mdd_daily_loss_limit"]
+
+
+def _notify(msg: str):
+    if send_telegram is None:
+        return
+    try:
+        send_telegram(msg)
+    except Exception as e:
+        logger.warning("?붾젅洹몃옩 ?꾩넚 ?ㅽ뙣: %s", e)
+
+
+class StrategyManager:
+    def __init__(
+        self,
+        kiwoom_rest,
+        order_manager,
+        phase1b_controller=None,
+        phase3_controller=None,
+        portfolio_optimizer=None,
+        now_func=None,
+    ):
+        self.api = kiwoom_rest
+        self.order_manager = order_manager
+        self.phase1b = phase1b_controller
+        self.phase3 = phase3_controller
+        self.optimizer = portfolio_optimizer
+        self._now = now_func or datetime.now
+
+        self.holdings: dict[str, dict] = {}
+        self.watch_list_today: set[str] = set()
+        self.pending: set[str] = set()
+        self._stock_names: dict[str, str] = {}
+
+        # ?쇄뼹???ш린??異붽? ?쇄뼹??
+        # HTS?먯꽌 ?섏뼱??1李??⑷꺽 醫낅ぉ?ㅼ쓽 ??먯쓣 湲곕떎由щ뒗 ?湲곗뿴 {醫낅ぉ肄붾뱶: ?ъ갑?쒓컙}
+        self.watch_candidates: dict[str, datetime] = {}
+
+        # ?슚 二쇰룄?뚮쭏 珥덇린??(???쒖옉 ???곗씠??誘몃━ 濡쒕뱶)
+        self.theme_mgr = ThemeManager()
+        self.theme_mgr.fetch_themes_from_github()
+
+        self.sell_fail_count: dict[str, int] = {}
+        self.sell_blocked: set[str] = set()
+        self.sold_at: dict[str, datetime] = {}
+        # ?꿎뼯???ш린源뚯? ?꿎뼯??
+        self._stoploss_blocked: set[str] = set()  # ?먯젅濡??섍컙 醫낅ぉ(?뱀씪 ?щℓ??湲덉?)
+        self._buy_success_count = 0
+        # MDD ?쇱넀??李⑤떒 (?ㅽ쁽?먯씡 湲곗? -3%)
+        self._base_capital = None  # 湲곗??먮낯 (泥?留ㅼ닔 ?쒕룄 ??1??湲곕줉)
+        self._daily_realized = 0.0  # ?ㅻ뒛 ?ㅽ쁽?먯씡 ?꾩쟻
+        self._risk_tripped = False  # 李⑤떒湲?諛쒕룞 ?щ?
+        self._risk_date = self._now().date()
+        self._kospi_rate = 0.0
+        self._kospi_rate_at = None
+        # ?쒖옣 ?덉쭚 (肄붿뒪???깅씫瑜?湲곕컲 threshold 議곗젅)
+        self._kospi_rate = 0.0
+        self._kospi_rate_at = None  # 留덉?留?議고쉶 ?쒓컖
+
+        # ?먯닔 湲곕컲 吏꾩엯 ?ㅼ젙.
+        self.score_cfg = ScoreConfig(
+            surge_target=SURGE_THRESHOLD,
+            surge_min=SURGE_ENTRY_MIN,
+            ma_tolerance=MA_TOUCH_TOLERANCE,
+            volume_target=VOLUME_SURGE_RATIO,
+            threshold_ratio=0.75,
+        )
+        # 9:30 ?댄썑 湲됰벑 ??異붽꺽 ?꾪뿕 援ш컙?대씪 ??鍮〓묀???꾧퀎媛?
+        self.score_cfg_strict = ScoreConfig(
+            surge_target=SURGE_THRESHOLD,
+            surge_min=SURGE_ENTRY_MIN,
+            ma_tolerance=MA_TOUCH_TOLERANCE,
+            volume_target=VOLUME_SURGE_RATIO,
+            threshold_ratio=0.90,
+        )
+        # 吏꾩엯 ?꾨왂 ?덉??ㅽ듃由?(?깅줉 ?쒖꽌 = ?쒓컙? 寃뱀튌 ???곗꽑?쒖쐞)
+        self.entry_registry = (
+            EntryRegistry()
+            .register(SurgeStrategy())  # 9:00~10:40 (9:30 ?댄썑 strict)
+            .register(PullbackStrategy())  # 9:30~10:40
+            .register(Phase3Strategy())  # 10:41~15:00
+        )
+        self._restore_from_db()
+        self._last_phase = self.get_current_phase()
+
+    # ========================================
+    # ?뱀씪/?꾩씪 遺꾨큺 蹂묓빀 (?μ큹諛?MA 怨꾩궛??
+    # ========================================
+    def _get_merged_candles(
+        self, stock_code: str, interval: int = 1, count: int = 60
+    ) -> list:
+        """
+        ?뱀씪 遺꾨큺留뚯쑝濡?媛쒖닔媛 遺議깊븷 寃쎌슦, ?꾩씪 遺꾨큺???뚯뼱??遺숈뿬??媛쒖닔瑜?留욎땄.
+        ??珥덈컲(?? 9:20)??30MA 怨꾩궛???꾪빐 30媛쒕? ?붿껌?대룄 20媛쒕쭔 ?????좎슜.
+        """
+        # 1. ?쇰떒 ?뱀씪 ?곗씠???붿껌
+        today_candles = self.api.get_minute_candles(
+            stock_code, interval=interval, count=count
+        )
+
+        # 2. ?붽뎄 媛쒖닔瑜?梨꾩썱嫄곕굹 ?뱀씪 ?곗씠?곌? ?꾩삁 ?놁쑝硫?洹몃?濡?諛섑솚
+        if not today_candles or len(today_candles) >= count:
+            return today_candles or []
+
+        # 3. 遺議깊븳 媛쒖닔 怨꾩궛
+        needed = count - len(today_candles)
+
+        # 4. ?꾩씪 ?좎쭨 怨꾩궛
+        yesterday = (self._now() - timedelta(days=1)).strftime("%Y%m%d")
+
+        try:
+            # 5. ?꾩씪 ?곗씠???붿껌 (理쒓렐 遊됰???怨쇨굅濡??대젮??
+            yesterday_candles = self.api.get_minute_candles(
+                stock_code, interval=interval, count=needed, base_date=yesterday
+            )
+
+            if yesterday_candles:
+                # 6. ?꾩씪 ?곗씠??怨쇨굅) + ?뱀씪 ?곗씠??理쒓렐) ?쒖꽌濡?蹂묓빀
+                merged = yesterday_candles + today_candles
+                logger.info(
+                    f"?뱤 [{stock_code}] 遺꾨큺 遺議?蹂댁셿: ?뱀씪 {len(today_candles)}媛?"
+                    f"+ ?꾩씪 {len(yesterday_candles)}媛?= 珥?{len(merged)}媛?
+                )
+                return merged
+        except Exception as e:
+            logger.warning(f"[{stock_code}] ?꾩씪 遺꾨큺 議고쉶 ?ㅽ뙣: {e}")
+
+        # ?꾩씪 議고쉶 ?ㅽ뙣 ??洹몃깷 ?뱀씪 ?곗씠?곕씪??諛섑솚
+        return today_candles
+
+    # ========================================
+    # ?쒖닔?듬쪧 怨꾩궛 (?섏닔猷?李④컧)
+    # ========================================
+    @staticmethod
+    def _gross_rate(buy_price: float, current_price: float) -> float:
+        return (current_price - buy_price) / buy_price if buy_price else 0.0
+
+    @staticmethod
+    def _net_rate(buy_price: float, current_price: float) -> float:
+        """?섏닔猷??뺣났)+?멸툑 李④컧 ?쒖닔?듬쪧."""
+        if not buy_price:
+            return 0.0
+        gross = (current_price - buy_price) / buy_price
+        return gross - ROUND_TRIP_COST
+
+    @staticmethod
+    def _net_profit(buy_price: float, current_price: float, qty: int) -> float:
+        """?ㅼ젣 ?쒖넀??湲덉븸 (?섏닔猷??멸툑 李④컧)."""
+        buy_amt = buy_price * qty
+        sell_amt = current_price * qty
+        cost = buy_amt * COMMISSION_RATE + sell_amt * (COMMISSION_RATE + TAX_RATE)
+        return (sell_amt - buy_amt) - cost
+
+    # ========================================
+    # ?곹깭 蹂듭썝
+    # ========================================
+    def _restore_from_db(self):
+        warmup_until = self._now() + RESTART_WARMUP
+        for h in TradeRepository.find_holdings():
+            buy_price = float(h["buy_price"])
+            self.holdings[h["stock_code"]] = {
+                "trade_id": h["id"],
+                "buy_price": buy_price,
+                "buy_quantity": int(h["buy_quantity"]),
+                "buy_time": h["buy_time"],
+                "stock_name": h["stock_name"],
+                "strategy_phase": h["strategy_phase"],
+                "sub_strategy": h.get("sub_strategy"),
+                "highest_price": buy_price,
+                "ma20": None,  # 20MA 罹먯떆 (誘멸퀎??
+                "ma20_updated": None,  # 20MA 媛깆떊 ?쒓컖
+                "warmup_until": warmup_until,
+            }
+        for w in WatchListRepository.find_by_date(self._now().date()):
+            self.watch_list_today.add(w["stock_code"])
+
+        logger.info(
+            "DB 蹂듭썝: 蹂댁쑀 %d (1A=%d, 1B=%d, 2=%d, 3=%d) / ?뚯튂 %d / ?뚮컢??%ds",
+            len(self.holdings),
+            self.count_holdings_by_strategy("1A"),
+            self.count_holdings_by_strategy("1B"),
+            self.count_holdings_by_strategy("2"),
+            self.count_holdings_by_strategy("3"),
+            len(self.watch_list_today),
+            int(RESTART_WARMUP.total_seconds()),
+        )
+
+    # ========================================
+    # 二쇨린 猷⑦봽 (二쇨린 ?몄텧)
+    # ========================================
+    def tick(self):
+        now = self._now()
+
+        cur_phase = self.get_current_phase()
+        if cur_phase != self._last_phase:
+            # (以묐왂... ?꾨왂 ?꾪솚 濡쒓렇 李띾뒗 遺遺?
+            self._last_phase = cur_phase
+
+        # ?쇄뼹???ш린????踰덉㎏ 蹂듭궗蹂?for code in list(self.watch_candidates.keys()): 遺遺???遺숈뿬?ｌ쑝?몄슂 ?쇄뼹??
+        for code in list(self.watch_candidates.keys()):
+            # ?대? ?嫄곕굹 ?щ뵫(二쇰Ц 以??대㈃ ?щ’?먯꽌 鍮꾩썙以?
+            if code in self.holdings or code in self.pending:
+                del self.watch_candidates[code]
+                continue
+
+            try:
+                # 1遺꾨큺 ?곗씠??70媛??몄텧 (蹂묓빀 硫붿꽌???ъ슜)
+                candles = self._get_merged_candles(code, interval=1, count=70)
+
+                # N???뚮┝紐?????됯?!
+                is_timing, info = self.evaluate_morning_pullback(candles)
+
+                if is_timing:
+                    stock_name = self._stock_names.get(code, code)
+                    logger.info(
+                        "?렞 [%s] %s 10MA ?뚮┝紐?????ъ갑! 留ㅼ닔 ?ㅽ뻾", code, stock_name
+                    )
+
+                    # 留ㅼ닔 ?ㅽ뻾 (?쒕툕 ?꾨왂 ?대쫫 '1N' - N???뚮┝紐?
+                    self._execute_buy(
+                        code,
+                        stock_name,
+                        phase=cur_phase or 1,
+                        info=info,
+                        sub_strategy="1N",
+                    )
+
+                    # 留ㅼ닔 ???щ’ 鍮꾩슦湲?
+                    del self.watch_candidates[code]
+
+            except Exception as e:
+                logger.warning("[%s] 愿李?醫낅ぉ ????됯? 以??먮윭: %s", code, e)
+        # ?꿎뼯???ш린源뚯? ?꿎뼯??
+
+        if self.phase1b and now.time() >= PHASE2_END:
+            for code in list(self.phase1b.watched):
+                if code not in self.holdings:
+                    self.phase1b.stop_watching(code)
+        # 蹂댁쑀醫낅ぉ 20MA 罹먯떆 媛깆떊 (泥?궛??
+        # self._refresh_exit_ma()
+
+        self.check_timeouts()
+
+    # ========================================
+    # 20MA 罹먯떆 媛깆떊 (泥?궛 湲곗???
+    # ========================================
+
+    # ========================================
+    # Phase ?먮퀎
+    # ========================================
+    def get_current_phase(self) -> Optional[int]:
+        t = self._now().time()
+        if PHASE1_START <= t < PHASE1_END:
+            return 1
+        if PHASE2_START <= t < PHASE2_END:
+            return 2
+        if PHASE3_START <= t < PHASE3_END:
+            return 3
+        return None
+
+    def _ensure_base_capital(self):
+        """湲곗??먮낯 1??湲곕줉 (二쇰Ц媛??+ 蹂댁쑀 留ㅼ엯?먭?). ?ъ떆???쒖뿉??洹쇱궗 ?좎?."""
+        if self._base_capital is not None:
+            return
+        try:
+            deposit = float(self.api.get_orderable_amount())
+        except Exception:
+            return
+        holding_cost = sum(
+            p["buy_price"] * p["buy_quantity"] for p in self.holdings.values()
+        )
+        self._base_capital = deposit + holding_cost
+        logger.info(
+            "MDD 湲곗??먮낯 湲곕줉: %s??(二쇰Ц媛??%s + 蹂댁쑀?먭? %s)",
+            f"{self._base_capital:,.0f}",
+            f"{deposit:,.0f}",
+            f"{holding_cost:,.0f}",
+        )
+
+    def _risk_daily_reset(self):
+        today = self._now().date()
+        if today != self._risk_date:
+            self._risk_date = today
+            self._daily_realized = 0.0
+            self._risk_tripped = False
+            self._base_capital = None
+
+    def risk_can_trade(self) -> bool:
+        """?쇱넀??-3% 李⑤떒湲? ?몃┰?섎㈃ ?좉퇋 留ㅼ닔 ?꾨㈃ 湲덉?(泥?궛? 怨꾩냽 ?묐룞)."""
+        self._risk_daily_reset()
+        self._ensure_base_capital()
+        if self._risk_tripped:
+            return False
+        if self._base_capital and self._base_capital > 0:
+            loss_rate = self._daily_realized / self._base_capital
+            if loss_rate <= DAILY_LOSS_LIMIT:
+                self._risk_tripped = True
+                logger.warning(
+                    "MDD ?쇱넀??李⑤떒 諛쒕룞: ?ㅽ쁽 %s??(%.2f%%) <= ?쒕룄 %.1f%%",
+                    f"{self._daily_realized:,.0f}",
+                    loss_rate * 100,
+                    DAILY_LOSS_LIMIT * 100,
+                )
+                _notify(
+                    f"?썞 MDD ?쇱넀??李⑤떒 諛쒕룞\n"
+                    f"?ㅽ쁽?먯씡: {self._daily_realized:,.0f}??({loss_rate*100:.2f}%)\n"
+                    f"湲곗??먮낯 {self._base_capital:,.0f}???鍮??쒕룄 {DAILY_LOSS_LIMIT*100:.1f}% 珥덇낵\n"
+                    f"???ㅻ뒛 ?좉퇋 留ㅼ닔 ?꾨㈃ 李⑤떒 (蹂댁쑀遺?泥?궛? 怨꾩냽)"
+                )
+                return False
+        return True
+
+    def _refresh_kospi_rate(self):
+        """肄붿뒪???깅씫瑜?1遺?罹먯떆. ?ㅽ뙣?대룄 湲곗〈媛??좎?(遊???硫덉땄)."""
+        now = self._now()
+        if (
+            self._kospi_rate_at is not None
+            and (now - self._kospi_rate_at).total_seconds() < 60
+        ):
+            return
+        try:
+            rate = self.api.get_index_change_rate("001")
+            self._kospi_rate = rate
+            self._kospi_rate_at = now
+        except Exception:
+            pass  # 議고쉶 ?ㅽ뙣 ??湲곗〈 罹먯떆媛??좎?
+
+    def _market_threshold_adjust(self) -> float:
+        """肄붿뒪???덉쭚???곕Ⅸ threshold 議곗젅媛? +硫???댄듃, -硫??꾪솕."""
+        self._refresh_kospi_rate()
+        r = self._kospi_rate
+        if r >= 1.0:
+            return -0.05  # ?곸듅?? ?꾪솕
+        if r <= -1.0:
+            return +0.05  # ?섎씫?? ??댄듃
+        return 0.0
+
+    def _adjusted_cfg(self, base_cfg):
+        """肄붿뒪???덉쭚 諛섏쁺??threshold_ratio 議곗젅??cfg 蹂듭궗蹂?諛섑솚."""
+        adj = self._market_threshold_adjust()
+        if adj == 0.0:
+            return base_cfg
+        new_ratio = max(0.5, min(1.0, base_cfg.threshold_ratio + adj))
+        return _dc_replace(base_cfg, threshold_ratio=new_ratio)
+
+    def can_buy_more(self) -> bool:
+        if not self.risk_can_trade():
+            return False
+        return len(self.holdings) < MAX_HOLDINGS
+
+    def count_holdings_by_strategy(self, sub: str) -> int:
+        return sum(1 for h in self.holdings.values() if h.get("sub_strategy") == sub)
+
+    def can_buy_phase1a(self) -> bool:
+        # ?뚮┝紐?1A: 9:30~10:40 (湲됰벑 援ш컙 ?앸궃 ??
+        return (
+            self.can_buy_more()
+            and self.count_holdings_by_strategy("1A") < PHASE1A_MAX_SLOTS
+            and SURGE_END <= self._now().time() < PHASE2_END
+        )
+
+    def can_buy_phase1n(self) -> bool:
+        # 1N(?뚰뙆?믩닃由쇰ぉ ?꾪솚)? 1A? 5MA ?뚮┝紐??щ’ 3移?怨듭쑀
+        used = self.count_holdings_by_strategy("1A") + self.count_holdings_by_strategy(
+            "1N"
+        )
+        return (
+            self.can_buy_more()
+            and used < PHASE1A_MAX_SLOTS
+            and SURGE_END <= self._now().time() < PHASE2_END
+        )
+
+    def can_buy_phase1b(self) -> bool:
+        return (
+            self.can_buy_more()
+            and self.count_holdings_by_strategy("1B") < PHASE1B_MAX_SLOTS
+            and PHASE1_START <= self._now().time() < PHASE2_END
+        )
+
+    def can_buy_phase3(self) -> bool:
+        return (
+            self.can_buy_more()
+            and self.count_holdings_by_strategy("3") < PHASE3_MAX_SLOTS
+            and PHASE3_START <= self._now().time() < PHASE3_END
+        )
+
+    def can_buy_surge(self) -> bool:
+        # 湲됰벑 1S: 9:00~10:40 (9:00~9:30 ?쇰컲 + 9:30~10:40 strict ?????덉슜)
+        return (
+            self.can_buy_more()
+            and self.count_holdings_by_strategy("1S") < SURGE_MAX_SLOTS
+            and PHASE1_START <= self._now().time() < PHASE2_END
+        )
+
+    # ========================================
+    # 荑⑤떎??/ 李⑤떒
+    # ========================================
+    def _is_rebuy_blocked(self, stock_code: str) -> tuple[bool, str]:
+        if stock_code in self._sell_blocked:
+            return True, "留ㅻ룄 李⑤떒 (?곴뎄?ㅽ뙣)"
+        if stock_code in self._stoploss_blocked:
+            return True, "?먯젅 醫낅ぉ ?뱀씪 ?щℓ??湲덉?"
+        if stock_code in self._sold_at:
+            elapsed = self._now() - self._sold_at[stock_code]
+            if elapsed < REBUY_COOLDOWN:
+                remaining = REBUY_COOLDOWN - elapsed
+                return True, f"荑⑤떎??(?붿뿬 {int(remaining.total_seconds())}珥?"
+        return False, ""
+
+    # ========================================
+    # 吏꾩엯
+    # ========================================
+    def on_condition_hit(
+        self, stock_code: str, stock_name: str, is_surge: bool = False
+    ):
+        phase = self.get_current_phase()
+        if phase is None:
+            return
+        if stock_code in self.holdings or stock_code in self.pending:
+            return
+
+        blocked, reason = self._is_rebuy_blocked(stock_code)
+        if blocked:
+            logger.info("[%s] %s 留ㅼ닔 李⑤떒: %s", stock_code, stock_name, reason)
+            return
+
+        self._stock_names[stock_code] = stock_name
+
+        try:
+            now_t = self._now().time()
+            active = self.entry_registry.route(now_t)
+            if not active:
+                return
+
+            need_candles = any(s.name in ("surge", "pullback") for s in active)
+            candles = []
+            if need_candles:
+                # 蹂묓빀 硫붿꽌???ъ슜
+                candles = self._get_merged_candles(stock_code, interval=1, count=15)
+                if not candles or len(candles) < VOLUME_LOOKBACK + 1:
+                    logger.warning(
+                        "[%s] 遺꾨큺 遺議?(%d媛?",
+                        stock_code,
+                        len(candles) if candles else 0,
+                    )
+                    candles = []
+
+            ctx = EntryContext(
+                stock_code=stock_code,
+                stock_name=stock_name,
+                candles=candles,
+                now_time=now_t,
+                phase=phase,
+            )
+
+            # ==========================================
+            # [?곗꽑?쒖쐞 1] ?좉퇋 泥닿껐媛뺣룄 & 30遊??좉퀬媛 ?꾪꽣留?
+            # ==========================================
+            now = self._now().time()
+            if phase == 1:
+                try:
+                    c = candles[0] if candles else {}
+                    current_price = int(c.get('close', 0))
+                    open_price = int(c.get('open', 0))
+
+                    if current_price > 0:
+                        ok, info = self.evaluate_new_intensity_strategy(
+                            stock_code, candles, current_price, open_price
+                        )
+                        self._record_watch_list(stock_code, stock_name, phase, info)
+
+                        if ok:
+                            if self.can_buy_phase1a():
+                                self._execute_buy(stock_code, stock_name, phase, info, sub_strategy="1A")
+                                return  # ?좉퇋 濡쒖쭅 留ㅼ닔 ?깃났 ??醫낅즺
+                except Exception as e:
+                    logger.debug(f"[{stock_code}] ?좉퇋 濡쒖쭅 ?덉쇅: {e}")
+
+            # ==========================================
+            # [?곗꽑?쒖쐞 2] 湲곗〈 ?꾨왂 ?됯? (surge??臾댁떆, pullback? ?좎?)
+            # ==========================================
+            for strat in active:
+                # ?슚 surge ?꾨왂? 臾댁떆?섍퀬 嫄대꼫?
+                if strat.name == "surge":
+                    continue
+
+                ok, info = strat.evaluate(self, ctx)
+                if strat.name == "pullback":
+                    self._record_watch_list(stock_code, stock_name, phase, info)
+
+                if ok:
+                    if strat.can_buy(self):
+                        self._execute_buy(
+                            stock_code,
+                            stock_name,
+                            phase,
+                            info,
+                            sub_strategy=strat.sub_strategy,
+                        )
+                        return
+
+            # 1) 利됱떆留ㅼ닔???꾨왂 ?됯? (?깅줉 ?쒖꽌 = ?곗꽑?쒖쐞)
+            for strat in active:
+                ok, info = strat.evaluate(self, ctx)
+                if strat.name in ("surge", "pullback"):
+                    self._record_watch_list(stock_code, stock_name, phase, info)
+                if ok:
+                    if strat.can_buy(self):
+                        self._execute_buy(
+                            stock_code,
+                            stock_name,
+                            phase,
+                            info,
+                            sub_strategy=strat.sub_strategy,
+                        )
+                        return
+                    else:
+                        logger.info(
+                            "[%s] %s 議곌굔 OK but ?щ’ 遺議?, stock_code, strat.name
+                        )
+                elif info.get("reason"):
+                    logger.info(
+                        "[%s] %s %s 誘몄땐議? %s",
+                        stock_code,
+                        stock_name,
+                        strat.name,
+                        info.get("reason"),
+                    )
+
+            # 2) 留ㅼ닔 ??????遺?섑슚怨?1B/Phase3 媛먯떆 ?쒖옉 ??
+            for strat in active:
+                strat.on_side_effect(self, ctx)
+
+        except Exception as e:
+            logger.exception("[%s] on_condition_hit ?ㅽ뙣: %s", stock_code, e)
+            SystemEventRepository.log("STRATEGY_ERROR", f"{stock_code}: {e}", "ERROR")
+            _notify(f"?꾨왂 ?먮윭\n{stock_code}: {e}")
+
+    # ========================================
+    # ?ㅼ떆媛?肄쒕갚
+    # ========================================
+    def on_trade(self, parsed_trade: dict, now: float = None):
+        code = parsed_trade.get("stock_code")
+        if not code:
+            return
+
+        if code in self.holdings:
+            price = parsed_trade.get("price")
+            if price:
+                self.on_price_update(code, price)
+            return
+
+        if self.phase1b and self.phase1b.is_watching(code):
+            state = self.phase1b.on_trade(parsed_trade, now=now)
+            if state == ChemulState.READY_TO_BUY:
+                self._try_phase1b_buy(code, now)
+
+        if self.phase3 and self.phase3.is_watching(code):
+            from core.strategy.phase3_controller import Phase3State
+
+            new_state = self.phase3.on_trade(parsed_trade)
+            if new_state == Phase3State.READY_TO_BUY:
+                self._try_phase3_buy(code)
+
+    def on_orderbook(self, parsed_orderbook: dict, now: float = None):
+        code = parsed_orderbook.get("stock_code")
+        if not code:
+            return
+        if self.phase1b and self.phase1b.is_watching(code):
+            state = self.phase1b.on_orderbook(parsed_orderbook, now=now)
+            if state == ChemulState.READY_TO_BUY:
+                self._try_phase1b_buy(code, now)
+        # Phase3 B ?몃━嫄곗슜: ?멸? ?붾웾 鍮꾩쑉留?媛깆떊 (留ㅼ닔 ?먯젙? on_trade?먯꽌)
+        if self.phase3 and self.phase3.is_watching(code):
+            try:
+                self.phase3.on_orderbook(parsed_orderbook)
+            except Exception:
+                logger.exception("[%s] phase3 on_orderbook ?덉쇅", code)
+
+    def _try_phase1b_buy(self, stock_code: str, now: float = None):
+        if not self.can_buy_phase1b():
+            logger.info("[%s] Phase 1B READY but ?щ’ 遺議?, stock_code)
+            return
+        if stock_code in self.holdings or stock_code in self.pending:
+            return
+        blocked, reason = self._is_rebuy_blocked(stock_code)
+        if blocked:
+            logger.info("[%s] Phase 1B 留ㅼ닔 李⑤떒: %s", stock_code, reason)
+            return
+
+        current_price = self.phase1b.trade_flow.get_latest_price(stock_code)
+        if not current_price:
+            logger.warning("[%s] Phase 1B 留ㅼ닔 ?쒕룄 but 媛寃??놁쓬", stock_code)
+            return
+
+        stock_name = self._stock_names.get(stock_code, stock_code)
+        info = {"current_price": current_price, "volume_ratio": 0.0}
+        self._execute_buy(stock_code, stock_name, phase=1, info=info, sub_strategy="1B")
+        self.phase1b.stop_watching(stock_code)
+
+    def _try_phase3_buy(self, stock_code: str):
+        if not self.can_buy_phase3():
+            logger.info("[%s] Phase 3 READY but ?щ’ 遺議?, stock_code)
+            self.phase3.stop_watching(stock_code)
+            return
+        if stock_code in self.holdings or stock_code in self.pending:
+            return
+        blocked, reason = self._is_rebuy_blocked(stock_code)
+        if blocked:
+            logger.info("[%s] Phase 3 留ㅼ닔 李⑤떒: %s", stock_code, reason)
+            self.phase3.stop_watching(stock_code)
+            return
+
+        try:
+            # 蹂묓빀 硫붿꽌???ъ슜
+            candles = self._get_merged_candles(stock_code, interval=1, count=30)
+        except Exception:
+            candles = None
+
+        if not candles or not candles[0].get("close"):
+            logger.warning("[%s] Phase 3 留ㅼ닔 ?쒕룄 but 遺꾨큺 ?놁쓬", stock_code)
+            self.phase3.stop_watching(stock_code)
+            return
+        current_price = candles[0]["close"]
+
+        # ?? ?먯닔 寃뚯씠??(?댁쨷 寃뚯씠?? FSM OK + ?ㅽ썑 ?먯닔 ?듦낵?댁빞 留ㅼ닔) ??
+        ok, score_info = self.evaluate_phase3_rank(candles, stock_code)
+        if not ok:
+            # ?먯닔 誘몃떖: ?대쾲 留ㅼ닔留??ㅽ궢, 媛먯떆???좎?(?ㅼ쓬 FSM ?좏샇 ???ы룊媛)
+            logger.info(
+                "[%s] Phase 3 FSM OK but ?먯닔 誘몃떖, 留ㅼ닔 ?ㅽ궢: %s",
+                stock_code,
+                score_info.get("reason"),
+            )
+            return
+
+        # ?몃━嫄??뺣낫(A/B) + ?쒓? 諛쏆븘??score_info??二쇱엯
+        trig_info = self.phase3.get_trigger_info(stock_code)
+        trigger = trig_info.get("trigger")
+        opening_price = trig_info.get("opening_price", 0.0)
+        if trigger == "B" and opening_price <= 0:
+            logger.warning("[%s] Phase 3-B 留ㅼ닔 蹂대쪟: ?쒓? 誘명솗蹂?, stock_code)
+            self.phase3.stop_watching(stock_code)
+            return
+        score_info["trigger"] = trigger
+        score_info["opening_price"] = opening_price
+        logger.info(
+            "[%s] Phase 3-%s 留ㅼ닔 吏꾪뻾 (?쒓?=%.0f)",
+            stock_code,
+            trigger or "?",
+            opening_price,
+        )
+
+        stock_name = self._stock_names.get(stock_code, stock_code)
+        self._execute_buy(
+            stock_code, stock_name, phase=3, info=score_info, sub_strategy="3"
+        )
+        self.phase3.stop_watching(stock_code)
+
+    # ========================================
+    # 吏꾩엯 ?됯? (?먯닔 湲곕컲 ??scoring.py ?꾩엫)
+    # ========================================
+    def evaluate_phase1(self, candles, stock_code):
+        return score_phase1(
+            candles,
+            self._volume_ratio(candles),
+            self._current_strength(stock_code),
+            self.score_cfg,
+        )
+
+    def evaluate_surge(self, candles, stock_code, cfg=None):
+        base = cfg or self.score_cfg
+        return score_surge(
+            candles,
+            self._volume_ratio(candles),
+            self._current_strength(stock_code),
+            self._adjusted_cfg(base),
+        )
+
+    def evaluate_phase2(self, candles, stock_code):
+        if len(candles) < PHASE2_MA_PERIOD:
+            return False, {
+                "reason": f"遺꾨큺 {len(candles)}媛?({PHASE2_MA_PERIOD}MA 遺덇?)"
+            }
+        return score_phase2(
+            candles,
+            self._volume_ratio(candles),
+            PHASE2_MA_PERIOD,
+            self._current_strength(stock_code),
+            self.score_cfg,
+        )
+
+        # ==========================================
+    # 吏??諛⑹뼱留?濡쒖쭅
+    # ==========================================
+    def _get_market_defense_mode(self) -> str:
+        """
+        吏??諛⑹뼱 紐⑤뱶 ?뺤씤
+        諛섑솚: "NORMAL" (-3% ?댄븯), "CAUTION" (-3% ~ -5%), "HALT" (-5% 珥덇낵)
+        """
+        try:
+            # 肄붿뒪??吏??肄붾뱶 (肄붿뒪???곗떆硫?"0001"濡?蹂寃쏀븯?몄슂)
+            index_code = "1001" 
+            index_data = self.api.get_minute_candles(index_code, interval=1, count=2)
+
+            if not index_data or len(index_data) < 2:
+                return "NORMAL"
+
+            current = float(index_data[0].get('close', 0))
+            open_price = float(index_data[0].get('open', 0))
+
+            if open_price <= 0 or current <= 0:
+                return "NORMAL"
+
+            index_change_pct = (current - open_price) / open_price * 100
+
+            if index_change_pct <= -5.0:
+                logger.warning(f"?썞 留덉폆 ?щ옒??諛쒕룞! 吏??{index_change_pct:+.2f}% - ?꾨㈃ 留ㅻℓ 以묐떒")
+                return "HALT"
+            elif index_change_pct <= -3.0:
+                logger.info(f"?좑툘 吏??寃쎈낫 諛쒕룞! 吏??{index_change_pct:+.2f}% - 媛뺤꽭 議곌굔 媛뺥솕 (7.5??")
+                return "CAUTION"
+            else:
+                return "NORMAL"
+
+        except Exception as e:
+            logger.debug(f"吏???뺤씤 ?먮윭: {e}")
+            return "NORMAL"
+
+    def evaluate_new_intensity_strategy(self, stock_code: str, candles: list, current_price: int, open_price: int) -> tuple[bool, dict]:
+        """泥닿껐媛뺣룄 吏??& 30遊??좉퀬媛 湲곕컲???덈줈???됯? 濡쒖쭅 (吏??諛⑹뼱留??ы븿)"""
+        now = self._now().time()
+
+        # ==========================================
+        # [理쒖슦?? 吏??諛⑹뼱留??뺤씤
+        # ==========================================
+        market_mode = self._get_market_defense_mode()
+
+        if market_mode == "HALT":
+            return False, {"reason": "吏??-5% 珥덇낵濡??명븳 ?꾨㈃ 留ㅻℓ 以묐떒", "score": 0.0}
+
+        # 1. 30遊??좉퀬媛 ?꾪꽣 (紐⑤뱺 ?쒓컙? 怨듯넻)
+        if not calc_ma.is_30_candle_new_high(candles):
+            return False, {"reason": "30遺??좉퀬媛 ?꾨떂", "score": 0.0}
+
+        # 2. ?쒓컙?蹂?泥닿껐媛뺣룄 吏???꾪꽣
+        is_pass = False
+        if now < PHASE1A_CUT_OFF_TIME:
+            if not open_price or open_price <= 0:
+                return False, {"reason": "?쒖옉媛 ?놁쓬", "score": 0.0}
+
+            change_pct = (current_price - open_price) / open_price * 100
+
+            if change_pct <= 5.0:
+                is_pass = self.phase1b.trade_flow.is_intensity_sustained(stock_code, 95, 60)
+            elif change_pct <= 8.0:
+                is_pass = self.phase1b.trade_flow.is_intensity_sustained(stock_code, 120, 60)
+            else:
+                is_pass = self.phase1b.trade_flow.is_intensity_sustained(stock_code, 160, 60)
+        else:
+            is_pass = self.phase1b.trade_flow.is_intensity_sustained(stock_code, 105, 120)
+
+        if not is_pass:
+            return False, {"reason": "泥닿껐媛뺣룄 吏??誘몃떖", "score": 0.0}
+
+        # 3. ?먯닔 怨꾩궛 (湲곗〈 score ?쒖뒪???쒖슜)
+        ok, info = self.evaluate_phase1(candles, stock_code)
+        if not ok:
+            return False, {"reason": "湲곕낯 ?먯닔 誘몃떖", "score": 0.0}
+
+        base_score = info.get("score", 5.0) 
+
+        # 4. 泥닿껐媛뺣룄 媛?곗젏 怨꾩궛
+        try:
+            current_intensity = self.phase1b.trade_flow.compute_strength(stock_code, window_sec=10)
+        except Exception:
+            current_intensity = 100 
+
+        intensity_bonus = min(current_intensity / 100 * 1.0, 3.0)
+        final_score = base_score + intensity_bonus
+
+        # ==========================================
+        # 5. 吏???곹깭???곕Ⅸ ?숈쟻 而ㅽ듃?쇱씤 ?곸슜
+        # ==========================================
+        if market_mode == "CAUTION":
+            required_score = 7.5  # ?꾪뿕 援ш컙: ?먯닔瑜?7.5?먯쑝濡??믪엫
+        else:
+            required_score = 6.5  # ?뺤긽 援ш컙: 湲곗〈 6.5???좎?
+
+        if final_score >= required_score:
+            return True, {"reason": f"?좉퇋 濡쒖쭅 ?듦낵 (媛뺣룄:{current_intensity:.0f}, 紐⑤뱶:{market_mode})", "score": final_score}
+        else:
+            return False, {"reason": f"理쒖쥌 ?먯닔 遺議?({final_score:.1f}/{required_score})", "score": final_score}
+    def evaluate_pullback(self, candles, stock_code):
+        return score_pullback(
+            candles,
+            self._volume_ratio(candles),
+            self._current_strength(stock_code),
+            self._adjusted_cfg(self.score_cfg),
+        )
+
+    def evaluate_phase3_rank(self, candles, stock_code):
+        return score_phase3_rank(
+            candles,
+            self._volume_ratio(candles),
+            self._current_strength(stock_code),
+            self._adjusted_cfg(self.score_cfg),
+        )
+
+    def _current_strength(self, stock_code):
+        # 泥닿껐媛뺣룄 議고쉶. phase1b ?녾굅???ㅽ뙣/?곗씠???놁쑝硫?以묐┰媛?100 諛섑솚.
+        if stock_code and self.phase1b and getattr(self.phase1b, "trade_flow", None):
+            try:
+                return self.phase1b.trade_flow.compute_strength(
+                    stock_code, window_sec=10
+                )
+            except Exception:
+                pass
+        return 100.0
+
+    @staticmethod
+    def _volume_ratio(candles: list[dict]) -> float:
+        cur_vol = candles[0]["volume"]
+        prev = candles[1 : 1 + VOLUME_LOOKBACK]
+        if not prev:
+            return 0.0
+        avg = sum(c["volume"] for c in prev) / len(prev)
+        return cur_vol / avg if avg > 0 else 0.0
+
+        # ========================================
+
+    # 留ㅼ닔 ?ㅽ뻾
+    # ========================================
+    def _resolve_position_amount(
+        self, stock_code: str, sub_strategy: str
+    ) -> tuple[int, Optional[dict]]:
+        if self.optimizer is None:
+            return POSITION_AMOUNT, None
+        try:
+            opt_info = self.optimizer.calculate_position_amount(
+                stock_code, sub_strategy
+            )
+            amount = int(opt_info.get("amount", 0))
+            if amount <= 0:
+                return POSITION_AMOUNT, None
+            return amount, opt_info
+        except Exception:
+            logger.exception(f"[{stock_code}] 鍮꾩쨷 怨꾩궛 ?ㅽ뙣, fallback")
+            return POSITION_AMOUNT, None
+
+    def _execute_buy(self, stock_code, stock_name, phase, info, sub_strategy):
+        current_price = info["current_price"]
+        sc = info.get("score")
+        if sc is not None:
+            logger.info(
+                "[%s] %s 留ㅼ닔?됯? ?듦낵 | score=%.2f/%.2f | %s",
+                stock_code,
+                stock_name,
+                sc,
+                info.get("score_threshold", 0),
+                info.get("score_breakdown", ""),
+            )
+
+        position_amount, opt_info = self._resolve_position_amount(
+            stock_code, sub_strategy
+        )
+        quantity = int(position_amount // current_price)
+        if quantity < 1:
+            logger.warning("[%s] %s ?섎웾 0 -> skip", stock_code, stock_name)
+            return
+
+        if opt_info:
+            logger.info(
+                "[%s] ?숈쟻 鍮꾩쨷 %.2fx -> %s??,
+                stock_code,
+                opt_info.get("final_weight", 1.0),
+                f"{position_amount:,}",
+            )
+
+        self.pending.add(stock_code)
+        try:
+            ma_val = info.get("ma5") or 0
+            if sub_strategy == "1B":
+                entry_reason = f"Phase 1B 泥닿껐媛뺣룄 (?꾩옱媛 {current_price:,})"
+            elif sub_strategy == "3":
+                entry_reason = f"Phase 3 ?⑥“利앷? 1遺꾩쑀吏 (?꾩옱媛 {current_price:,})"
+            elif sub_strategy == "1S":
+                entry_reason = (
+                    f"湲됰벑 吏꾩엯 | ?쒖큹媛+{info.get('surge_rate', 0)*100:.2f}% "
+                    f"| vol x{info.get('volume_ratio', 0):.2f} (?꾩옱媛 {current_price:,})"
+                )
+            else:
+                # 1A=5MA, 2=30MA (PHASE2_MA_PERIOD)
+                ma_label = "5" if sub_strategy == "1A" else str(PHASE2_MA_PERIOD)
+                entry_reason = (
+                    f"Phase{sub_strategy} | "
+                    f"MA{ma_label}={ma_val:,.0f} "
+                    f"| vol x{info.get('volume_ratio', 0):.2f}"
+                )
+                if sub_strategy == "1A":
+                    entry_reason += f" | ?쒖큹媛+{info.get('surge_rate', 0)*100:.2f}%"
+            if opt_info:
+                entry_reason += f" | 鍮꾩쨷x{opt_info.get('final_weight', 1.0):.2f}"
+
+            result = self.order_manager.buy(stock_code, quantity, price=0)
+            if not result or not result.get("success"):
+                err = (result or {}).get("error", "unknown")
+                logger.error("[%s] 留ㅼ닔 ?ㅽ뙣: %s", stock_code, err)
+                SystemEventRepository.log(
+                    "ORDER_FAIL", f"BUY {stock_code}: {err}", "ERROR"
+                )
+                _notify(f"留ㅼ닔 ?ㅽ뙣\n{stock_code} {stock_name}\n?ъ쑀: {err}")
+                return
+
+            trade_id = TradeRepository.insert_buy(
+                stock_code=stock_code,
+                stock_name=stock_name,
+                buy_price=current_price,
+                buy_quantity=quantity,
+                strategy_phase=phase,
+                sub_strategy=sub_strategy,
+                entry_reason=entry_reason,
+            )
+
+            self.holdings[stock_code] = {
+                "trade_id": trade_id,
+                "buy_price": current_price,
+                "buy_quantity": quantity,
+                "buy_time": self._now(),
+                "stock_name": stock_name,
+                "strategy_phase": phase,
+                "sub_strategy": sub_strategy,
+                "highest_price": current_price,
+                "ma20": None,
+                "ma20_updated": None,
+                "trigger": info.get("trigger"),  # Phase3 A/B (Phase3留??명똿)
+                "opening_price": info.get("opening_price", 0.0),  # B ?먯젅 湲곗???
+                "position_weight": (opt_info or {}).get("final_weight", 1.0),
+                "warmup_until": self._now() + BUY_WARMUP,
+            }
+
+            self._sold_at.pop(stock_code, None)
+            self._buy_success_count += 1
+
+            logger.info(
+                "BUY [%s] %s %d二?@ %s??(%s) = %s??| ?뚮컢??%ds",
+                stock_code,
+                stock_name,
+                quantity,
+                f"{current_price:,}",
+                sub_strategy,
+                f"{current_price * quantity:,}",
+                int(BUY_WARMUP.total_seconds()),
+            )
+            SystemEventRepository.log(
+                "BUY",
+                f"{stock_code} {stock_name} {quantity}二?@ {current_price:,}??[{sub_strategy}]",
+                "INFO",
+            )
+            weight_str = f" (鍮꾩쨷 {opt_info['final_weight']:.2f}x)" if opt_info else ""
+            _notify(
+                f"留ㅼ닔 泥닿껐 [{sub_strategy}]\n醫낅ぉ: {stock_name} ({stock_code})\n"
+                f"?섎웾: {quantity}二?@ {current_price:,}??weight_str}\n"
+                f"湲덉븸: {current_price * quantity:,}??n?꾨왂: {entry_reason}"
+            )
+            self._mark_watch_bought(stock_code)
+        finally:
+            self.pending.discard(stock_code)
+
+    # ========================================
+    # ?뚯튂由ъ뒪??
+    # ========================================
+    def _record_watch_list(self, stock_code, stock_name, phase, info):
+        if stock_code in self.watch_list_today:
+            return
+        try:
+            extra = {}
+            for k in ("ma5", "current_price", "volume_ratio"):
+                if k in info:
+                    extra[k] = info[k]
+            if "surge_rate" in info:
+                extra["surge_rate"] = info["surge_rate"] * 100
+            if "reason" in info:
+                extra["reason_not_bought"] = info["reason"]
+            WatchListRepository.add(
+                stock_code=stock_code, stock_name=stock_name, phase=phase, **extra
+            )
+            self.watch_list_today.add(stock_code)
+        except Exception as e:
+            logger.warning("[%s] ?뚯튂由ъ뒪???ㅽ뙣: %s", stock_code, e)
+
+    def _mark_watch_bought(self, stock_code: str):
+        try:
+            for w in WatchListRepository.find_by_date(self._now().date()):
+                if w["stock_code"] == stock_code and not w.get("is_bought"):
+                    WatchListRepository.mark_bought(w["id"])
+                    break
+        except Exception as e:
+            logger.warning("[%s] mark_bought ?ㅽ뙣: %s", stock_code, e)
+
+    # ========================================
+    # 泥?궛 (5/22 媛쒗렪: ?먯젅 -2.5% / ?듭젅罹?+2.5% / 20MA ?댄깉 / ?쒓컙?뺣━)
+    # ========================================
+    def on_price_update(self, stock_code: str, current_price: float):
+        pos = self.holdings.get(stock_code)
+        if not pos or not current_price:
+            return
+        if stock_code in self.sell_blocked:
+            return
+
+        buy_price = pos["buy_price"]
+        if not buy_price:
+            return
+
+        if current_price > pos["highest_price"]:
+            pos["highest_price"] = current_price
+
+        warmup_until = pos.get("warmup_until")
+        if warmup_until and self._now() < warmup_until:
+            return
+
+        gross_rate = self._gross_rate(buy_price, current_price)  # 媛寃?湲곗?
+        net_rate = gross_rate - ROUND_TRIP_COST  # ?쒖씡 湲곗?
+        trigger = pos.get("trigger")  # Phase3 "A"/"B"/None
+
+        exit_reason = None
+
+        # 1) ?먯젅: B???쒓?-1%, 洹??몃뒗 媛寃?3%
+        if trigger == "B":
+            opening = pos.get("opening_price", 0.0)
+            if opening > 0:
+                stop_line = opening * (1 + B_STOP_LOSS_FROM_OPEN)  # opening * 0.99
+                if current_price <= stop_line:
+                    drop = (current_price - opening) / opening * 100
+                    exit_reason = (
+                        f"B ?먯젅 ?쒓?{B_STOP_LOSS_FROM_OPEN*100:.1f}% "
+                        f"(?쒓? {opening:,.0f} ??{current_price:,}, "
+                        f"{drop:+.2f}%, ??{net_rate*100:+.2f}%)"
+                    )
+        else:
+            if gross_rate <= STOP_LOSS_RATE:
+                exit_reason = f"?먯젅 媛寃?gross_rate*100:.2f}% (??{net_rate*100:.2f}%)"
+
+        # 2) ?듭젅
+        if exit_reason is None:
+            buy_t = pos["buy_time"].time() if hasattr(pos["buy_time"], "time") else None
+
+            if trigger in ("A", "B"):
+                # Phase 3 (A쨌B ?????몃젅?쇰쭅)
+                highest = pos.get("highest_price", buy_price)
+                peak_net = self._net_rate(buy_price, highest)
+                if peak_net >= TRAIL_ACTIVATE:
+                    pos["trail_armed"] = True
+                if pos.get("trail_armed"):
+                    trail_line = highest * (1 - TRAIL_GIVEBACK)
+                    if current_price <= trail_line:
+                        give = (current_price - highest) / highest * 100
+                        exit_reason = (
+                            f"?몃젅?쇰쭅 怨좎젏-{TRAIL_GIVEBACK*100:.0f}% "
+                            f"({give:+.2f}%, ??{net_rate*100:+.2f}%) [{trigger}]"
+                        )
+            else:
+                # 湲곗〈 1A/1B/2/1S ?? 留ㅼ닔 ?쒓컖?쇰줈 ?몃젅?쇰쭅 or ?듭젅罹?
+                use_trailing = buy_t is not None and buy_t < TRAIL_BUY_CUTOFF
+                if use_trailing:
+                    highest = pos.get("highest_price", buy_price)
+                    peak_net = self._net_rate(buy_price, highest)
+                    if peak_net >= TRAIL_ACTIVATE:
+                        pos["trail_armed"] = True
+                    if pos.get("trail_armed"):
+                        trail_line = highest * (1 - TRAIL_GIVEBACK)
+                        if current_price <= trail_line:
+                            give = (current_price - highest) / highest * 100
+                            exit_reason = (
+                                f"?몃젅?쇰쭅 怨좎젏-{TRAIL_GIVEBACK*100:.0f}% "
+                                f"({give:+.2f}%, ??{net_rate*100:+.2f}%)"
+                            )
+                else:
+                    if net_rate >= TAKE_PROFIT_CAP:
+                        exit_reason = f"?듭젅 罹???{net_rate*100:.2f}% (媛寃?+{gross_rate*100:.2f}%)"
+
+        # 4) ?쒓컙?뺣━ 30遺?(B??鍮꾪솢?깊솕)
+        if exit_reason is None and trigger != "B":
+            if self._now() - pos["buy_time"] >= HOLDING_TIMEOUT:
+                exit_reason = f"?쒓컙?뺣━ 30遺?(??{net_rate*100:+.2f}%)"
+
+        if exit_reason:
+            self._execute_sell(stock_code, current_price, exit_reason)
+
+    def _execute_sell(self, stock_code, current_price, exit_reason):
+        pos = self.holdings.get(stock_code)
+        if not pos or stock_code in self.pending:
+            return
+        if stock_code in self._sell_blocked:
+            return
+
+        logger.info(
+            "泥?궛 ?몃━嫄?[%s] %s | ?ъ쑀: %s | ?꾩옱媛 %s",
+            stock_code,
+            pos.get("stock_name", ""),
+            exit_reason,
+            f"{current_price:,}",
+        )
+
+        self.pending.add(stock_code)
+        try:
+            quantity = pos["buy_quantity"]
+            result = self.order_manager.sell(stock_code, quantity, price=0)
+
+            if not result or not result.get("success"):
+                err = (result or {}).get("error", "unknown")
+                cnt = self._sell_fail_count.get(stock_code, 0) + 1
+                self._sell_fail_count[stock_code] = cnt
+
+                logger.error(
+                    "[%s] 留ㅻ룄 ?ㅽ뙣 (%d/%d): %s", stock_code, cnt, MAX_SELL_FAIL, err
+                )
+                SystemEventRepository.log(
+                    "ORDER_FAIL",
+                    f"SELL {stock_code}: {err} ({cnt}/{MAX_SELL_FAIL})",
+                    "ERROR",
+                )
+
+                if cnt >= MAX_SELL_FAIL:
+                    self._sell_blocked.add(stock_code)
+                    stock_name = pos.get("stock_name", stock_code)
+                    self.holdings.pop(stock_code, None)
+                    logger.warning(
+                        "[%s] %s 留ㅻ룄 %d???ㅽ뙣 -> 李⑤떒", stock_code, stock_name, cnt
+                    )
+                    SystemEventRepository.log(
+                        "SELL_BLOCKED",
+                        f"{stock_code} 留ㅻ룄 {cnt}???ㅽ뙣 -> 李⑤떒",
+                        "WARNING",
+                    )
+                    _notify(
+                        f"留ㅻ룄 李⑤떒\n{stock_name} ({stock_code})\n"
+                        f"留ㅻ룄 {cnt}???ㅽ뙣 -> ?섎룞 ?뺤씤 ?꾩슂"
+                    )
+                else:
+                    _notify(
+                        f"留ㅻ룄 ?ㅽ뙣 ({cnt}/{MAX_SELL_FAIL})\n"
+                        f"{pos.get('stock_name', stock_code)} ({stock_code})\n?ъ쑀: {err}"
+                    )
+                return
+
+            self._sell_fail_count.pop(stock_code, None)
+            self._sold_at[stock_code] = self._now()
+            self._sold_at[stock_code] = self._now()
+            # B?? ?먯젅濡??섍컙 醫낅ぉ? ?뱀씪 ?щℓ??湲덉? (?듭젅 醫낅ぉ留?3遺????щℓ??
+            if exit_reason and exit_reason.startswith("?먯젅"):
+                self._stoploss_blocked.add(stock_code)
+                logger.info("[%s] ?먯젅 泥?궛 ???뱀씪 ?щℓ??李⑤떒", stock_code)
+
+            TradeRepository.update_sell(
+                trade_id=pos["trade_id"],
+                sell_price=current_price,
+                sell_quantity=quantity,
+                exit_reason=exit_reason,
+            )
+
+            # ?쒖넀??(?섏닔猷??멸툑 李④컧)
+            gross_profit = (current_price - pos["buy_price"]) * quantity
+            net_profit = self._net_profit(pos["buy_price"], current_price, quantity)
+            net_profit = self._net_profit(pos["buy_price"], current_price, quantity)
+            self._daily_realized += net_profit  # ????以?異붽? (MDD ?꾩쟻)
+            gross_rate = self._gross_rate(pos["buy_price"], current_price) * 100
+            net_rate = self._net_rate(pos["buy_price"], current_price) * 100
+            stock_name = pos["stock_name"]
+            sub = pos.get("sub_strategy", "?")
+            del self.holdings[stock_code]
+
+            logger.info(
+                "SELL [%s] %s %d二?@ %s??-> %s | ?쒖넀??%s??(??%.2f%%, 媛寃?%.2f%%) [%s]",
+                stock_code,
+                stock_name,
+                quantity,
+                f"{current_price:,}",
+                exit_reason,
+                f"{net_profit:+,.0f}",
+                net_rate,
+                gross_rate,
+                sub,
+            )
+            SystemEventRepository.log(
+                "SELL",
+                f"{stock_code} {stock_name} {quantity}二?@ {current_price:,}??[{sub}] | "
+                f"{exit_reason} | ?쒖넀??{net_profit:+,.0f}??,
+                "INFO",
+            )
+            emoji = "+" if net_profit > 0 else "-"
+            _notify(
+                f"留ㅻ룄 泥닿껐 [{sub}] ({emoji})\n醫낅ぉ: {stock_name} ({stock_code})\n"
+                f"?섎웾: {quantity}二?@ {current_price:,}??n"
+                f"?쒖넀?? {net_profit:+,.0f}??(??{net_rate:+.2f}%, 媛寃?{gross_rate:+.2f}%)\n"
+                f"?ъ쑀: {exit_reason}\n?щℓ??李⑤떒: {int(REBUY_COOLDOWN.total_seconds()/60)}遺?
+            )
+        finally:
+            self.pending.discard(stock_code)
+
+    # ========================================
+    # ??꾩븘??
+    # ========================================
+    def check_timeouts(self):
+        now = self._now()
+        for code in list(self.holdings.keys()):
+            pos = self.holdings[code]
+            warmup_until = pos.get("warmup_until")
+            if warmup_until and now < warmup_until:
+                continue
+            if now - pos["buy_time"] < HOLDING_TIMEOUT:
+                continue
+            if code in self.sell_blocked:
+                continue
+            if pos.get("trigger") == "B":  # B???쒓컙?뺣━ 硫댁젣
+                continue
+            try:
+                # 蹂묓빀 硫붿꽌???ъ슜
+                candles = self._get_merged_candles(code, interval=1, count=1)
+                if candles:
+                    self._execute_sell(code, candles[0]["close"], "?쒓컙?뺣━ 30遺?)
+            except Exception as e:
+                logger.exception("[%s] ??꾩븘??泥?궛 ?ㅽ뙣: %s", code, e)

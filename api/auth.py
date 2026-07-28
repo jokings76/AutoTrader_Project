@@ -41,9 +41,12 @@ def send_telegram(message, target='signal'):
         message: 보낼 메시지 본문
         target: 'signal' (개인 채팅) 또는 'order' (주문 그룹 채팅)
     """
-    chat_id = (settings.TELEGRAM_CHAT_ID_ORDER 
-               if target == 'order' 
-               else settings.TELEGRAM_CHAT_ID_SIGNAL)
+    if target == "order":
+        chat_id = settings.TELEGRAM_CHAT_ID_ORDER
+    elif target == "closing_bet":
+        chat_id = settings.TELEGRAM_CHAT_ID_CLOSING_BET
+    else:
+        chat_id = settings.TELEGRAM_CHAT_ID_SIGNAL
     url = f"https://api.telegram.org/bot{settings.TELEGRAM_TOKEN}/sendMessage"
 
     try:
