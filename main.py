@@ -873,7 +873,10 @@ class TradingBot:
 
         msg = (f"봇 종료 ({datetime.now().strftime('%H:%M:%S')})\n"
                f"보유: {len(self.strategy_mgr.holdings) if self.strategy_mgr else 0}종목")
-        send_telegram(msg, target="signal")
+        try:
+            send_telegram(msg, target="signal")
+        except Exception:
+            logger.exception("종료 알림 전송 실패 (종료 절차는 계속 진행)")
         logger.info("안녕히")
 
 
@@ -885,7 +888,10 @@ async def main():
         pass
     except Exception:
         logger.exception("봇 실행 중 치명적 예외")
-        send_telegram(f"봇 비정상 종료", target="signal")
+        try:
+            send_telegram(f"봇 비정상 종료", target="signal")
+        except Exception:
+            logger.exception("비정상 종료 알림 전송 실패")
     finally:
         await bot.shutdown()
 
