@@ -22,7 +22,7 @@ from api.auth import send_telegram
 from db.connection import get_cursor
 from core.strategy.indicators import is_volume_increasing_streak
 from core.strategy.scoring import (
-    DEFAULT,
+    ScoreConfig,
     score_phase1,
     score_pullback,
 )
@@ -46,6 +46,24 @@ PHASE1A_TIGHTEN_HHMM = "1030"
 PHASE1A_END_HHMM = "1450"
 
 EXIT_CATEGORY_ORDER = ["손절", "익절", "시간정리", "강제청산"]
+
+# 체결강도/OBV는 틱데이터가 있어야 계산되는데 백테스트는 분봉만 갖고 있어서
+# 항상 고정값(NEUTRAL_STRENGTH=100, obv_momentum 기본값 0.0)을 씀. 문제는
+# _f_strength(100, ...)이 "중립"이 아니라 "0점"으로 계산된다는 것(공식상
+# 100~120을 0~1로 매핑해서 100은 곧 하한) — 그래서 이 두 요소를 가중치 넣은
+# 채로 두면 실제로는 매번 0점을 깔고 시작하는 건데 만점 기준(threshold)엔
+# 그대로 반영돼서 다른 요소가 훨씬 더 잘 나와야만 통과하는 부당한 페널티가
+# 됨(2026-07-29 실측: 세아메카닉스 하루 24개 후보 중 여러 건이 0.3~0.4점
+# 차이로 전부 탈락, 강도만 뻤으면 다 통과할 점수였음). 그래서 백테스트
+# 전용 cfg에서는 이 두 요소의 가중치를 0으로 둬서 점수/만점 계산에서
+# 아예 빼버림(측정 불가한 걸 "중립"이 아니라 "항상 최저"로 반영하던 버그 수정).
+PHASE1A_CFG = ScoreConfig(w_strength=0.0)
+
+# Pullback 전용 점수 cfg — core/strategy_manager.py의 self.pullback_score_cfg와
+# "가중치 배분 철학"은 같게 유지하되(MA/양봉 점수 제외), 체결강도/OBV는 위와
+# 같은 이유로 백테스트에서는 0으로 둠(라이브에선 phase1b/실시간 캔들로 실제
+# 값이 있어서 self.pullback_score_cfg는 w_strength=3.0/w_obv=2.0 그대로 유지).
+PULLBACK_CFG = ScoreConfig(w_volume=4.0, w_strength=0.0, w_obv=0.0, threshold_ratio=0.5)
 
 
 def _hhmm(candle: dict) -> str:
@@ -93,7 +111,7 @@ def _entry_signal(candles: list, idx: int, vwap_strategy: VWAPStrategy):
 
     # 1A: 거래량증가지속 + score_phase1, 10:30부터 점수 커트라인 상향
     if is_volume_increasing_streak(sub):
-        ok, info = score_phase1(sub, vol_ratio, NEUTRAL_STRENGTH, DEFAULT)
+        ok, info = score_phase1(sub, vol_ratio, NEUTRAL_STRENGTH, PHASE1A_CFG)
         if ok:
             required = (
                 PHASE1A_SCORE_TIGHT if hhmm >= PHASE1A_TIGHTEN_HHMM else PHASE1A_SCORE_NORMAL
@@ -103,7 +121,7 @@ def _entry_signal(candles: list, idx: int, vwap_strategy: VWAPStrategy):
 
     # Pullback: 09:01~10:30, 눌림목 반등 점수 + VWAP AND
     if hhmm < PULLBACK_END_HHMM:
-        ok, info = score_pullback(sub, vol_ratio, NEUTRAL_STRENGTH, DEFAULT)
+        ok, info = score_pullback(sub, vol_ratio, NEUTRAL_STRENGTH, PULLBACK_CFG)
         if ok:
             vwap = calc_vwap(sub)
             vr = vwap_strategy.evaluate(
@@ -146,6 +164,16 @@ def _simulate_stock(stock_code: str, stock_name: str, candles: list, vwap_strate
     """한 종목의 하루치 분봉을 순회하며 진입->청산 1회 재현 (재진입 없음, 심플 유지)."""
     trades = []
     position = None
+
+    # run_daily_backtest이 count=FETCH_COUNT(450)로 당겨오는 캔들엔 항상 전일
+    # 오후분이 섞여 있는데(하루 거래시간이 390분뿐이라 450개를 채우려면 전일로
+    # 넘어감), 아래 hhmm 비교는 날짜를 안 보고 시:분만 비교해서 전일 15:16을
+    # "오늘 장마감 이후"로 착각해 시뮬레이션이 시작하자마자(오늘 데이터는 하나도
+    # 못 보고) break로 끝나버리고 있었음 — "재현된 매매 없음"의 실제 원인
+    # (2026-07-29 실전 확인, 아마 이 백테스트가 도입된 이후 매일 이랬을 것으로
+    # 추정). 오늘 날짜 캔들만 남기고 나머지는 버려서 날짜 경계를 명확히 함.
+    today_str = date.today().strftime("%Y%m%d")
+    candles = [c for c in candles if c.get("time_str", "").startswith(today_str)]
 
     for idx in range(len(candles) - 1, -1, -1):
         cur = candles[idx]

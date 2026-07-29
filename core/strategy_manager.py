@@ -24,7 +24,7 @@ from dataclasses import replace as _dc_replace
 from typing import Optional
 
 from .theme_manager import ThemeManager
-from core.strategy.indicators import is_volume_increasing_streak
+from core.strategy.indicators import is_volume_increasing_streak, obv_momentum
 from core.strategy.chemul_evaluator import ChemulState
 from core.strategy.scoring import (
     ScoreConfig,
@@ -61,6 +61,10 @@ GROUP_A_START = time(9, 1)
 PULLBACK_END = time(10, 30)
 PHASE1A_TIGHTEN_TIME = time(10, 30)  # 이 시각부터 1A 점수 상향
 PHASE1A_END = time(14, 50)
+# 주도주상위 조건검색은 GROUP_A_START(09:01)부터 그대로 감시하되, 나머지
+# 조건검색식(체결강도100/돌파자동매매용/관심종목감시)은 09:20부터 감시 시작.
+# (2026-07-29) on_condition_hit에서 cond_name 기준으로 적용.
+OTHER_COND_START = time(9, 20)
 # 1L(주도주) 시간 윈도우
 LEADING_START = time(9, 1)
 LEADING_END = time(10, 50)
@@ -76,6 +80,10 @@ PHASE1A_SCORE_NORMAL = 6.5
 PHASE1A_SCORE_TIGHT = 8.5
 PHASE1A_SCORE_CAUTION_BONUS = 1.0
 
+# Pullback 반등 확인용 OBV(누적거래량) 확인 구간 — 몇 봉 전과 비교할지.
+# (2026-07-29 신규: 거래량 없는 가짜 반등을 VWAP과 함께 걸러내는 용도)
+OBV_LOOKBACK = 5
+
 # 지수 방어 로직 임시 비활성화 스위치 (2026-07-28: 지수 급락 중 테스트 진행을 위해 OFF.
 # 프로그램이 매끄럽게 동작 확인되면 True로 되돌릴 것)
 MARKET_DEFENSE_ENABLED = False
@@ -83,6 +91,14 @@ MARKET_DEFENSE_ENABLED = False
 # 매수 진입 등락률 상한 (당일 시가 대비). 이미 많이 오른 종목을 추격매수하는 걸
 # 막기 위한 필터 — 1A/Pullback/1B/1L 전체 전략에 동일 적용. (2026-07-28)
 MAX_ENTRY_CHANGE_PCT = 12.0
+
+# 신규매수 전면 하드 컷오프. 1A(~14:50)/1L(~10:50)은 자체 시간 윈도우가 있지만
+# 1B(FSM 감시)는 Pullback 미체결 후보를 계속 지켜보다 READY_TO_BUY가 되면 바로
+# 매수해서 자체 종료 시각이 없음 — 장마감(15:30) 직전까지 실시간 틱이 들어오는
+# 한 계속 매수를 시도하던 문제(2026-07-29 실전 확인, 수동 종료 전까지 지속).
+# _execute_buy 단일 지점에서 전략 무관하게 막아서 1B처럼 자체 윈도우가 없는
+# 전략이 추가돼도 항상 걸리게 함.
+ENTRY_HARD_CUTOFF = time(15, 10)
 
 # 지수 급락(폭락장) 대응 — MARKET_DEFENSE_ENABLED와 무관하게 항상 감시(2026-07-28).
 # 코스피/코스닥 중 더 나쁜 쪽이 이 이하로 떨어지면: 트레일링 없이 전 전략
@@ -190,13 +206,26 @@ class StrategyManager:
         self._last_market_mode = "NORMAL"  # 지수방어 모드 전환 알림용
         self._last_severe_crash_state = False  # 지수 급락 대응 모드 전환 알림용
 
-        # 점수 기반 진입 설정 (1A/Pullback 공용 기본 cfg). surge_min은 score_phase1/
-        # score_pullback 둘 다 안 쓰는 필드라 ScoreConfig 기본값 그대로 둠.
+        # 점수 기반 진입 설정 (1A 전용). surge_min은 score_phase1이 안 쓰는
+        # 필드라 ScoreConfig 기본값 그대로 둠.
         self.score_cfg = ScoreConfig(
             surge_target=SURGE_THRESHOLD,
             ma_tolerance=MA_TOUCH_TOLERANCE,
             volume_target=VOLUME_SURGE_RATIO,
             threshold_ratio=0.75,
+        )
+        # Pullback 전용 cfg (2026-07-29 분리) — MA/양봉은 게이트(눌림성립+반등확인)로
+        # 이미 확정된 값이라 점수에서 빼고 거래량/강도/OBV로 9점 재분배, 컷라인도
+        # 낮춤(0.75->0.5). 실측 근거: 1A와 같은 cfg를 쓰던 기존엔 MA+양봉이 항상
+        # 만점(4/9 고정)이고 강도는 phase1b 감시 시작 전이라 거의 항상 0점이라,
+        # 오늘 점수단계 277건이 전부 탈락(0건 통과)했었음.
+        self.pullback_score_cfg = ScoreConfig(
+            ma_tolerance=MA_TOUCH_TOLERANCE,
+            volume_target=VOLUME_SURGE_RATIO,
+            w_volume=4.0,
+            w_strength=3.0,
+            w_obv=2.0,
+            threshold_ratio=0.5,
         )
         self._restore_from_db()
         self._last_phase = self.get_current_phase()
@@ -538,6 +567,27 @@ class StrategyManager:
         양쪽에서 공유하는 로직 — 2026-07-28 분리(슬롯 꽉 찼을 때 1A/Pullback 후보가
         재평가 없이 영구히 방치되던 문제 수정, core/watchlist_reentry.py 참고).
         반환: 매수 실행했으면 True."""
+        # watchlist_reentry 경로는 on_condition_hit과 달리 호출 전에 재매수 차단을
+        # 확인하지 않아서, 손실차단/쿨다운 중인 종목이 슬롯 재확보 시 바로 재매수될
+        # 수 있었음 — 공유 진입점인 여기서 한 번 더 확인. (2026-07-29)
+        blocked, reason = self._is_rebuy_blocked(stock_code)
+        if blocked:
+            logger.info("[%s] %s 매수 차단: %s", stock_code, stock_name, reason)
+            return False
+
+        # 주도주상위는 기존대로 GROUP_A_START(09:01)부터 바로 평가, 나머지
+        # 조건검색식(체결강도100/돌파자동매매용/관심종목감시)은 09:20 이전이면
+        # 아직 평가하지 않음(2026-07-29). on_condition_hit/watchlist_reentry
+        # 공유 진입점이라 여기 한 곳에 둬야 두 경로 다 일관되게 걸림 — 특히
+        # task_watchlist_reentry가 15초마다 재시도하므로 on_condition_hit
+        # 쪽에서만 막으면 곧바로 재평가돼서 지연이 무의미해짐.
+        # watch_list_today에는 넣어둬서 09:20이 지나면 watchlist_reentry가
+        # 자연히 다시 평가하게 함(단순 차단이 아니라 지연 평가).
+        cond_name = self._cond_names.get(stock_code, "")
+        if "주도주상위" not in cond_name and now_t < OTHER_COND_START:
+            self.watch_list_today.add(stock_code)
+            return False
+
         # ==========================================
         # 1A: 거래량증가지속 + 체결강도지속 + 점수 (09:01~14:50)
         # ==========================================
@@ -554,29 +604,55 @@ class StrategyManager:
         # Pullback: 눌림목 반등 점수 + VWAP AND (09:01~10:30, 1A와 시간대 겹침/슬롯 별도)
         # ==========================================
         if now_t < PULLBACK_END:
-            ok, info = self.evaluate_pullback(candles, stock_code)
+            # OBV(누적거래량) 모멘텀 — 점수 요소로 씀(2026-07-29). VWAP과 동일하게
+            # 당일 전용 캔들로 계산(전일 데이터 섞이는 _get_merged_candles 절대
+            # 안 씀), 아래 VWAP 필터에서 같은 캔들을 재사용해 REST 추가호출 없음.
+            today_candles = None
+            obv_mom = 0.0
+            try:
+                today_candles = self.api.get_minute_candles(
+                    stock_code, interval=1, count=400
+                )
+                obv_mom = obv_momentum(today_candles, lookback=OBV_LOOKBACK)
+            except Exception as e:
+                logger.warning("[%s] OBV 계산 실패, 무점수 처리: %s", stock_code, e)
+
+            ok, info = self.evaluate_pullback(candles, stock_code, obv_mom)
             self._record_watch_list(stock_code, stock_name, phase, info)
+
+            # 눌림 성립(1단계 통과) 즉시 체결강도 감시 시작 — 이후 재평가
+            # 사이클(watchlist_reentry)에서 강도 점수가 실제값을 갖도록.
+            # (2026-07-29 — 기존엔 아래 "즉시매수 실패" 케이스에서만 시작해서
+            # 최초 평가는 항상 강도=0으로 채점되던 구조적 문제 수정. 실측:
+            # 오늘 점수단계 277건 중 268건(97%)이 강도 0.0/2.0이었음.)
+            if (
+                info.get("setup_ok")
+                and self.phase1b
+                and self.can_buy_phase1b()
+                and not self.phase1b.is_watching(stock_code)
+            ):
+                self.phase1b.start_watching(stock_code)
+
             if ok:
-                if self._apply_vwap_filter(stock_code, "pullback", current_price, info):
+                if self._apply_vwap_filter(
+                    stock_code, "pullback", current_price, info,
+                    today_candles=today_candles,
+                ):
                     if self.can_buy_pullback():
                         self._execute_buy(
                             stock_code, stock_name, phase, info, sub_strategy="1A_눌림"
                         )
+                        # Pullback 자체 점수로 이미 샀으면 1B 감시는 더 필요
+                        # 없음 — 안 끄면 나중에 이 종목을 팔고 난 뒤 phase1b가
+                        # 여전히 감시 중이다가 별도로 재매수를 시도할 수 있음.
+                        if self.phase1b and self.phase1b.is_watching(stock_code):
+                            self.phase1b.stop_watching(stock_code)
                         return True
                     logger.info("[%s] pullback 조건 OK but 슬롯 부족", stock_code)
             elif info.get("reason"):
                 logger.info(
                     "[%s] %s pullback 미충족: %s", stock_code, stock_name, info.get("reason")
                 )
-
-            # 즉시매수는 안 됐지만 눌림목 형태는 보임 -> 1B 5단계 FSM으로 정교하게 재관찰
-            # (Surge 삭제로 1B 감시 시작 트리거를 Pullback 쪽으로 이관, 2026-07-27)
-            if (
-                self.phase1b
-                and self.can_buy_phase1b()
-                and not self.phase1b.is_watching(stock_code)
-            ):
-                self.phase1b.start_watching(stock_code)
 
         return False
 
@@ -753,7 +829,18 @@ class StrategyManager:
             return False, {"reason": "지수 -5% 초과로 인한 전면 매매 중단", "score": 0.0}
 
         # 1. 거래량증가지속 필터 (30봉신고가 대신, 2026-07-27 교체)
-        if not is_volume_increasing_streak(candles):
+        # 개장 초반(대략 09:01~09:04)엔 오늘 분봉이 streak+1(4)개도 안 쌓여서
+        # _get_merged_candles가 전일 마지막 분봉으로 채워 넣는데, 그러면 "어제
+        # 장마감 무렵 거래량 vs 오늘 개장 1~2분"이라는 의미없는 비교가 되어
+        # 매번 탈락함 (2026-07-29 실전 확인 — 오늘 조건검색 21종목 전부 이
+        # 이유로 탈락, 1A가 하루 종일 0건). 전일 데이터는 섞지 않고 오늘
+        # 분봉만으로 판단, 아직 부족하면 탈락이 아니라 보류(다음 재평가 때
+        # 다시 시도 — watchlist_reentry가 슬롯 빌 때마다 재호출함).
+        today_str = self._now().strftime("%Y%m%d")
+        today_only = [c for c in candles if c.get("time_str", "").startswith(today_str)]
+        if len(today_only) < 4:
+            return False, {"reason": "오늘 분봉 부족(개장 초반) - 거래량 판정 보류", "score": 0.0}
+        if not is_volume_increasing_streak(today_only):
             return False, {"reason": "거래량 증가 지속 아님", "score": 0.0}
 
         # 2. 시간대별 체결강도 지속 필터
@@ -811,27 +898,36 @@ class StrategyManager:
                 "score": final_score,
             }
 
-    def evaluate_pullback(self, candles, stock_code):
+    def evaluate_pullback(self, candles, stock_code, obv_mom: float = 0.0):
+        # 주의: 인자명 obv_mom은 일부러 obv_momentum(모듈 임포트된 함수명)과
+        # 다르게 지음 — 같은 이름을 지역변수/인자로 쓰면 함수 스코프 내에서
+        # obv_momentum이 지역변수로 취급돼 호출부(_evaluate_1a_pullback_entry)의
+        # obv_momentum(...) 호출이 UnboundLocalError로 깨짐.
         return score_pullback(
             candles,
             self._volume_ratio(candles),
             self._current_strength(stock_code),
-            self._adjusted_cfg(self.score_cfg),
+            self._adjusted_cfg(self.pullback_score_cfg),
+            obv_momentum=obv_mom,
         )
 
     def _apply_vwap_filter(
-        self, stock_code: str, strat_name: str, current_price: float, info: dict
+        self, stock_code: str, strat_name: str, current_price: float, info: dict,
+        today_candles: list | None = None,
     ) -> bool:
         """눌림목(pullback) 전용 VWAP AND 필터. 다른 전략은 항상 통과.
         반환 True = 매수 진행, False = VWAP 탈락으로 매수 보류.
         주의: VWAP은 당일 09:00~현재 누적이라야 정확함. 전일 데이터가
         섞이는 _get_merged_candles는 절대 쓰지 않고, get_minute_candles를
-        직접 호출해서 당일 데이터만 사용함."""
+        직접 호출해서 당일 데이터만 사용함.
+        today_candles: 호출부가 이미 당일 전용 캔들을 갖고 있으면(예: OBV
+        점수 계산에 이미 씀) 넘겨서 REST 재호출 방지, 없으면 새로 조회."""
         if strat_name != "pullback":
             return True
         try:
-            vwap_candles = self.api.get_minute_candles(
-                stock_code, interval=1, count=400
+            vwap_candles = (
+                today_candles if today_candles is not None
+                else self.api.get_minute_candles(stock_code, interval=1, count=400)
             )
             vwap = calc_vwap(vwap_candles)
         except Exception as e:
@@ -870,6 +966,7 @@ class StrategyManager:
                 result.get("gates"),
             )
             return False
+
         return True
 
     def _current_strength(self, stock_code):
@@ -936,6 +1033,13 @@ class StrategyManager:
 
     def _execute_buy(self, stock_code, stock_name, phase, info, sub_strategy):
         current_price = info["current_price"]
+
+        if self._now().time() >= ENTRY_HARD_CUTOFF:
+            logger.info(
+                "[%s] %s 매수 차단: %s 이후 신규매수 하드 컷오프 [%s]",
+                stock_code, stock_name, ENTRY_HARD_CUTOFF.strftime("%H:%M"), sub_strategy,
+            )
+            return
 
         if self._is_severe_crash() and self._now().time() >= SEVERE_CRASH_ENTRY_CUTOFF:
             logger.info(
@@ -1271,11 +1375,6 @@ class StrategyManager:
 
             self.sell_fail_count.pop(stock_code, None)
             self.sold_at[stock_code] = self._now()
-            # B안: 손절로 나간 종목은 당일 재매수 금지 (익절 종목만 3분 후 재매수)
-            # B안: 손절로 나간 종목은 당일 재매수 금지 (익절 종목만 3분 후 재매수)
-            if exit_reason and exit_reason.startswith("손절"):
-                self._stoploss_blocked.add(stock_code)
-                logger.info("[%s] 손절 청산 → 당일 재매수 차단", stock_code)
 
             # 매도 주문은 이미 체결됨 — DB 기록이 실패(또는 trade_id 없음)해도
             # 아래 포지션 정리(self.holdings 제거)는 반드시 이어져야 한다.
@@ -1308,6 +1407,20 @@ class StrategyManager:
             stock_name = pos["stock_name"]
             sub = pos.get("sub_strategy", "?")
             del self.holdings[stock_code]
+
+            # 실제 손실로 마감된 청산은 사유(손절/슬롯교체/시간정리) 무관하게 당일
+            # 재매수 금지. 익절만 기존 3분 쿨다운 후 재진입 허용. (2026-07-29 수정 —
+            # 기존엔 "손절"로 시작하는 사유만 차단해서, 슬롯교체로 손실 나간 종목이
+            # 3분 쿨다운만 지나면 바로 재매수돼 같은 종목에서 반복 손실이 났음.
+            # 예: 스피어(347700) 09:38→09:50 슬롯교체(-59,899)→09:53 재매수→10:04
+            # 또 슬롯교체(-9,172)→10:07 재매수→10:17 결국 손절(-130,219), 합계
+            # -199,290원. 이제 09:50 시점에 바로 차단되어 반복이 끊긴다.)
+            if net_profit < 0:
+                self._stoploss_blocked.add(stock_code)
+                logger.info(
+                    "[%s] 손실 청산(%s, 순%.2f%%) → 당일 재매수 차단",
+                    stock_code, exit_reason, net_rate,
+                )
 
             logger.info(
                 "SELL [%s] %s %d주 @ %s원 -> %s | 순손익 %s원 (순 %.2f%%, 가격 %.2f%%) [%s]",

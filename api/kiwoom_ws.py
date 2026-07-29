@@ -175,7 +175,7 @@ class KiwoomWS:
         # --- [추가 시작] ---
         try:
             # 1. 데이터에서 종목코드 리스트 추출 (A 제거)
-            jm_list = [item["jmcode"].replace("A", "") for item in resp.get("data", [])]
+            jm_list = [item["jmcode"].replace("A", "") for item in (resp.get("data") or [])]
             # 2. 조건식 이름 가져오기
             name = self.condition_map.get(seq, "알수없음")
 

@@ -18,6 +18,7 @@ class ScoreConfig:
     w_candle: float = 2.0
     w_volume: float = 3.0
     w_strength: float = 2.0         # 체결강도 가중치 (추가됨)
+    w_obv: float = 2.0              # OBV 가중치 (Pullback 전용, 2026-07-29 신규)
 
     # 만점 기준점
     surge_target: float = 0.05      # Phase1 SURGE_THRESHOLD (만점 기준 상승률)
@@ -86,7 +87,7 @@ def _finalize(parts: dict, maxw: dict, cfg: ScoreConfig) -> tuple[bool, float, f
     thr = cfg.threshold_abs if cfg.threshold_abs is not None else cfg.threshold_ratio * max_total
     passed = total >= thr
     # 체결강도(strength) 라벨 추가
-    label_map = {"surge": "급등", "ma": "MA", "candle": "양봉", "volume": "거래량", "strength": "강도"}
+    label_map = {"surge": "급등", "ma": "MA", "candle": "양봉", "volume": "거래량", "strength": "강도", "obv": "OBV"}
     seg = ", ".join(f"{label_map.get(k, k)} {parts[k]:.1f}/{maxw[k]:.0f}" for k in parts)
     reason = f"점수 {total:.1f}/{max_total:.0f} < {thr:.1f} ({seg})"
     return passed, total, thr, reason
@@ -212,9 +213,16 @@ def _pullback_setup(candles: list[dict], ma5: float | None, ma_tol: float):
 
 
 def score_pullback(candles: list[dict], volume_ratio: float,
-                   current_strength: float = 100.0, cfg: ScoreConfig = DEFAULT):
+                   current_strength: float = 100.0, cfg: ScoreConfig = DEFAULT,
+                   obv_momentum: float = 0.0):
     """눌림목 반등 평가. 눌림(되돌림+5MA터치) 미성립이면 즉시 False.
-    성립 시 반등(양봉+5MA돌파) 확인 후 양봉/거래량/체결강도 점수화."""
+    성립 시 반등(양봉+5MA돌파) 확인 후 거래량/체결강도/OBV로 점수화.
+
+    MA·양봉은 점수에서 제외(2026-07-29) — 여기까지 왔다는 건 이미 게이트
+    (눌림 성립+반등 확인)로 둘 다 확정된 상태라 매번 만점이 나와서 변별력이
+    없었음(실측: 오늘 277건 전부 MA 2.0/2, 양봉 2.0/2 — 9점 중 4점이 상수).
+    obv_momentum: -1.0~1.0. 호출부(strategy_manager._evaluate_1a_pullback_entry)에서
+    당일 전용 캔들(전일 데이터 절대 안 섞음)로 미리 계산해 전달."""
     cur = candles[0]
     current_price = cur["close"]
     ma5 = calc_ma(candles, 5)
@@ -224,7 +232,7 @@ def score_pullback(candles: list[dict], volume_ratio: float,
         info = {
             "current_price": current_price, "ma5": ma5,
             "volume_ratio": volume_ratio, "current_strength": current_strength,
-            "drop_rate": drop_rate,
+            "drop_rate": drop_rate, "setup_ok": False,
             "reason": f"눌림 미성립 (되돌림 {drop_rate*100:.2f}%, 1~3% 밖 또는 5MA 미터치)",
         }
         return False, info
@@ -235,26 +243,25 @@ def score_pullback(candles: list[dict], volume_ratio: float,
         info = {
             "current_price": current_price, "ma5": ma5,
             "volume_ratio": volume_ratio, "current_strength": current_strength,
-            "drop_rate": drop_rate,
+            "drop_rate": drop_rate, "setup_ok": True,
             "reason": f"눌림 OK but 반등 미확인 (양봉·5MA돌파 필요, 되돌림 {drop_rate*100:.2f}%)",
         }
         return False, info
 
-    # 반등 확인 → 양봉/거래량/체결강도 점수화 (MA는 이미 돌파 확인했으니 만점 부여)
+    # 반등 확인 → 거래량/체결강도/OBV 점수화
     parts = {
-        "ma":       cfg.w_ma     * 1.0,
-        "candle":   cfg.w_candle * _f_candle(cur, cfg.doji_credit),
-        "volume":   cfg.w_volume * _f_volume(volume_ratio, cfg.volume_target),
+        "volume":   cfg.w_volume   * _f_volume(volume_ratio, cfg.volume_target),
         "strength": cfg.w_strength * _f_strength(current_strength, cur, volume_ratio, cfg.strength_target),
+        "obv":      cfg.w_obv      * _clamp(obv_momentum),
     }
-    maxw = {"ma": cfg.w_ma, "candle": cfg.w_candle,
-            "volume": cfg.w_volume, "strength": cfg.w_strength}
+    maxw = {"volume": cfg.w_volume, "strength": cfg.w_strength, "obv": cfg.w_obv}
     passed, total, thr, reason = _finalize(parts, maxw, cfg)
 
     info = {
         "current_price": current_price, "ma5": ma5,
         "volume_ratio": volume_ratio, "current_strength": current_strength,
-        "drop_rate": drop_rate, "recent_high": recent_high,
+        "drop_rate": drop_rate, "recent_high": recent_high, "setup_ok": True,
+        "obv_momentum": round(obv_momentum, 3),
         "score": round(total, 2), "score_threshold": round(thr, 2),
         "score_breakdown": _breakdown(parts),
     }

@@ -178,6 +178,76 @@ def calc_rise_pct_from_open(current: int, today_open: int) -> float:
         return 0.0
     return (current - today_open) / today_open * 100
 
+def calc_obv(candles: list[dict]) -> list[float]:
+    """
+    OBV(On-Balance Volume, 누적거래량) 계산.
+    종가가 전봉보다 오르면 +거래량, 내리면 -거래량, 같으면 변화 없음으로 누적.
+
+    Args:
+        candles: 분봉 리스트 (시간 역순, [0]이 최신). 반드시 당일 데이터만
+                 넣을 것 — 전일 데이터가 섞이면 하루 경계에서 누적 기준선이
+                 왜곡됨(VWAP과 동일한 주의사항, core/strategy_manager.py의
+                 _apply_vwap_filter 참고).
+
+    Returns:
+        OBV 누적값 리스트, 과거->최신 순(= candles와 반대 방향, [-1]이 최신).
+        candles가 2개 미만이면 빈 리스트.
+
+    Examples:
+        >>> candles = [{'close': 103, 'volume': 50}, {'close': 100, 'volume': 40},
+        ...            {'close': 98, 'volume': 30}]
+        >>> calc_obv(candles)
+        [0.0, -30.0, 10.0]
+    """
+    if len(candles) < 2:
+        return []
+    chron = list(reversed(candles))  # 과거 -> 최신 순으로 뒤집음
+    obv = [0.0]
+    for i in range(1, len(chron)):
+        prev_close = chron[i - 1]["close"]
+        cur = chron[i]
+        vol = float(cur.get("volume", 0) or 0)
+        if cur["close"] > prev_close:
+            obv.append(obv[-1] + vol)
+        elif cur["close"] < prev_close:
+            obv.append(obv[-1] - vol)
+        else:
+            obv.append(obv[-1])
+    return obv
+
+
+def obv_momentum(candles: list[dict], lookback: int = 5) -> float:
+    """
+    반등이 거래량(매집)에 뒷받침되는지 OBV로 확인하는 연속값 버전 —
+    OBV 변화량을 그 구간 총거래량으로 정규화한 모멘텀(-1.0~1.0).
+    +1에 가까울수록 그 구간 내내 상승 쪽으로 거래량이 뒷받침됨(강한 매집),
+    -1에 가까울수록 하락 쪽으로 뒷받침됨(매도 우세). 0 이하면 방향성 없음/매집 안 됨.
+
+    Args:
+        candles: 분봉 리스트 (시간 역순, [0]이 최신, 당일 데이터만 — calc_obv 참고).
+        lookback: 몇 봉 구간의 변화를 볼지.
+
+    Returns:
+        데이터가 부족하면 0.0(무점수 — 계산 불가를 유리하지도 불리하지도 않게 처리).
+
+    Examples:
+        >>> candles = [{'close': 105, 'volume': 100}, {'close': 103, 'volume': 100},
+        ...            {'close': 101, 'volume': 100}, {'close': 100, 'volume': 100},
+        ...            {'close': 99, 'volume': 100}, {'close': 98, 'volume': 100}]
+        >>> obv_momentum(candles, lookback=5)
+        1.0
+    """
+    obv = calc_obv(candles)
+    if len(obv) <= lookback:
+        return 0.0
+    window = candles[:lookback]  # 최신 lookback개 (시간 역순 그대로)
+    total_vol = sum(float(c.get("volume", 0) or 0) for c in window)
+    if total_vol <= 0:
+        return 0.0
+    diff = obv[-1] - obv[-1 - lookback]
+    return max(-1.0, min(1.0, diff / total_vol))
+
+
 def is_volume_increasing_streak(candles: list[dict], streak: int = 3) -> bool:
     """
     거래량 증가 지속 판정: 최근 `streak`개 봉의 거래량이 과거->최신 방향으로

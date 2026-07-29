@@ -9,6 +9,15 @@ import time
 from collections import deque
 from typing import Callable, Optional
 
+# 가짜 체결강도 방지 (2026-07-29): 짧은 윈도우(예: 10초) 안에 매도 체결이 우연히
+# 0~1건이면 분모가 0에 가까워져 9999나 11896 같은 비현실적인 값이 나옴 —
+# 실제로는 "매수세가 강함"이 아니라 "그 순간 매도 체결이 잠깐 안 찍혔다"는
+# 우연에 가까움(2026-07-29 실거래에서 entry_strength가 이런 값이었던 종목들이
+# 전부 10~13분 안에 강도 0으로 무너지며 손실로 끝난 것으로 확인).
+STRENGTH_MIN_TICKS = 5      # 윈도우 내 틱 수가 이 미만이면 판단 불가 -> 중립값
+STRENGTH_NEUTRAL = 100.0    # 판단 불가 시 반환값(매수:매도 1:1과 동일 의미)
+STRENGTH_CAP = 300.0        # 계산되더라도 이 값으로 상한(그 이상은 다 "매수 우세"로 동일 취급)
+
 
 class TradeFlowTracker:
     """체결 슬라이딩 윈도우 + 시간가중 강도 + 가격 추적."""
@@ -47,7 +56,13 @@ class TradeFlowTracker:
         시간가중 체결강도 = 가중 매수체결량 / 가중 매도체결량 × 100.
 
         weight_fn(age_sec, window_sec) → 0~1. 기본은 선형 감쇠.
-        매도가 0이면 9999 (매우 강한 매수 우세) 반환.
+
+        노이즈 방지(2026-07-29): 윈도우 내 틱 수가 STRENGTH_MIN_TICKS 미만이면
+        판단하기엔 데이터가 너무 적다고 보고 STRENGTH_NEUTRAL(100.0) 반환 —
+        매도가 우연히 0~1건이라 9999 같은 값이 나오는 걸 원천 차단. 데이터가
+        충분해도 결과는 STRENGTH_CAP으로 상한(매수 우세라는 의미는 200이나
+        9999나 같아서 세분화할 근거가 없고, 극단값일수록 실전에서 노이즈였을
+        확률이 높았음).
         """
         now = now if now is not None else time.time()
         d = self.ticks.get(stock_code)
@@ -58,18 +73,23 @@ class TradeFlowTracker:
         cutoff = now - window_sec
         w_buy = 0.0
         w_sell = 0.0
+        tick_count = 0
         for ts, price, side, vol in d:
             if ts < cutoff or ts > now:
                 continue
+            tick_count += 1
             w = weight_fn(now - ts, window_sec)
             if side == "buy":
                 w_buy += vol * w
             elif side == "sell":
                 w_sell += vol * w
 
+        if tick_count < STRENGTH_MIN_TICKS:
+            return STRENGTH_NEUTRAL
+
         if w_sell == 0:
-            return 9999.0 if w_buy > 0 else 0.0
-        return w_buy / w_sell * 100
+            return STRENGTH_CAP if w_buy > 0 else 0.0
+        return min(w_buy / w_sell * 100, STRENGTH_CAP)
 
     def is_strength_rising(
         self,
@@ -94,7 +114,12 @@ class TradeFlowTracker:
         recent = [t for t in d if t[0] >= cutoff]
         buy_vol = sum(v for _, _, s, v in recent if s == "buy")
         sell_vol = sum(v for _, _, s, v in recent if s == "sell")
-        simple = (buy_vol / sell_vol * 100) if sell_vol else (9999.0 if buy_vol else 0.0)
+        if len(recent) < STRENGTH_MIN_TICKS:
+            simple = STRENGTH_NEUTRAL
+        elif sell_vol:
+            simple = min(buy_vol / sell_vol * 100, STRENGTH_CAP)
+        else:
+            simple = STRENGTH_CAP if buy_vol else 0.0
         return {
             "count": len(recent),
             "buy_vol": buy_vol,

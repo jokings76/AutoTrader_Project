@@ -64,6 +64,9 @@ def find_replacement_candidate(strat, stagnant_score: float) -> tuple[str, float
     for code in strat.watch_list_today:
         if code in strat.holdings or code in strat.pending:
             continue
+        blocked, _ = strat._is_rebuy_blocked(code)
+        if blocked:
+            continue  # 오늘 손실 청산(또는 쿨다운 중)된 종목은 대체후보 자격 없음
         score = strat._watch_scores.get(code)
         if score is None or score < threshold:
             continue

@@ -161,6 +161,11 @@ class TradingBot:
         name_to_seq = {name: seq for seq, name in cond_map.items()}
 
         code_is_surge: dict[str, bool] = {}
+        # 종목 하나가 여러 조건식에 동시에 걸릴 수 있어서, 어느 조건(들)에서
+        # 왔는지 그대로 보존(2026-07-29) — 기존엔 전부 "초기스냅샷"이라는
+        # 뭉뚱그린 라벨로 덮어써서 실제 조건검색식 이름(주도주상위/체결강도100/
+        # 돌파자동매매용/관심종목감시)과 중복편입 여부를 알 수 없었음.
+        code_conditions: dict[str, list[str]] = {}
         for name in settings.CONDITION_NAMES:
             seq = name_to_seq.get(name)
             if not seq:
@@ -179,6 +184,7 @@ class TradingBot:
             self._known_hits[seq] = set(codes)  # 폴링이 중복 잡지 않도록 미리 등록
             for c in codes:
                 code_is_surge[c] = code_is_surge.get(c, False) or is_surge
+                code_conditions.setdefault(c, []).append(name)
 
         if not code_is_surge:
             logger.info("📸 초기 스냅샷: 진입 종목 없음")
@@ -188,11 +194,12 @@ class TradingBot:
         for code, is_surge in code_is_surge.items():
             self._signal_stats["snapshot"] += 1
             stock_name = self._fetch_stock_name(code)
+            cond_name = "+".join(code_conditions.get(code, [])) or "초기스냅샷"
 
             try:
                 await asyncio.to_thread(
                     self.strategy_mgr.on_condition_hit,
-                    code, stock_name, is_surge=is_surge, cond_name="초기스냅샷",
+                    code, stock_name, is_surge=is_surge, cond_name=cond_name,
                 )
             except Exception:
                 logger.exception(f"[{code}] 스냅샷 on_condition_hit 예외")
@@ -278,7 +285,8 @@ class TradingBot:
                     stock_name = self._fetch_stock_name(c)
                     try:
                         await asyncio.to_thread(
-                            self.strategy_mgr.on_condition_hit, c, stock_name, is_surge=is_surge
+                            self.strategy_mgr.on_condition_hit,
+                            c, stock_name, is_surge=is_surge, cond_name=name,
                         )
                     except Exception:
                         logger.exception(f"[{c}] on_condition_hit 예외")
