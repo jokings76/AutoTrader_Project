@@ -848,6 +848,32 @@ class TradingBot:
                 except Exception:
                     logger.exception("조건식 재등록 실패")
 
+    async def task_program_flow(self):
+        """프로그램 매매 유입 기록 — 60초마다 완성된 분을 CSV로 flush,
+        10분마다 '꾸준히 들어오는 종목' 요약 로그. (2026-07-31 신규)
+
+        중요: 이 태스크는 **REST 호출을 하지 않는다**. 07-30 실측 기준 429가
+        하루 2,469건(장중 매 분 발생)이라 종목별 폴링을 추가할 예산이 없기
+        때문이다. 데이터는 외부에서 tracker.record_minute()으로 넣어주는 구조
+        (core/program_flow.py 모듈 주석의 '호출 예산' 항목 참고).
+        소스가 아직 안 붙어 있어도 태스크 자체는 무해하게 돈다 —
+        기록이 없으면 flush 0행, 요약은 '추적 0종목'으로만 남는다."""
+        last_report = 0.0
+        while not self._stop:
+            await asyncio.sleep(60)
+            try:
+                strat = self.strategy_mgr
+                if not strat or not getattr(strat, "program_flow", None):
+                    continue
+                pf = strat.program_flow
+                await asyncio.to_thread(pf.flush)
+                now_ts = time.time()
+                if now_ts - last_report >= 600:
+                    last_report = now_ts
+                    logger.info(pf.report())
+            except Exception:
+                logger.exception("프로그램 유입 기록 중 에러")
+
     async def run(self):
         await self.setup()
         try:
@@ -867,6 +893,7 @@ class TradingBot:
                 self.task_slot_replacement(),
                 self.task_watchlist_reentry(),
                 self.task_daily_backtest(),
+                self.task_program_flow(),
                 # self.task_condition_snapshot_poll(),
             )
         except asyncio.CancelledError:

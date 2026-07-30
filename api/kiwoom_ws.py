@@ -376,6 +376,16 @@ class KiwoomWS:
         stock_code = (item.get("item") or "").lstrip("A").strip()
         values = item.get("values") or {}
 
+        # 0B(주식체결) 실시간에 어떤 FID가 실려오는지 하루 1회만 기록 (2026-07-31).
+        # 0D(호가)는 예전부터 남기고 있었는데 0B는 없어서, 프로그램매매 관련
+        # 데이터가 WS로 공짜로 들어오는지 확인할 방법이 없었다. REST는 이미
+        # 429가 하루 2천 건 넘게 나는 포화 상태라(07-30 기준 ka10080만 2,223건),
+        # 프로그램 순매수를 REST 종목별 폴링으로 가져오는 건 사실상 불가능 —
+        # WS에 이미 실려 있다면 추가 호출 0으로 해결된다.
+        if not getattr(self, "_trade_keys_logged", False):
+            self._trade_keys_logged = True
+            logger.info(f"🔑 0B 체결 raw 키: {sorted(values.keys(), key=str)}")
+
         price = self._parse_signed_int(values.get("10"))
         volume_signed = self._parse_signed_int(values.get("15"))
 

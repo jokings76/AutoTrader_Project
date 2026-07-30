@@ -35,6 +35,7 @@ from core.strategy.scoring import (
 from core.strategy.vwap_strategy import VWAPStrategy, calc_vwap
 from core.explosion_scorer import ExplosionPatternScorer
 from core.strategy_performance import StrategyPerformanceTracker
+from core.program_flow import ProgramFlowTracker
 from core.history_fetcher import fetch_n_days_candles, to_trade_value_bins
 from db import TradeRepository, WatchListRepository, SystemEventRepository
 from utils.logger import logger
@@ -257,6 +258,10 @@ class StrategyManager:
         # 장중 전략 성과 추적 — 잘 되는 전략의 컷라인을 낮추고 안 되는 전략은
         # 물러나게 하는 자동 우선순위 조정 (2026-07-31, core/strategy_performance.py)
         self.perf = StrategyPerformanceTracker(now_func=self._now)
+        # 프로그램 매매 유입 관측 (2026-07-31) — 지금은 기록/백테스트 전용이고
+        # 매매 판단에는 전혀 쓰지 않는다. 데이터 소스가 확정되면(WS 0B FID 또는
+        # 시장 전체 랭킹 REST) record_minute()으로 넣어주기만 하면 된다.
+        self.program_flow = ProgramFlowTracker(now_func=self._now)
         self._watch_scores: dict[str, float] = (
             {}
         )  # stock_code -> 워치리스트 등재 시 점수 (슬롯교체용, 2026-07-26)
