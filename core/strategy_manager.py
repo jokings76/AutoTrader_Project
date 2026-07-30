@@ -126,6 +126,28 @@ TAKE_PROFIT_CAP_1B = 0.015
 TAKE_PROFIT_CAP_PULLBACK = 0.015
 TAKE_PROFIT_CAP_EARLY = 0.015
 EARLY_WINDOW_END = time(9, 10)  # GROUP_A_START~이 시각 사이 매수분은 1.5%
+                                # (1L도 포함 — 이 구간은 트레일링 대신 flat 1.5%)
+
+# ── 동적 익절캡 (2026-07-30 사용자 지정) ───────────────────────
+# 1.5%캡 종목이 보유 중 체결강도 상승을 보이면 캡을 2.5%로 올려 더 태우고,
+# 2.5%캡 종목은 체결강도 하락 AND 거래량 하락이 동시에 오면 즉시 매도한다.
+# 백테스트(07-29+07-30, 확증진입 14건, 체결강도는 분봉 대용지표로 근사):
+#   익절 1.5% 고정        -> 건당 -0.659%, 승률 57.1%
+#   동적 상향 + 즉시매도   -> 건당 +0.040%, 승률 64.3%  (유일한 플러스 구간)
+# 파라미터 표면이 매끄러웠고(상향기준 1.0<1.2<1.5 단조, 상한캡 2.5≈3.0>2.0,
+# 거래량배수 0.8이 1.0보다 우수 = '진짜 감소'를 요구해야 함), 무엇보다
+# 하락 판정을 AND로 걸어야 효과가 났다(OR로는 과민해서 오히려 악화).
+# 주의: 강도 임계값은 과거 틱이 없어 백테스트로 검증 불가 — 실전 관찰 필요.
+# 하락 임계값은 검증된 slot_replacement와 같은 값을 재사용해 일관성 유지.
+TP_CAP_UPGRADED = 0.025             # 상향 목표 캡
+TP_UPGRADE_STRENGTH_RATIO = 1.2     # 진입강도 대비 이 배수 이상이면 상향
+TP_DECLINE_STRENGTH_RATIO = 0.8     # 진입강도 대비 이 배수 미만이면 "강도 하락"
+TP_DECLINE_VOLUME_RATIO = 1.0       # volume_ratio 이 값 미만이면 "거래량 하락"
+TP_VOL_CHECK_SEC = 30               # 거래량 확인(REST) 종목당 최소 간격
+
+# 익절 후 재매수 상한 (2026-07-30 사용자 지정) — 손절 종목은 이미 당일 전면
+# 차단이므로 사실상 익절 종목에만 적용된다. 최초 1회 + 재매수 2회 = 총 3회.
+MAX_BUYS_PER_STOCK = 3
 
 # 매도 실패 & 쿨다운 & 워밍업
 MAX_SELL_FAIL = 3
@@ -229,6 +251,10 @@ class StrategyManager:
 
         # 1B 반등확증 대기 {code: {ref_high, since, last_check}} (2026-07-30)
         self._1b_confirm: dict[str, dict] = {}
+
+        # 종목별 당일 매수 횟수(익절 후 재매수 상한용) + 동적캡 거래량확인 throttle
+        self._buy_count_today: dict[str, int] = {}
+        self._tp_vol_checked_at: dict[str, datetime] = {}
 
         self.sell_fail_count: dict[str, int] = {}
         self.sell_blocked: set[str] = set()
@@ -394,6 +420,7 @@ class StrategyManager:
                     self.phase1b.stop_watching(code)
 
         self._check_1b_confirmations()
+        self._update_dynamic_caps()
         self.check_timeouts()
 
     # ========================================
@@ -431,6 +458,7 @@ class StrategyManager:
             self._daily_realized = 0.0
             self._risk_tripped = False
             self._base_capital = None
+            self._buy_count_today.clear()  # 재매수 상한도 하루 단위 (2026-07-30)
 
     def risk_can_trade(self) -> bool:
         """일손실 -3% 차단기. 트립되면 신규 매수 전면 금지(청산은 계속 작동)."""
@@ -535,6 +563,12 @@ class StrategyManager:
             return True, "매도 차단 (영구실패)"
         if stock_code in self._stoploss_blocked:
             return True, "손절 종목 당일 재매수 금지"
+        cnt = self._buy_count_today.get(stock_code, 0)
+        if cnt >= MAX_BUYS_PER_STOCK:
+            return True, (
+                f"재매수 상한 초과 (당일 {cnt}회 매수 = 최초 1회 + 재매수 "
+                f"{MAX_BUYS_PER_STOCK - 1}회 소진)"
+            )
         if stock_code in self.sold_at:
             elapsed = self._now() - self.sold_at[stock_code]
             if elapsed < REBUY_COOLDOWN:
@@ -1418,6 +1452,10 @@ class StrategyManager:
 
             self.sold_at.pop(stock_code, None)
             self._buy_success_count += 1
+            # 당일 매수 횟수 누적 (익절 후 재매수 상한 판정용, 2026-07-30)
+            self._buy_count_today[stock_code] = (
+                self._buy_count_today.get(stock_code, 0) + 1
+            )
 
             logger.info(
                 "BUY [%s] %s %d주 @ %s원 (%s) = %s원 | 워밍업 %ds",
@@ -1527,7 +1565,9 @@ class StrategyManager:
                     exit_reason = (
                         f"익절(지수급락 대응) 순+{net_rate*100:.2f}% (가격 +{gross_rate*100:.2f}%)"
                     )
-            elif pos.get("sub_strategy") == "1L":
+            elif pos.get("sub_strategy") == "1L" and not self._is_early_buy(pos):
+                # 개장초반(09:01~09:10) 매수분은 1L도 트레일링 대신 flat 1.5%
+                # (2026-07-30 사용자 지정) — 아래 else의 캡 분기로 넘어간다.
                 highest = pos.get("highest_price", buy_price)
                 peak_net = self._net_rate(buy_price, highest)
                 if peak_net >= TRAIL_ACTIVATE:
@@ -1556,20 +1596,111 @@ class StrategyManager:
         if exit_reason:
             self._execute_sell(stock_code, current_price, exit_reason)
 
-    @staticmethod
-    def _take_profit_cap(pos: dict) -> tuple[float, str]:
-        """포지션별 익절 캡과 표시용 라벨 (2026-07-30 신규).
-        매수 시점 기준으로 고정 — 보유 중에 기준이 바뀌면 판단이 흔들리므로.
-        1L은 트레일링을 쓰므로 이 함수를 타지 않는다(호출부에서 분기).
-        개장초반(09:01~09:10) 매수분은 전략보다 우선해서 1.5% 적용."""
-        buy_time = pos.get("buy_time")
-        if buy_time is not None:
+    def _update_dynamic_caps(self):
+        """보유 종목의 익절캡을 체결강도/거래량에 따라 유연하게 조정 (2026-07-30).
+        tick()에서 주기 호출.
+
+        (1) 캡이 상한(2.5%)보다 낮은 종목: 체결강도가 진입 대비 유의하게
+            상승했으면 캡을 2.5%로 올려 상승을 더 태운다.
+        (2) 캡이 상한(2.5%)인 종목: 체결강도 하락 AND 거래량 하락이 동시에
+            오면 캡을 기다리지 않고 즉시 매도한다(사용자 스펙은 AND — OR로
+            하면 과민해서 백테스트상 오히려 손해였음).
+
+        비용 설계: 강도는 메모리(trade_flow)라 매번 계산해도 무료지만 거래량은
+        REST가 필요하다. 그래서 (2)의 '강도 하락'이 먼저 확인된 종목만,
+        종목당 TP_VOL_CHECK_SEC 간격으로 거래량을 조회한다."""
+        if not self.holdings:
+            return
+        now_dt = self._now()
+        for code in list(self.holdings.keys()):
+            pos = self.holdings.get(code)
+            if not pos or code in self.pending or code in self.sell_blocked:
+                continue
+            warmup_until = pos.get("warmup_until")
+            if warmup_until and now_dt < warmup_until:
+                continue  # 매수 직후 워밍업 중엔 판단 보류(기존 관례와 동일)
+
+            entry_s = pos.get("entry_strength") or 0.0
+            if entry_s <= 0:
+                continue  # 진입강도 기록이 없으면 비교 불가
             try:
-                bt = buy_time.time()
-                if GROUP_A_START <= bt < EARLY_WINDOW_END:
-                    return TAKE_PROFIT_CAP_EARLY, "개장초반"
-            except AttributeError:
-                pass  # buy_time 형식이 예상과 다르면 전략별 기준으로 넘어감
+                cur_s = self._current_strength(code)
+            except Exception:
+                continue
+
+            cap, _ = self._take_profit_cap(pos)
+
+            # (1) 강도 상승 -> 캡 상향
+            if cap < TP_CAP_UPGRADED:
+                if cur_s >= entry_s * TP_UPGRADE_STRENGTH_RATIO:
+                    pos["tp_cap"] = TP_CAP_UPGRADED
+                    pos["tp_cap_label"] = "강도상향"
+                    logger.info(
+                        "[%s] %s 익절캡 상향 %.1f%% -> %.1f%% "
+                        "(체결강도 %.0f -> %.0f, 진입대비 %.2f배)",
+                        code, pos.get("stock_name", ""), cap * 100,
+                        TP_CAP_UPGRADED * 100, entry_s, cur_s, cur_s / entry_s,
+                    )
+                continue
+
+            # (2) 상한캡 종목: 강도 하락 + 거래량 하락 -> 즉시 매도
+            if cur_s >= entry_s * TP_DECLINE_STRENGTH_RATIO:
+                continue  # 강도는 아직 유지 중
+            last = self._tp_vol_checked_at.get(code)
+            if last is not None and (now_dt - last).total_seconds() < TP_VOL_CHECK_SEC:
+                continue
+            self._tp_vol_checked_at[code] = now_dt
+            try:
+                candles = self._get_merged_candles(code, interval=1, count=30)
+                vol_ratio = self._volume_ratio(candles) if candles else None
+            except Exception as e:
+                logger.warning("[%s] 동적캡 거래량 조회 실패: %s", code, e)
+                continue
+            if vol_ratio is None or vol_ratio >= TP_DECLINE_VOLUME_RATIO:
+                continue  # 거래량은 아직 살아있음 -> 캡까지 계속 보유
+
+            price = self.phase1b.trade_flow.get_latest_price(code) if self.phase1b else None
+            if not price:
+                try:
+                    c1 = self.api.get_minute_candles(code, interval=1, count=1)
+                    price = float(c1[0]["close"]) if c1 else None
+                except Exception:
+                    price = None
+            if not price:
+                logger.warning("[%s] 동적캡 즉시매도 판정됐으나 현재가 없음", code)
+                continue
+
+            net_rate = self._net_rate(pos["buy_price"], price) * 100
+            self._execute_sell(
+                code, price,
+                f"동적캡 즉시매도 (체결강도 {entry_s:.0f}->{cur_s:.0f}, "
+                f"거래량 x{vol_ratio:.2f}, 순 {net_rate:+.2f}%)",
+            )
+
+    @staticmethod
+    def _is_early_buy(pos: dict) -> bool:
+        """개장초반(09:01~09:10) 매수분인지. 1L 트레일링 예외 판정에도 쓴다."""
+        buy_time = pos.get("buy_time")
+        if buy_time is None:
+            return False
+        try:
+            return GROUP_A_START <= buy_time.time() < EARLY_WINDOW_END
+        except AttributeError:
+            return False
+
+    @classmethod
+    def _take_profit_cap(cls, pos: dict) -> tuple[float, str]:
+        """포지션별 익절 캡과 표시용 라벨 (2026-07-30).
+        기본 캡은 매수 시점 기준으로 고정하되, 동적캡 로직이 올려둔
+        pos["tp_cap"]이 있으면 그 값이 우선한다.
+        1L은 트레일링을 쓰므로 평상시엔 이 함수를 타지 않지만(호출부 분기),
+        개장초반 매수분은 트레일링 대신 여기의 1.5%를 쓴다."""
+        override = pos.get("tp_cap")
+        if override is not None:
+            return float(override), pos.get("tp_cap_label", "동적")
+
+        if cls._is_early_buy(pos):
+            return TAKE_PROFIT_CAP_EARLY, "개장초반"
 
         sub = pos.get("sub_strategy")
         if sub == "1B":
