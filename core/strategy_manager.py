@@ -26,6 +26,7 @@ from typing import Optional
 from .theme_manager import ThemeManager
 from core.strategy.indicators import is_volume_increasing_streak, obv_momentum
 from core.strategy.chemul_evaluator import ChemulState
+from core.strategy.trade_flow import STRENGTH_NEUTRAL
 from core.strategy.scoring import (
     ScoreConfig,
     score_phase1,
@@ -140,6 +141,16 @@ EARLY_WINDOW_END = time(9, 10)  # GROUP_A_START~이 시각 사이 매수분은 1
 # 주의: 강도 임계값은 과거 틱이 없어 백테스트로 검증 불가 — 실전 관찰 필요.
 # 하락 임계값은 검증된 slot_replacement와 같은 값을 재사용해 일관성 유지.
 TP_CAP_UPGRADED = 0.025             # 상향 목표 캡
+# 상향 판단 시점 = 순수익 +1.0% 도달 (2026-07-31 사용자 지시로 1.5%->1.0% 하향).
+# 이 시점에 체결강도로 갈림길을 만든다:
+#   강도 상승 -> 캡을 2.5%로 올려 더 태움
+#   강도 미상승 -> 여기서 익절 확정(작은 이익을 되돌림 전에 잠금)
+# 백테스트에서 이 '갈림길' 구조가 핵심이었음 — 상향기준 1.0%가 1.2/1.5%보다
+# 일관되게 우수(건당 -0.18~-0.28% vs -0.4~-0.63%, 승률 64.3% vs 57.1/50.0%)했고
+# 유일하게 플러스가 나온 구간이었다.
+# 주의: 백테스트는 gross(가격) 기준이었으나 라이브 캡 비교는 전부 net(수수료
+# 차감) 기준이라 여기서도 net으로 통일했다(0.23%p 차이는 사용자에게 유리한 방향).
+TP_UPGRADE_TRIGGER = 0.010
 TP_UPGRADE_STRENGTH_RATIO = 1.2     # 진입강도 대비 이 배수 이상이면 상향
 TP_DECLINE_STRENGTH_RATIO = 0.8     # 진입강도 대비 이 배수 미만이면 "강도 하락"
 TP_DECLINE_VOLUME_RATIO = 1.0       # volume_ratio 이 값 미만이면 "거래량 하락"
@@ -1582,7 +1593,32 @@ class StrategyManager:
                         )
             else:
                 cap, cap_label = self._take_profit_cap(pos)
-                if net_rate >= cap:
+
+                # 동적 상향 갈림길 — 순 +1.0% 도달 시점에 체결강도로 판단
+                # (2026-07-31). 가격 트리거이므로 틱이 들어오는 여기서 처리하고,
+                # 거래량 확인이 필요한 '즉시매도'는 _update_dynamic_caps에서 담당.
+                if pos.get("tp_cap") is None and net_rate >= TP_UPGRADE_TRIGGER:
+                    rising = self._is_strength_rising_vs_entry(pos, stock_code)
+                    if rising is True:
+                        pos["tp_cap"] = TP_CAP_UPGRADED
+                        pos["tp_cap_label"] = "강도상향"
+                        cap, cap_label = TP_CAP_UPGRADED, "강도상향"
+                        logger.info(
+                            "[%s] %s 익절캡 상향 -> %.1f%% (순+%.2f%% 도달, 체결강도 "
+                            "진입 %.0f -> 현재 %.0f)",
+                            stock_code, pos.get("stock_name", ""),
+                            TP_CAP_UPGRADED * 100, net_rate * 100,
+                            pos.get("entry_strength") or 0,
+                            self._current_strength(stock_code),
+                        )
+                    elif rising is False:
+                        exit_reason = (
+                            f"익절 조기확정(강도 미상승) 순+{net_rate*100:.2f}% "
+                            f"(가격 +{gross_rate*100:.2f}%)"
+                        )
+                    # rising is None = 강도 판단 불가 -> 기본 캡 그대로 진행
+
+                if exit_reason is None and net_rate >= cap:
                     exit_reason = (
                         f"익절 캡({cap_label} {cap*100:.1f}%) 순+{net_rate*100:.2f}% "
                         f"(가격 +{gross_rate*100:.2f}%)"
@@ -1596,18 +1632,39 @@ class StrategyManager:
         if exit_reason:
             self._execute_sell(stock_code, current_price, exit_reason)
 
+    def _is_strength_rising_vs_entry(self, pos: dict, stock_code: str):
+        """진입 대비 체결강도가 유의하게 상승했는지 3값 판정 (2026-07-31).
+        True=상승(캡 상향) / False=미상승(조기 익절확정) / None=판단불가.
+        None을 따로 두는 이유: 강도 데이터가 없을 때 '미상승'으로 몰면 멀쩡한
+        포지션을 +1.0%에서 전부 잘라버리게 되므로, 그때는 기본 캡을 유지한다."""
+        entry_s = pos.get("entry_strength") or 0.0
+        if entry_s <= 0:
+            return None
+        if not (self.phase1b and getattr(self.phase1b, "trade_flow", None)):
+            return None
+        try:
+            cur_s = self._current_strength(stock_code)
+        except Exception:
+            return None
+        # 중립값(100.0)은 '틱 부족으로 판단 불가'를 뜻하므로 상승으로 오해하지 않음
+        # (trade_flow.compute_strength가 최소틱수 미달 시 STRENGTH_NEUTRAL 반환)
+        if cur_s <= 0 or cur_s == STRENGTH_NEUTRAL:
+            return None
+        return cur_s >= entry_s * TP_UPGRADE_STRENGTH_RATIO
+
     def _update_dynamic_caps(self):
-        """보유 종목의 익절캡을 체결강도/거래량에 따라 유연하게 조정 (2026-07-30).
-        tick()에서 주기 호출.
+        """익절캡이 상한(2.5%)인 종목의 조기 이탈 판정 (2026-07-30, tick() 주기 실행).
 
-        (1) 캡이 상한(2.5%)보다 낮은 종목: 체결강도가 진입 대비 유의하게
-            상승했으면 캡을 2.5%로 올려 상승을 더 태운다.
-        (2) 캡이 상한(2.5%)인 종목: 체결강도 하락 AND 거래량 하락이 동시에
-            오면 캡을 기다리지 않고 즉시 매도한다(사용자 스펙은 AND — OR로
-            하면 과민해서 백테스트상 오히려 손해였음).
+        체결강도 하락 AND 거래량 하락이 동시에 오면 캡을 기다리지 않고 즉시 매도.
+        (사용자 스펙이 AND — OR로 하면 과민해서 백테스트상 오히려 손해였음:
+         건당 -0.328% -> -0.532%)
 
-        비용 설계: 강도는 메모리(trade_flow)라 매번 계산해도 무료지만 거래량은
-        REST가 필요하다. 그래서 (2)의 '강도 하락'이 먼저 확인된 종목만,
+        캡 '상향'은 여기가 아니라 on_price_update에서 처리한다(2026-07-31) —
+        순 +1.0% 도달이라는 가격 트리거가 필요해서 틱 경로에 있어야 하고,
+        여기에 두면 가격과 무관하게 강도만으로 올라가 백테스트 설계와 달라진다.
+
+        비용 설계: 강도는 메모리(trade_flow)라 매번 계산해도 무료이지만 거래량은
+        REST가 필요하다. 그래서 '강도 하락'이 먼저 확인된 종목만,
         종목당 TP_VOL_CHECK_SEC 간격으로 거래량을 조회한다."""
         if not self.holdings:
             return
@@ -1630,20 +1687,12 @@ class StrategyManager:
 
             cap, _ = self._take_profit_cap(pos)
 
-            # (1) 강도 상승 -> 캡 상향
+            # 상한캡(2.5%) 종목만 대상 — 1A처럼 처음부터 2.5%인 종목과
+            # on_price_update에서 강도상향된 종목 둘 다 포함된다.
             if cap < TP_CAP_UPGRADED:
-                if cur_s >= entry_s * TP_UPGRADE_STRENGTH_RATIO:
-                    pos["tp_cap"] = TP_CAP_UPGRADED
-                    pos["tp_cap_label"] = "강도상향"
-                    logger.info(
-                        "[%s] %s 익절캡 상향 %.1f%% -> %.1f%% "
-                        "(체결강도 %.0f -> %.0f, 진입대비 %.2f배)",
-                        code, pos.get("stock_name", ""), cap * 100,
-                        TP_CAP_UPGRADED * 100, entry_s, cur_s, cur_s / entry_s,
-                    )
                 continue
 
-            # (2) 상한캡 종목: 강도 하락 + 거래량 하락 -> 즉시 매도
+            # 강도 하락 + 거래량 하락 -> 즉시 매도
             if cur_s >= entry_s * TP_DECLINE_STRENGTH_RATIO:
                 continue  # 강도는 아직 유지 중
             last = self._tp_vol_checked_at.get(code)
