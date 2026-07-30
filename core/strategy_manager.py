@@ -34,6 +34,7 @@ from core.strategy.scoring import (
 )
 from core.strategy.vwap_strategy import VWAPStrategy, calc_vwap
 from core.explosion_scorer import ExplosionPatternScorer
+from core.strategy_performance import StrategyPerformanceTracker
 from core.history_fetcher import fetch_n_days_candles, to_trade_value_bins
 from db import TradeRepository, WatchListRepository, SystemEventRepository
 from utils.logger import logger
@@ -253,6 +254,9 @@ class StrategyManager:
         self._opening_prices: dict[str, float] = {}  # stock_code -> 당일 시가 (등락률 상한 체크용)
         # 평상시 상한(MAX_HOLDINGS)이 꽉 찬 시각 — 확장 슬롯(7~8) 판정용 (2026-07-31)
         self._soft_cap_full_since: Optional[datetime] = None
+        # 장중 전략 성과 추적 — 잘 되는 전략의 컷라인을 낮추고 안 되는 전략은
+        # 물러나게 하는 자동 우선순위 조정 (2026-07-31, core/strategy_performance.py)
+        self.perf = StrategyPerformanceTracker(now_func=self._now)
         self._watch_scores: dict[str, float] = (
             {}
         )  # stock_code -> 워치리스트 등재 시 점수 (슬롯교체용, 2026-07-26)
@@ -549,7 +553,7 @@ class StrategyManager:
         new_ratio = max(0.5, min(1.0, base_cfg.threshold_ratio + 0.05))
         return _dc_replace(base_cfg, threshold_ratio=new_ratio)
 
-    def can_buy_more(self, info: dict | None = None) -> bool:
+    def can_buy_more(self, info: dict | None = None, sub_strategy: str | None = None) -> bool:
         if not self.risk_can_trade():
             return False
         if self._get_market_defense_mode() == "HALT":
@@ -557,15 +561,25 @@ class StrategyManager:
         if self._now() < self.quarantine_until:
             return False
         held = len(self.holdings)
-        if held < MAX_HOLDINGS:
+        # 오늘 성과가 나쁜(COLD) 전략은 공유 슬롯 마지막 칸을 다른 전략에
+        # 양보한다 — 잘 안 되는 전략이 마지막 자리를 선점해 버리는 것을 막는
+        # 우선순위 장치. (2026-07-31)
+        soft_limit = MAX_HOLDINGS
+        if sub_strategy:
+            soft_limit = self.perf.shared_slot_limit(sub_strategy, MAX_HOLDINGS)
+        if held < soft_limit:
             return True
         # 평상시 상한(6)을 넘어선 확장 슬롯(7~8)은 예외 경로 — info가 있고
         # 그 점수가 컷라인을 크게 웃도는 후보에게만 열린다. (2026-07-31)
         if held >= MAX_HOLDINGS_HARD:
             return False
-        return self._can_use_expansion_slot(info)
+        if held < MAX_HOLDINGS:
+            return False  # COLD 양보로 막힌 칸은 확장 경로로 우회할 수 없음
+        return self._can_use_expansion_slot(info, sub_strategy)
 
-    def _can_use_expansion_slot(self, info: dict | None) -> bool:
+    def _can_use_expansion_slot(
+        self, info: dict | None, sub_strategy: str | None = None
+    ) -> bool:
         """확장 슬롯(7~8번째) 사용 자격 판정 (2026-07-31 사용자 지정).
 
         "평소 6개만 쓰되, 정말 좋은 종목이 포착됐는데 슬롯교체가 애매하면
@@ -585,7 +599,12 @@ class StrategyManager:
         thr = info.get("score_threshold")
         if not score or not thr or thr <= 0:
             return False
-        if score < thr * SLOT_EXPANSION_SCORE_MARGIN:
+        # 오늘 성과가 좋은(HOT) 전략은 마진을 완화해 확장 슬롯을 더 쉽게 쓴다
+        # (2026-07-31) — 우선순위를 슬롯 개수가 아니라 '문턱'으로 주는 방식.
+        margin = SLOT_EXPANSION_SCORE_MARGIN
+        if sub_strategy:
+            margin = self.perf.expansion_margin(sub_strategy, margin)
+        if score < thr * margin:
             return False
         since = self._soft_cap_full_since
         if since is None:
@@ -593,10 +612,11 @@ class StrategyManager:
         if (self._now() - since).total_seconds() < SLOT_EXPANSION_WAIT_SEC:
             return False
         logger.info(
-            "확장 슬롯 사용 (보유 %d/%d -> 상한 %d): 점수 %.1f >= 컷라인 %.1f x%.1f, "
-            "슬롯 만석 %.0f초 지속(교체 대상 없음)",
+            "확장 슬롯 사용 (보유 %d/%d -> 상한 %d, 전략 %s/%s): 점수 %.1f >= "
+            "컷라인 %.1f x%.2f, 슬롯 만석 %.0f초 지속(교체 대상 없음)",
             len(self.holdings), MAX_HOLDINGS, MAX_HOLDINGS_HARD,
-            score, thr, SLOT_EXPANSION_SCORE_MARGIN,
+            sub_strategy or "?", self.perf.tier(sub_strategy) if sub_strategy else "-",
+            score, thr, margin,
             (self._now() - since).total_seconds(),
         )
         return True
@@ -630,7 +650,7 @@ class StrategyManager:
     def can_buy_phase1a(self, info: dict | None = None) -> bool:
         # 1A: 09:01~14:50 (10:30부터 점수 커트라인 상향은 evaluate_new_intensity_strategy에서)
         return (
-            self.can_buy_more(info)
+            self.can_buy_more(info, "1A")
             and self.count_holdings_by_strategy("1A") < PHASE1A_MAX_SLOTS
             and GROUP_A_START <= self._now().time() < PHASE1A_END
         )
@@ -638,14 +658,16 @@ class StrategyManager:
     def can_buy_pullback(self, info: dict | None = None) -> bool:
         # 눌림목: 09:01~10:30, 1A와 시간대는 겹치지만 슬롯은 별도(sub_strategy="1A_눌림")
         return (
-            self.can_buy_more(info)
+            self.can_buy_more(info, "1A_눌림")
             and self.count_holdings_by_strategy("1A_눌림") < PULLBACK_MAX_SLOTS
             and GROUP_A_START <= self._now().time() < PULLBACK_END
         )
 
     def can_buy_phase1b(self) -> bool:
+        # 1B/1L은 점수 컷라인이 없는 실시간 틱 경로라 컷라인 조정 대상은 아니지만,
+        # COLD일 때 공유 슬롯 마지막 칸을 양보하는 것은 동일하게 적용된다.
         return (
-            self.can_buy_more()
+            self.can_buy_more(None, "1B")
             and self.count_holdings_by_strategy("1B") < PHASE1B_MAX_SLOTS
             and GROUP_A_START <= self._now().time() < PULLBACK_END
         )
@@ -653,7 +675,7 @@ class StrategyManager:
     def can_buy_leading(self) -> bool:
         # 주도주 우선 진입: 09:01~10:50
         return (
-            self.can_buy_more()
+            self.can_buy_more(None, "1L")
             and self.count_holdings_by_strategy("1L") < LEADING_MAX_SLOTS
             and LEADING_START <= self._now().time() < LEADING_END
         )
@@ -1273,16 +1295,26 @@ class StrategyManager:
         required_score = base_required + (
             PHASE1A_SCORE_CAUTION_BONUS if market_mode == "CAUTION" else 0.0
         )
+        # 장중 전략 성과에 따른 자동 조정 (2026-07-31) — 오늘 1A가 잘 되고 있으면
+        # 컷라인을 낮춰 슬롯을 더 가져가고, 안 되면 높여 스스로 물러난다.
+        perf_mult = self.perf.cutline_multiplier("1A")
+        required_score *= perf_mult
 
+        # score_threshold를 함께 실어야 확장 슬롯 판정(_can_use_expansion_slot)이
+        # 1A에도 적용된다 — 없으면 Pullback만 확장 슬롯을 쓸 수 있어 형평이 깨짐.
         if final_score >= required_score:
             return True, {
                 "reason": f"1A 통과 (강도:{current_intensity:.0f}, 모드:{market_mode})",
                 "score": final_score,
+                "score_threshold": required_score,
+                "perf_multiplier": perf_mult,
             }
         else:
             return False, {
-                "reason": f"최종 점수 부족 ({final_score:.1f}/{required_score})",
+                "reason": f"최종 점수 부족 ({final_score:.1f}/{required_score:.1f})",
                 "score": final_score,
+                "score_threshold": required_score,
+                "perf_multiplier": perf_mult,
             }
 
     def evaluate_pullback(self, candles, stock_code, obv_mom: float = 0.0):
@@ -1290,11 +1322,20 @@ class StrategyManager:
         # 다르게 지음 — 같은 이름을 지역변수/인자로 쓰면 함수 스코프 내에서
         # obv_momentum이 지역변수로 취급돼 호출부(_evaluate_1a_pullback_entry)의
         # obv_momentum(...) 호출이 UnboundLocalError로 깨짐.
+        cfg = self._adjusted_cfg(self.pullback_score_cfg)
+        # 장중 전략 성과 반영 (2026-07-31) — Pullback 전용 컷라인(threshold_abs)에
+        # 배수를 적용. threshold_abs를 안 쓰는 설정이면 비율 쪽에 적용한다.
+        perf_mult = self.perf.cutline_multiplier("1A_눌림")
+        if perf_mult != 1.0:
+            if cfg.threshold_abs is not None:
+                cfg = _dc_replace(cfg, threshold_abs=cfg.threshold_abs * perf_mult)
+            else:
+                cfg = _dc_replace(cfg, threshold_ratio=cfg.threshold_ratio * perf_mult)
         return score_pullback(
             candles,
             self._volume_ratio(candles),
             self._current_strength(stock_code),
-            self._adjusted_cfg(self.pullback_score_cfg),
+            cfg,
             obv_momentum=obv_mom,
         )
 
@@ -2000,6 +2041,14 @@ class StrategyManager:
             stock_name = pos["stock_name"]
             sub = pos.get("sub_strategy", "?")
             del self.holdings[stock_code]
+
+            # 장중 전략 성과에 반영 (2026-07-31) — 이후 이 전략의 점수 컷라인이
+            # 자동 조정된다. net_rate는 위에서 %로 환산돼 있으므로 소수로 되돌림.
+            try:
+                self.perf.record(sub, net_rate / 100.0)
+                self.perf.log_tier_change(sub)
+            except Exception as e:
+                logger.warning("[%s] 전략성과 기록 실패: %s", stock_code, e)
 
             # 실제 손실로 마감된 청산은 사유(손절/슬롯교체/시간정리) 무관하게 당일
             # 재매수 금지. 익절만 기존 3분 쿨다운 후 재진입 허용. (2026-07-29 수정 —
