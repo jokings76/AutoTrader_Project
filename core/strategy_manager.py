@@ -187,6 +187,23 @@ class StrategyManager:
         # 1L(주도주) 체결강도 100 이상 지속시간 추적 {stock_code: 최초 감지 시각}
         self._leading_since: dict[str, datetime] = {}
 
+        # 1L 진단용 상태 (2026-07-30) — 1L이 연일 0건인데 on_trade는 틱마다
+        # 호출되는 핫패스라 매 틱 로깅이 불가능해서, 상태 전이(타이머 시작/리셋/
+        # 지속완료)와 주기 요약만 남긴다. 카운터는 여러 워커 스레드에서 동시
+        # 증가할 수 있어 정확한 값이 아닐 수 있음(진단용이므로 근사치 허용,
+        # 락을 걸면 틱 처리 경로가 느려짐).
+        self._l1_diag = {
+            "ticks": 0,        # 1L 판정까지 도달한 틱 수
+            "theme_ok": 0,     # 주도테마 소속이었던 틱
+            "strength_ok": 0,  # 체결강도 >= LEADING_STRENGTH_MIN 이었던 틱
+            "window_ok": 0,    # 시간창(09:01~10:50) 안이었던 틱
+            "both_ok": 0,      # 3조건 모두 충족(=타이머 유지)이었던 틱
+        }
+        self._l1_diag_last_report = self._now()
+        self._l1_max_sustain_sec = 0.0          # 오늘 도달한 최장 연속 유지 시간
+        self._l1_reset_logged_at: dict[str, datetime] = {}  # 리셋 로그 throttle
+        self._l1_block_logged_at: dict[str, datetime] = {}  # 차단 로그 throttle
+
         self.sell_fail_count: dict[str, int] = {}
         self.sell_blocked: set[str] = set()
         self.sold_at: dict[str, datetime] = {}
@@ -686,39 +703,132 @@ class StrategyManager:
             now_dt = self._now()
             now_t = now_dt.time()
             strength = parsed_trade.get("strength") or 0.0
-            qualifies = (
-                self.theme_mgr.is_leading_theme_stock(code)
-                and strength >= LEADING_STRENGTH_MIN
-                and LEADING_START <= now_t < LEADING_END
-            )
+
+            # 3개 하위조건을 개별로 평가 — 어느 조건이 막고 있는지 알기 위해
+            # (2026-07-30 진단 로깅). 기존엔 and로 묶여 있어서 실패 원인이
+            # 로그에 전혀 남지 않았고, 1L이 연일 0건인 이유를 알 수 없었음.
+            theme_ok = self.theme_mgr.is_leading_theme_stock(code)
+            strength_ok = strength >= LEADING_STRENGTH_MIN
+            window_ok = LEADING_START <= now_t < LEADING_END
+            qualifies = theme_ok and strength_ok and window_ok
+
+            d = self._l1_diag
+            d["ticks"] += 1
+            if theme_ok:
+                d["theme_ok"] += 1
+            if strength_ok:
+                d["strength_ok"] += 1
+            if window_ok:
+                d["window_ok"] += 1
+            if qualifies:
+                d["both_ok"] += 1
+
             if not qualifies:
-                self._leading_since.pop(code, None)
+                # 타이머가 돌고 있던 종목이 탈락한 경우만 로깅(=아깝게 놓친 케이스).
+                # 애초에 자격 없던 종목은 로그를 남기지 않음(틱마다 쏟아짐).
+                prev = self._leading_since.pop(code, None)
+                if prev is not None and window_ok:
+                    held = (now_dt - prev).total_seconds()
+                    self._l1_max_sustain_sec = max(self._l1_max_sustain_sec, held)
+                    last = self._l1_reset_logged_at.get(code)
+                    if last is None or (now_dt - last).total_seconds() >= 30:
+                        self._l1_reset_logged_at[code] = now_dt
+                        fail = []
+                        if not theme_ok:
+                            fail.append("주도테마 이탈")
+                        if not strength_ok:
+                            fail.append(f"강도 {strength:.0f}<{LEADING_STRENGTH_MIN:.0f}")
+                        logger.info(
+                            "[%s] 1L 지속 리셋: %.0f초 유지 후 탈락 (%s) — 2분 필요",
+                            code, held, ", ".join(fail) or "?",
+                        )
             else:
-                first_seen = self._leading_since.setdefault(code, now_dt)
-                if now_dt - first_seen >= LEADING_SUSTAIN and self.can_buy_leading():
+                first_seen = self._leading_since.get(code)
+                if first_seen is None:
+                    self._leading_since[code] = now_dt
+                    first_seen = now_dt
+                    logger.info(
+                        "[%s] 1L 지속 감시 시작 (테마=%s, 강도=%.0f) — %.0f초 유지 필요",
+                        code,
+                        self.theme_mgr.code_to_theme.get(code, "?"),
+                        strength,
+                        LEADING_SUSTAIN.total_seconds(),
+                    )
+
+                held = (now_dt - first_seen).total_seconds()
+                self._l1_max_sustain_sec = max(self._l1_max_sustain_sec, held)
+
+                if now_dt - first_seen >= LEADING_SUSTAIN:
+                    # 지속 조건은 통과 — 이후 슬롯/재매수 게이트에서 막히는지 확인
+                    can_buy = self.can_buy_leading()
                     blocked, reason = self._is_rebuy_blocked(code)
-                    if not blocked:
-                        price = parsed_trade.get("price")
-                        if price:
-                            stock_name = self._stock_names.get(code, code)
-                            theme_name = self.theme_mgr.code_to_theme.get(code, "")
+                    price = parsed_trade.get("price")
+                    if not can_buy or blocked or not price:
+                        last = self._l1_block_logged_at.get(code)
+                        if last is None or (now_dt - last).total_seconds() >= 60:
+                            self._l1_block_logged_at[code] = now_dt
+                            if not can_buy:
+                                why = (
+                                    f"슬롯/시장 게이트 (1L보유 "
+                                    f"{self.count_holdings_by_strategy('1L')}/{LEADING_MAX_SLOTS}, "
+                                    f"전체 {len(self.holdings)}/{MAX_HOLDINGS})"
+                                )
+                            elif blocked:
+                                why = f"재매수 차단 ({reason})"
+                            else:
+                                why = "체결가 없음"
                             logger.info(
-                                "🚀 [주도주 우선 진입] %s 테마=%s 강도=%.1f (2분 이상 유지)",
-                                code,
-                                theme_name,
-                                strength,
+                                "[%s] 1L 지속 %.0f초 충족했으나 매수 안 됨: %s",
+                                code, held, why,
                             )
-                            info = {"current_price": price, "theme": theme_name}
-                            self._execute_buy(
-                                code, stock_name, phase=1, info=info, sub_strategy="1L"
-                            )
-                            self._leading_since.pop(code, None)
-                            return
+                    else:
+                        stock_name = self._stock_names.get(code, code)
+                        theme_name = self.theme_mgr.code_to_theme.get(code, "")
+                        logger.info(
+                            "🚀 [주도주 우선 진입] %s 테마=%s 강도=%.1f (2분 이상 유지)",
+                            code,
+                            theme_name,
+                            strength,
+                        )
+                        info = {"current_price": price, "theme": theme_name}
+                        self._execute_buy(
+                            code, stock_name, phase=1, info=info, sub_strategy="1L"
+                        )
+                        self._leading_since.pop(code, None)
+                        return
+
+            self._maybe_report_1l_diag(now_dt)
 
         if self.phase1b and self.phase1b.is_watching(code):
             state = self.phase1b.on_trade(parsed_trade, now=now)
             if state == ChemulState.READY_TO_BUY:
                 self._try_phase1b_buy(code, now)
+
+    def _maybe_report_1l_diag(self, now_dt):
+        """1L 판정 통계를 10분마다 1회 요약 로깅 (2026-07-30 진단용).
+        개별 전이 로그가 하나도 안 찍히는 경우(=자격 갖춘 종목이 아예 없음)를
+        구분하기 위함 — "조건이 근처까지 갔는지"를 숫자로 남긴다.
+        시간창(09:01~10:50) 밖에서는 의미가 없으므로 보고하지 않는다."""
+        if not (LEADING_START <= now_dt.time() < LEADING_END):
+            return
+        if (now_dt - self._l1_diag_last_report).total_seconds() < 600:
+            return
+        self._l1_diag_last_report = now_dt
+        d = self._l1_diag
+        ticks = d["ticks"] or 1  # 0 나눗셈 방지
+        logger.info(
+            "📊 [1L 진단 10분요약] 틱 %d | 주도테마소속 %d(%.1f%%) | 강도>=%.0f %d(%.1f%%) "
+            "| 3조건충족 %d(%.1f%%) | 최장유지 %.0f초/%.0f초필요 | 감시중 %d종목 | 주도테마 %d개",
+            d["ticks"],
+            d["theme_ok"], d["theme_ok"] / ticks * 100,
+            LEADING_STRENGTH_MIN,
+            d["strength_ok"], d["strength_ok"] / ticks * 100,
+            d["both_ok"], d["both_ok"] / ticks * 100,
+            self._l1_max_sustain_sec,
+            LEADING_SUSTAIN.total_seconds(),
+            len(self._leading_since),
+            len(getattr(self.theme_mgr, "leading_themes", []) or []),
+        )
 
     def on_orderbook(self, parsed_orderbook: dict, now: float = None):
         code = parsed_orderbook.get("stock_code")
