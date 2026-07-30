@@ -12,7 +12,11 @@ strategy_manager.py를 직접 수정할 필요가 없습니다.
 # -------------------------------------------------
 COMMON = {
     "position_amount": 2_000_000,       # 기본 매수 금액
-    "max_holdings": 6,                  # 전체 합산 최대 보유 종목 수 (1A/Pullback/1B/1L 공유)
+    "max_holdings": 6,                  # 평상시 상한 (1A/Pullback/1B/1L 공유)
+    "max_holdings_hard": 8,             # 확장 포함 절대 상한 (2026-07-31)
+                                        # 평소엔 6개만 쓰고, 점수가 컷라인을 크게
+                                        # 웃도는 후보인데 슬롯교체도 안 되는 상황에서만
+                                        # 남은 2칸을 예비로 사용한다.
     "rebuy_cooldown_min": 3,            # 매도 후 재매수 금지 시간(분)
     "buy_warmup_sec": 60,               # 매수 후 웜업(손절방지) 시간
     "mdd_daily_loss_limit": -0.03,      # 일일 최대 손실 한도 (-3%)

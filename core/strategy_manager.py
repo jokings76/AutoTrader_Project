@@ -63,9 +63,15 @@ PULLBACK_END = time(10, 30)
 PHASE1A_TIGHTEN_TIME = time(10, 30)  # 이 시각부터 1A 점수 상향
 PHASE1A_END = time(14, 50)
 # 주도주상위 조건검색은 GROUP_A_START(09:01)부터 그대로 감시하되, 나머지
-# 조건검색식(체결강도100/돌파자동매매용/관심종목감시)은 09:20부터 감시 시작.
+# 조건검색식(돌파자동매매용 등)은 09:20부터 감시 시작.
 # (2026-07-29) on_condition_hit에서 cond_name 기준으로 적용.
 OTHER_COND_START = time(9, 20)
+# 즉시평가(09:01부터) 대상 조건식 이름. 주도주상위 외에 눌림목자동도 포함
+# (2026-07-31, 조건식 3개 체제 재편) — Pullback 시간창은 09:01~10:30로 89분뿐이라
+# 1A(~14:50)와 달리 09:20까지 19분(전체 창의 21%) 지연되면 손실이 큼. 눌림목자동은
+# Pullback 전용으로 만든 검색식이라 지연시킬 이유가 없음. 돌파자동매매용은 대형주
+# 위주라 상대적으로 덜 급하므로 그대로 09:20 지연 유지.
+IMMEDIATE_COND_NAMES = ("주도주상위", "눌림목자동")
 # 1L(주도주) 시간 윈도우
 LEADING_START = time(9, 1)
 LEADING_END = time(10, 50)
@@ -156,6 +162,16 @@ TP_DECLINE_STRENGTH_RATIO = 0.8     # 진입강도 대비 이 배수 미만이�
 TP_DECLINE_VOLUME_RATIO = 1.0       # volume_ratio 이 값 미만이면 "거래량 하락"
 TP_VOL_CHECK_SEC = 30               # 거래량 확인(REST) 종목당 최소 간격
 
+# ── 손실 반등 하이브리드 매도 (2026-07-31 사용자 지정) ──────────
+# 손실 중인 종목이 저점에서 한 번 반등했는데 그 반등이 체결강도·거래량 어느
+# 쪽으로도 뒷받침되지 않으면, 손절선(-3%)까지 끌려가지 않고 그 자리에서
+# 손실을 줄여 청산한다. "수익이 나지 않더라도 손실을 최대한 적게" 대응하는 용도로,
+# 되돌아온 반등 구간을 이용해 -3%보다 나은 가격에 빠져나오는 것이 목적.
+# 하락 판정을 AND로 두는 건 동적 익절캡과 같은 이유 — OR은 과민해서 백테스트상
+# 오히려 악화됐음(건당 -0.328% -> -0.532%, 2026-07-30).
+LOSS_REBOUND_MIN = 0.01          # 저점 대비 이만큼(+1%) 이상 올라와야 '반등' 인정
+LOSS_REBOUND_MIN_HOLD_MIN = 5    # 매수 후 최소 보유(분) — 직후 노이즈로 잘리는 것 방지
+
 # 익절 후 재매수 상한 (2026-07-30 사용자 지정) — 손절 종목은 이미 당일 전면
 # 차단이므로 사실상 익절 종목에만 적용된다. 최초 1회 + 재매수 2회 = 총 3회.
 MAX_BUYS_PER_STOCK = 3
@@ -169,6 +185,13 @@ BUY_WARMUP = timedelta(seconds=COMMON["buy_warmup_sec"])
 # 금액 + 슬롯 (1A/Pullback/1L/1B 각각 자체 상한 3 + 전체 합산 MAX_HOLDINGS=6 공유)
 POSITION_AMOUNT = COMMON["position_amount"]
 MAX_HOLDINGS = COMMON["max_holdings"]
+# 확장 슬롯 (2026-07-31 사용자 지정) — 평소 6개만 쓰다가, 점수가 컷라인을 크게
+# 웃도는 후보가 나왔는데 슬롯교체도 성립하지 않는 상황에서만 7~8번째를 연다.
+MAX_HOLDINGS_HARD = COMMON.get("max_holdings_hard", MAX_HOLDINGS)
+SLOT_EXPANSION_SCORE_MARGIN = 1.5   # 컷라인 대비 이 배수 이상이어야 '정말 좋은 종목'
+SLOT_EXPANSION_WAIT_SEC = 90        # 슬롯 만석이 이 시간 이상 지속돼야 확장 허용
+                                    # (슬롯교체 태스크가 60초 주기 -> 한 사이클을
+                                    #  넘겨도 교체가 안 됐다 = 교체 대상 없음)
 PHASE1A_MAX_SLOTS = PHASE_1A["max_slots"]
 PULLBACK_MAX_SLOTS = 3
 PHASE1B_MAX_SLOTS = PHASE_1B["max_slots"]
@@ -228,6 +251,8 @@ class StrategyManager:
         self._stock_names: dict[str, str] = {}
         self._cond_names: dict[str, str] = {}  # stock_code -> 최초 편입 조건검색식 이름
         self._opening_prices: dict[str, float] = {}  # stock_code -> 당일 시가 (등락률 상한 체크용)
+        # 평상시 상한(MAX_HOLDINGS)이 꽉 찬 시각 — 확장 슬롯(7~8) 판정용 (2026-07-31)
+        self._soft_cap_full_since: Optional[datetime] = None
         self._watch_scores: dict[str, float] = (
             {}
         )  # stock_code -> 워치리스트 등재 시 점수 (슬롯교체용, 2026-07-26)
@@ -430,6 +455,7 @@ class StrategyManager:
                 if code not in self.holdings:
                     self.phase1b.stop_watching(code)
 
+        self._track_soft_cap_full(now)
         self._check_1b_confirmations()
         self._update_dynamic_caps()
         self.check_timeouts()
@@ -523,30 +549,96 @@ class StrategyManager:
         new_ratio = max(0.5, min(1.0, base_cfg.threshold_ratio + 0.05))
         return _dc_replace(base_cfg, threshold_ratio=new_ratio)
 
-    def can_buy_more(self) -> bool:
+    def can_buy_more(self, info: dict | None = None) -> bool:
         if not self.risk_can_trade():
             return False
         if self._get_market_defense_mode() == "HALT":
             return False
         if self._now() < self.quarantine_until:
             return False
-        return len(self.holdings) < MAX_HOLDINGS
+        held = len(self.holdings)
+        if held < MAX_HOLDINGS:
+            return True
+        # 평상시 상한(6)을 넘어선 확장 슬롯(7~8)은 예외 경로 — info가 있고
+        # 그 점수가 컷라인을 크게 웃도는 후보에게만 열린다. (2026-07-31)
+        if held >= MAX_HOLDINGS_HARD:
+            return False
+        return self._can_use_expansion_slot(info)
+
+    def _can_use_expansion_slot(self, info: dict | None) -> bool:
+        """확장 슬롯(7~8번째) 사용 자격 판정 (2026-07-31 사용자 지정).
+
+        "평소 6개만 쓰되, 정말 좋은 종목이 포착됐는데 슬롯교체가 애매하면
+        남은 슬롯을 쓴다"는 요구를 세 조건으로 구현한다:
+          ① 점수가 자기 컷라인의 SLOT_EXPANSION_SCORE_MARGIN배 이상 — 전략마다
+             만점 스케일이 달라(1A 12점 / Pullback 7점) 절대값 대신 컷라인 대비
+             비율로 판정해야 전략 간 형평이 맞는다.
+          ② 슬롯이 꽉 찬 상태가 SLOT_EXPANSION_WAIT_SEC 이상 지속 — 슬롯교체
+             태스크가 60초 주기로 돌므로, 이 시간을 넘겼다는 건 교체할 만한
+             정체 종목이 없었다는 뜻("슬롯교체가 애매한 경우")이다.
+          ③ 점수 정보가 없는 경로(1B/1L 등 실시간 틱 진입)는 확장 대상 아님 —
+             비교 기준이 없어 '정말 좋은 종목'을 판정할 수 없기 때문.
+        """
+        if not info:
+            return False
+        score = info.get("score")
+        thr = info.get("score_threshold")
+        if not score or not thr or thr <= 0:
+            return False
+        if score < thr * SLOT_EXPANSION_SCORE_MARGIN:
+            return False
+        since = self._soft_cap_full_since
+        if since is None:
+            return False
+        if (self._now() - since).total_seconds() < SLOT_EXPANSION_WAIT_SEC:
+            return False
+        logger.info(
+            "확장 슬롯 사용 (보유 %d/%d -> 상한 %d): 점수 %.1f >= 컷라인 %.1f x%.1f, "
+            "슬롯 만석 %.0f초 지속(교체 대상 없음)",
+            len(self.holdings), MAX_HOLDINGS, MAX_HOLDINGS_HARD,
+            score, thr, SLOT_EXPANSION_SCORE_MARGIN,
+            (self._now() - since).total_seconds(),
+        )
+        return True
+
+    def may_expand_slots(self) -> bool:
+        """확장 슬롯이 열려있을 가능성이 있는 상태인지 (점수 무관, 값싼 사전확인).
+        watchlist_reentry처럼 '슬롯 여유 없으면 REST 호출도 안 함'으로 조기
+        반환하는 경로가, 확장 가능한 상황까지 싸잡아 막아버리지 않도록 하는 용도.
+        실제 허용 여부는 후보별 점수를 보는 _can_use_expansion_slot이 결정한다."""
+        held = len(self.holdings)
+        if held < MAX_HOLDINGS or held >= MAX_HOLDINGS_HARD:
+            return False
+        since = self._soft_cap_full_since
+        if since is None:
+            return False
+        return (self._now() - since).total_seconds() >= SLOT_EXPANSION_WAIT_SEC
+
+    def _track_soft_cap_full(self, now):
+        """평상시 상한(6개)이 언제부터 꽉 차 있었는지 추적 — 확장 슬롯 판정용.
+        tick()에서 주기 호출. 슬롯이 하나라도 비면 타이머를 리셋해서, 확장은
+        '오래 만석이었다'가 확인된 경우에만 열린다."""
+        if len(self.holdings) >= MAX_HOLDINGS:
+            if self._soft_cap_full_since is None:
+                self._soft_cap_full_since = now
+        else:
+            self._soft_cap_full_since = None
 
     def count_holdings_by_strategy(self, sub: str) -> int:
         return sum(1 for h in self.holdings.values() if h.get("sub_strategy") == sub)
 
-    def can_buy_phase1a(self) -> bool:
+    def can_buy_phase1a(self, info: dict | None = None) -> bool:
         # 1A: 09:01~14:50 (10:30부터 점수 커트라인 상향은 evaluate_new_intensity_strategy에서)
         return (
-            self.can_buy_more()
+            self.can_buy_more(info)
             and self.count_holdings_by_strategy("1A") < PHASE1A_MAX_SLOTS
             and GROUP_A_START <= self._now().time() < PHASE1A_END
         )
 
-    def can_buy_pullback(self) -> bool:
+    def can_buy_pullback(self, info: dict | None = None) -> bool:
         # 눌림목: 09:01~10:30, 1A와 시간대는 겹치지만 슬롯은 별도(sub_strategy="1A_눌림")
         return (
-            self.can_buy_more()
+            self.can_buy_more(info)
             and self.count_holdings_by_strategy("1A_눌림") < PULLBACK_MAX_SLOTS
             and GROUP_A_START <= self._now().time() < PULLBACK_END
         )
@@ -618,9 +710,16 @@ class StrategyManager:
         # 기록해둔 "주도주상위+..." 같은 값을 덮어써버리면 OTHER_COND_START(09:20)
         # 게이트가 주도주상위 종목까지 잘못 지연시킴 — 오늘 실전에서 이 때문에
         # SK이터닉스 등 9종목이 09:01~09:20 사이 18분간 평가 자체가 멈췄던 것 확인.
+        # (2026-07-31) 돌파자동매매용처럼 "주도주상위"가 아닌 조건식이 먼저 걸린
+        # 종목에 나중에 주도주상위 신호가 와도, 기존 first-write-wins 로직이라
+        # cond_name이 영영 갱신 안 돼 09:20까지 잘못 지연됐음(주도주상위+돌파
+        # 자동매매용 콜라보 사용 시작하며 발견) — "주도주상위"가 새로 포함되면
+        # 예외적으로 승격시켜 병합한다.
         existing_cond = self._cond_names.get(stock_code)
         if not existing_cond or existing_cond in ("기타", "알수없음"):
             self._cond_names[stock_code] = cond_name
+        elif "주도주상위" in cond_name and "주도주상위" not in existing_cond:
+            self._cond_names[stock_code] = f"{existing_cond}+{cond_name}"
 
         # 거래대금 폭발 이력(explosion_scorer) 준비는 여기서 더 이상 안 함 —
         # 종가베팅 스캐너(main.py task_closing_bet_scanner, 14:50)에서만 쓰이는
@@ -672,28 +771,35 @@ class StrategyManager:
             logger.info("[%s] %s 매수 차단: %s", stock_code, stock_name, reason)
             return False
 
-        # 주도주상위는 기존대로 GROUP_A_START(09:01)부터 바로 평가, 나머지
-        # 조건검색식(체결강도100/돌파자동매매용/관심종목감시)은 09:20 이전이면
-        # 아직 평가하지 않음(2026-07-29). on_condition_hit/watchlist_reentry
-        # 공유 진입점이라 여기 한 곳에 둬야 두 경로 다 일관되게 걸림 — 특히
-        # task_watchlist_reentry가 15초마다 재시도하므로 on_condition_hit
+        # 주도주상위/눌림목자동(IMMEDIATE_COND_NAMES)은 GROUP_A_START(09:01)부터
+        # 바로 평가, 그 외 조건검색식(돌파자동매매용 등)은 09:20 이전이면
+        # 아직 평가하지 않음(2026-07-29, 2026-07-31 눌림목자동 추가). on_condition_hit/
+        # watchlist_reentry 공유 진입점이라 여기 한 곳에 둬야 두 경로 다 일관되게 걸림 —
+        # 특히 task_watchlist_reentry가 15초마다 재시도하므로 on_condition_hit
         # 쪽에서만 막으면 곧바로 재평가돼서 지연이 무의미해짐.
         # watch_list_today에는 넣어둬서 09:20이 지나면 watchlist_reentry가
         # 자연히 다시 평가하게 함(단순 차단이 아니라 지연 평가).
         cond_name = self._cond_names.get(stock_code, "")
-        if "주도주상위" not in cond_name and now_t < OTHER_COND_START:
+        if not any(n in cond_name for n in IMMEDIATE_COND_NAMES) and now_t < OTHER_COND_START:
             self.watch_list_today.add(stock_code)
             return False
+
+        # 눌림목자동은 "당일고가 대비 -3%+ 눌린 상태"를 전제하는 검색식이라
+        # 1A(거래량증가지속+급등형, 상승 모멘텀 전제)와 전제가 반대됨. 다른
+        # 조건식과 겹치지 않고 눌림목자동 단독으로만 들어온 종목은 1A 평가를
+        # 건너뛰고 바로 Pullback으로 보낸다(계산 낭비 방지 + 성격이 안 맞는
+        # 후보로 1A 슬롯이 낭비되는 것 방지). (2026-07-31)
+        pullback_only_source = cond_name == "눌림목자동"
 
         # ==========================================
         # 1A: 거래량증가지속 + 체결강도지속 + 점수 (09:01~14:50)
         # ==========================================
-        if current_price > 0:
+        if current_price > 0 and not pullback_only_source:
             ok, info = self.evaluate_new_intensity_strategy(
                 stock_code, candles, current_price, open_price, now_t
             )
             self._record_watch_list(stock_code, stock_name, phase, info)
-            if ok and self.can_buy_phase1a():
+            if ok and self.can_buy_phase1a(info):
                 self._execute_buy(stock_code, stock_name, phase, info, sub_strategy="1A")
                 return True
 
@@ -738,7 +844,7 @@ class StrategyManager:
                     stock_code, "pullback", current_price, info,
                     today_candles=today_candles,
                 ):
-                    if self.can_buy_pullback():
+                    if self.can_buy_pullback(info):
                         self._execute_buy(
                             stock_code, stock_name, phase, info, sub_strategy="1A_눌림"
                         )
@@ -1556,6 +1662,13 @@ class StrategyManager:
         if current_price > pos["highest_price"]:
             pos["highest_price"] = current_price
 
+        # 저점 추적 — 손실 반등 하이브리드 매도가 "저점 대비 얼마나 올라왔나"를
+        # 판단하는 기준선 (2026-07-31). 매수가로 초기화해서, 매수 후 한 번도
+        # 밀리지 않은 종목은 저점=매수가가 되어 반등 판정이 성립하지 않는다.
+        low = pos.get("lowest_price")
+        if low is None or current_price < low:
+            pos["lowest_price"] = current_price
+
         warmup_until = pos.get("warmup_until")
         if warmup_until and self._now() < warmup_until:
             return
@@ -1685,16 +1798,31 @@ class StrategyManager:
             except Exception:
                 continue
 
-            cap, _ = self._take_profit_cap(pos)
-
-            # 상한캡(2.5%) 종목만 대상 — 1A처럼 처음부터 2.5%인 종목과
-            # on_price_update에서 강도상향된 종목 둘 다 포함된다.
-            if cap < TP_CAP_UPGRADED:
+            # 체결강도 하락은 두 경로(익절캡 조기이탈 / 손실반등 매도) 공통 전제.
+            # 유지 중이면 어느 쪽도 해당 없으므로 거래량 조회(REST) 전에 끊는다.
+            if cur_s >= entry_s * TP_DECLINE_STRENGTH_RATIO:
                 continue
 
-            # 강도 하락 + 거래량 하락 -> 즉시 매도
-            if cur_s >= entry_s * TP_DECLINE_STRENGTH_RATIO:
-                continue  # 강도는 아직 유지 중
+            price = self.phase1b.trade_flow.get_latest_price(code) if self.phase1b else None
+            if not price:
+                try:
+                    c1 = self.api.get_minute_candles(code, interval=1, count=1)
+                    price = float(c1[0]["close"]) if c1 else None
+                except Exception:
+                    price = None
+            if not price:
+                continue
+
+            cap, _ = self._take_profit_cap(pos)
+            # 경로 A(기존): 상한캡(2.5%) 종목의 조기 이탈 — 1A처럼 처음부터
+            # 2.5%인 종목과 on_price_update에서 강도상향된 종목 둘 다 포함.
+            cap_exit = cap >= TP_CAP_UPGRADED
+            # 경로 B(신규): 손실 종목이 저점에서 반등했으나 그 반등이 강도로
+            # 뒷받침되지 않는 경우 — 손실 최소화 청산.
+            loss_rebound = self._is_loss_rebound_exit(pos, price, now_dt)
+            if not cap_exit and not loss_rebound:
+                continue
+
             last = self._tp_vol_checked_at.get(code)
             if last is not None and (now_dt - last).total_seconds() < TP_VOL_CHECK_SEC:
                 continue
@@ -1706,25 +1834,48 @@ class StrategyManager:
                 logger.warning("[%s] 동적캡 거래량 조회 실패: %s", code, e)
                 continue
             if vol_ratio is None or vol_ratio >= TP_DECLINE_VOLUME_RATIO:
-                continue  # 거래량은 아직 살아있음 -> 캡까지 계속 보유
-
-            price = self.phase1b.trade_flow.get_latest_price(code) if self.phase1b else None
-            if not price:
-                try:
-                    c1 = self.api.get_minute_candles(code, interval=1, count=1)
-                    price = float(c1[0]["close"]) if c1 else None
-                except Exception:
-                    price = None
-            if not price:
-                logger.warning("[%s] 동적캡 즉시매도 판정됐으나 현재가 없음", code)
-                continue
+                continue  # 거래량은 아직 살아있음 -> 계속 보유
 
             net_rate = self._net_rate(pos["buy_price"], price) * 100
-            self._execute_sell(
-                code, price,
-                f"동적캡 즉시매도 (체결강도 {entry_s:.0f}->{cur_s:.0f}, "
-                f"거래량 x{vol_ratio:.2f}, 순 {net_rate:+.2f}%)",
-            )
+            if loss_rebound and not cap_exit:
+                low = pos.get("lowest_price") or pos["buy_price"]
+                bounce = (price - low) / low * 100 if low else 0.0
+                reason = (
+                    f"손실반등 하이브리드 매도 (저점 대비 +{bounce:.2f}% 반등 후 "
+                    f"체결강도 {entry_s:.0f}->{cur_s:.0f}, 거래량 x{vol_ratio:.2f}, "
+                    f"순 {net_rate:+.2f}% — 손절 대기 대신 손실 축소)"
+                )
+            else:
+                reason = (
+                    f"동적캡 즉시매도 (체결강도 {entry_s:.0f}->{cur_s:.0f}, "
+                    f"거래량 x{vol_ratio:.2f}, 순 {net_rate:+.2f}%)"
+                )
+            self._execute_sell(code, price, reason)
+
+    def _is_loss_rebound_exit(self, pos: dict, price: float, now_dt) -> bool:
+        """손실 반등 하이브리드 매도 대상인지 (2026-07-31 사용자 지정).
+
+        조건: ① 현재 순손익이 손실 ② 매수 후 최소 보유시간 경과
+              ③ 당일 저점 대비 LOSS_REBOUND_MIN(+1%) 이상 반등한 상태.
+        여기서 True가 나와도 호출부에서 체결강도 하락 AND 거래량 하락을 함께
+        확인해야 실제 매도된다 — 즉 "반등했지만 그 반등에 힘이 없다"는
+        3중 확인 구조. 손절(-3%)은 그대로 남아 최후 방어선 역할을 한다."""
+        buy_price = pos.get("buy_price")
+        if not buy_price or not price:
+            return False
+        if self._net_rate(buy_price, price) >= 0:
+            return False  # 손실 구간에서만 작동(이익 구간은 익절캡 담당)
+
+        buy_time = pos.get("buy_time")
+        if buy_time is None:
+            return False
+        if (now_dt - buy_time) < timedelta(minutes=LOSS_REBOUND_MIN_HOLD_MIN):
+            return False  # 매수 직후 노이즈로 잘리는 것 방지
+
+        low = pos.get("lowest_price")
+        if not low or low <= 0:
+            return False  # 저점 기록 없음(틱 미수신) -> 판단 보류
+        return (price - low) / low >= LOSS_REBOUND_MIN
 
     @staticmethod
     def _is_early_buy(pos: dict) -> bool:

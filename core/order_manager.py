@@ -26,7 +26,8 @@ from utils.price_helper import add_ticks, round_to_tick
 # 전략 파라미터
 # ─────────────────────────────────────
 BUY_AMOUNT_PER_STOCK = 2_000_000  # 종목당 기본 매수금액 (200만원)
-MAX_POSITIONS = 6  # 동시 보유 최대 종목수 (strategy_manager.MAX_HOLDINGS와 일치, 2026-07-27)
+MAX_POSITIONS = 8  # 동시 보유 최대 종목수 (strategy_manager.MAX_HOLDINGS_HARD와 일치,
+                   # 2026-07-31 확장 슬롯 도입으로 6->8. 평상시 상한 6은 전략 쪽에서 관리)
 BUY_COOLDOWN_SEC = 300  # 같은 종목 재매수 쿨다운 (5분)
 
 TAKE_PROFIT_PCT = 2.5  # +2.5% 익절

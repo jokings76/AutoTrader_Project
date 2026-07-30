@@ -20,7 +20,12 @@ def try_watchlist_reentry(strat, now) -> int:
     if not (GROUP_A_START <= now_t < PHASE1A_END):
         return 0  # on_condition_hit과 동일한 시간대 게이트
 
-    if not (strat.can_buy_phase1a() or strat.can_buy_pullback()):
+    # 확장 슬롯(2026-07-31)이 열려있을 수 있는 상태면 평상시 상한이 꽉 찼어도
+    # 재평가를 진행한다 — 실제 허용 여부는 후보 점수를 보는 can_buy_*(info)가
+    # 판정한다. 이 사전확인을 빼면 '만석이라 조기 반환' 때문에 확장 슬롯이
+    # 사실상 신규 편입 이벤트에서만 열려 의도대로 동작하지 않는다.
+    if not (strat.can_buy_phase1a() or strat.can_buy_pullback()
+            or strat.may_expand_slots()):
         return 0  # 슬롯 없으면 REST 호출도 안 함
 
     bought = 0
@@ -28,7 +33,8 @@ def try_watchlist_reentry(strat, now) -> int:
     for code in list(strat.watch_list_today):
         if code in strat.holdings or code in strat.pending:
             continue
-        if not (strat.can_buy_phase1a() or strat.can_buy_pullback()):
+        if not (strat.can_buy_phase1a() or strat.can_buy_pullback()
+                or strat.may_expand_slots()):
             break  # 재평가 도중 슬롯이 다 찼으면 중단
 
         stock_name = strat._stock_names.get(code, code)

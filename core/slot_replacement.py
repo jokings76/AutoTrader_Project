@@ -14,9 +14,24 @@ MAX_SLOT_REPLACEMENTS_PER_DAY = 40
 
 
 def find_stagnant_holding(strat, now) -> tuple[str, dict] | None:
-    """holdings 중 교체 대상 자격이 되는 종목 하나를 찾아 반환 (없으면 None).
-    자격: 매수 후 10분 경과 + 체결강도 하락 + 거래량 정체."""
+    """holdings 중 교체 대상 자격이 되는 종목들을 모두 찾아, 그중 우선순위가
+    가장 높은 종목 하나를 반환 (없으면 None).
+
+    자격(기존 유지): 매수 후 10분 경과 + 체결강도 하락 + 거래량 정체.
+    자격 판정을 AND로 두는 건 의도된 설계 — 동적 익절캡에서 같은 하락 판정을
+    OR로 바꿨더니 과민하게 이탈해 성과가 악화된 사례가 있었다(2026-07-30
+    백테스트: 건당 -0.328% -> -0.532%).
+
+    우선순위(2026-07-31 사용자 지정): 자격 종목 중 **손실이 덜 난 순서**.
+    같은 정체 종목이라도 -0.3%를 잘라내는 것과 -2.5%를 잘라내는 것은 부담이
+    전혀 다르다 — 크게 밀린 종목은 손실을 확정시키는 비용이 크고 되돌림
+    여지도 남아있으므로, 손실이 얕은 쪽부터 교체해 실현손실을 최소화한다.
+    (깊게 밀린 종목은 손절 -3% 또는 손실반등 하이브리드 매도가 따로 담당)"""
+    candidates: list[tuple[str, dict]] = []
+
     for code, pos in list(strat.holdings.items()):
+        if code in strat.pending or code in strat.sell_blocked:
+            continue  # 이미 매도 진행 중 — REST 낭비 방지
         buy_time = pos.get("buy_time")
         if not buy_time:
             continue
@@ -47,13 +62,37 @@ def find_stagnant_holding(strat, now) -> tuple[str, dict] | None:
         if volume_ratio is None or volume_ratio >= VOLUME_STAGNANT_RATIO:
             continue  # 거래량 정체 아님
 
-        return code, {
+        # 우선순위 정렬용 순손익 — 위에서 이미 받아온 분봉을 재사용해서
+        # REST 추가 호출 없이 현재가를 얻는다(캔들 없으면 매수가로 폴백=0%).
+        cur_price = pos.get("buy_price")
+        if candles:
+            cur_price = candles[0].get("close", cur_price) or cur_price
+        try:
+            net_rate = strat._net_rate(pos.get("buy_price"), cur_price)
+        except Exception:
+            net_rate = 0.0
+
+        candidates.append((code, {
             "held_minutes": held_minutes,
             "entry_strength": entry_strength,
             "current_strength": current_strength,
             "volume_ratio": volume_ratio,
-        }
-    return None
+            "net_rate": net_rate,
+            "current_price": cur_price,
+        }))
+
+    if not candidates:
+        return None
+
+    # 손실이 덜 난(순손익이 큰) 종목 우선
+    candidates.sort(key=lambda item: item[1]["net_rate"], reverse=True)
+    if len(candidates) > 1:
+        logger.info(
+            "슬롯교체 후보 %d종목 — 손실 얕은 순: %s",
+            len(candidates),
+            ", ".join(f"{c}({d['net_rate']*100:+.2f}%)" for c, d in candidates),
+        )
+    return candidates[0]
 
 
 def find_replacement_candidate(strat, stagnant_score: float) -> tuple[str, float] | None:
@@ -103,17 +142,13 @@ def try_slot_replacement(strat, send_telegram, replacement_count: int, now) -> i
     exit_reason = (
         f"슬롯 교체: 체결강도 하락({detail['entry_strength']:.0f}->{detail['current_strength']:.0f}) "
         f"+ 거래량 정체(x{detail['volume_ratio']:.2f}) "
-        f"| 보유 {detail['held_minutes']:.0f}분 "
+        f"| 보유 {detail['held_minutes']:.0f}분 | 순 {detail['net_rate']*100:+.2f}% "
         f"-> 대체후보 {candidate_name}({candidate_code}) 점수 {candidate_score:.1f}"
     )
 
-    current_price = pos.get("buy_price")
-    try:
-        candles = strat._get_merged_candles(stagnant_code, interval=1, count=1)
-        if candles:
-            current_price = candles[0].get("close", current_price)
-    except Exception:
-        pass
+    # find_stagnant_holding이 이미 분봉으로 현재가를 구해뒀으므로 재사용
+    # (기존엔 여기서 count=1 분봉을 한 번 더 조회했음 — REST 중복 제거)
+    current_price = detail.get("current_price") or pos.get("buy_price")
 
     logger.info("[%s] %s", stagnant_code, exit_reason)
     strat._execute_sell(stagnant_code, current_price, exit_reason)
