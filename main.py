@@ -667,7 +667,8 @@ class TradingBot:
 
             try:
                 from core.explosion_scorer import evaluate_closing_bet_candidate
-                from core.history_fetcher import fetch_n_days_candles, to_trade_value_bins
+                from core.history_fetcher import to_trade_value_bins
+                from core.history_cache import fetch_with_cache, slice_today, cache_stats
 
                 strat = self.strategy_mgr
                 candidates = {}
@@ -677,14 +678,24 @@ class TradingBot:
                 target_codes = list(strat._cond_names.keys())
 
                 def _evaluate_one(code: str):
-                    candles_3m = fetch_n_days_candles(strat.api, code, interval=3, target_days=20)
-                    candles_60m = fetch_n_days_candles(strat.api, code, interval=60, target_days=20)
+                    # 영속 캐시 경유 (2026-07-31) — 어제까지의 분봉은 변하지 않으므로
+                    # 매일 20일치를 다시 받지 않고 최근 구간만 1콜씩 이어붙인다.
+                    # 종목당 5콜 -> 2콜. 자세한 근거는 core/history_cache.py 참고.
+                    candles_3m = fetch_with_cache(strat.api, code, interval=3, target_days=20)
+                    candles_60m = fetch_with_cache(strat.api, code, interval=60, target_days=20)
                     bins_3m = to_trade_value_bins(candles_3m)
                     bins_60m = to_trade_value_bins(candles_60m)
                     cache_entry = strat.explosion_scorer.prepare(code, bins_3m, bins_60m)
 
-                    today_raw = strat.api._raw_get_minute_candles(code, interval=3, count=150)
-                    today_bins = to_trade_value_bins(today_raw)
+                    # 당일 3분봉은 위 20일치에 이미 들어있다 — 기존의 별도 호출
+                    # (_raw_get_minute_candles count=150)은 순수 중복이었고, 게다가
+                    # 그 결과가 내림차순(최신->과거)이라 evaluate_closing_bet_candidate의
+                    # today_bins[-5:]가 '최근 5봉'이 아니라 '가장 오래된 5봉'(전일
+                    # 오후)을 채점하고 있었다. 오름차순 캐시에서 당일만 잘라 쓰면
+                    # 호출도 없애고 그 버그도 같이 해결된다. (2026-07-31)
+                    today_bins = to_trade_value_bins(slice_today(candles_3m))
+                    if not today_bins:
+                        return {"eligible": False, "reason": "당일 3분봉 없음"}
                     return evaluate_closing_bet_candidate(
                         today_bins,
                         cache_entry["baseline"],
@@ -699,6 +710,12 @@ class TradingBot:
                             candidates[code] = result
                     except Exception as e:
                         logger.warning("[%s] 종가베팅 평가 실패: %s", code, e)
+
+                st = cache_stats()
+                logger.info(
+                    "🔔 [종가베팅] 평가 완료 %d종목 (히스토리 캐시 %d파일 %.1fMB)",
+                    len(target_codes), st["files"], st["bytes"] / 1024 / 1024,
+                )
 
                 ranked = sorted(
                     candidates.items(), key=lambda x: x[1]["closing_score"], reverse=True

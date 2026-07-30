@@ -14,3 +14,8 @@ settings_*.json
 # VS Code 및 임시 폴더 제외
 .history/
 .tmp.driveupload/
+# 분봉 히스토리 영속 캐시 (2026-07-31) — 재생성 가능한 데이터라 추적 안 함
+cache/
+
+# 프로그램 유입 기록 CSV (2026-07-31)
+logs/
