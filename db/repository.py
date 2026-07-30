@@ -132,8 +132,21 @@ class TradeRepository(BaseRepository):
 
         sell_amount = sell_price * sell_quantity
         buy_amount = float(trade["buy_amount"])
-        profit_amount = sell_amount - buy_amount - fee - tax
-        profit_rate = (profit_amount / buy_amount * 100) if buy_amount else 0
+
+        # 손익은 "실제 매도한 수량"의 매수원가와 비교해야 한다 (2026-07-30 수정).
+        # 기존엔 sell_amount(실체결 수량) - buy_amount(주문 수량)를 그대로 빼서,
+        # 매수 주문이 부분체결되거나 일부만 매도된 경우 미보유 수량까지 전액
+        # 손실로 계산됐음. 실측: 휴림로봇 649주 주문/393주 체결 -> 실제 +0.49%인데
+        # DB에 -39.15%로 기록, KBI메탈 496주/266주 -> 실제 -0.69%인데 -46.74%.
+        # 이 값이 일일 백테스트/리포트의 입력이라 통계 전체가 오염되고 있었다.
+        buy_price = float(trade["buy_price"] or 0)
+        matched_buy_amount = buy_price * sell_quantity
+        if matched_buy_amount <= 0:  # buy_price 결측 시 기존 방식으로 폴백
+            matched_buy_amount = buy_amount
+        profit_amount = sell_amount - matched_buy_amount - fee - tax
+        profit_rate = (
+            (profit_amount / matched_buy_amount * 100) if matched_buy_amount else 0
+        )
 
         data = {
             "sell_time": datetime.now(),
