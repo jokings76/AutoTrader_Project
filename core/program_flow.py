@@ -87,6 +87,7 @@ class ProgramFlowTracker:
         # code -> 종목명 (로그 가독성용)
         self._names: dict[str, str] = {}
         self._flushed_until: dict[str, datetime] = {}  # code -> 마지막으로 CSV에 쓴 분
+        self._last_cum: dict[str, float] = {}  # code -> 직전 관측 누적값 (record_cumulative용)
 
     # ------------------------------------------------------------------
     # 기록
@@ -97,6 +98,7 @@ class ProgramFlowTracker:
             self._date = today
             self._minutes.clear()
             self._flushed_until.clear()
+            self._last_cum.clear()
 
     def record_minute(self, stock_code: str, net_value: float,
                       minute: datetime | None = None, stock_name: str = ""):
@@ -118,6 +120,31 @@ class ProgramFlowTracker:
             if len(series) > MAX_MINUTES_KEPT:
                 for old in sorted(series)[:len(series) - MAX_MINUTES_KEPT]:
                     series.pop(old, None)
+
+    def record_cumulative(self, stock_code: str, cum_value: float,
+                         minute: datetime | None = None, stock_name: str = ""):
+        """장 시작부터의 누적값(예: 프로그램 순매수금액 FID 124)을 받아 델타로
+        변환해 기록한다. WS 실시간처럼 '지금까지 누적'을 계속 밀어주는 소스용
+        (2026-07-31, api/kiwoom_ws.py 0g 종목프로그램매매 콜백 대상).
+
+        첫 관측(당일 그 종목의 첫 이벤트)은 델타를 알 수 없으므로 기록하지
+        않고 기준점만 잡는다 — 0으로 기록하면 그 순간까지 쌓여있던 실제
+        유입/유출을 놓치는 게 아니라 거꾸로 '장 시작부터 지금까지 전부'를
+        한 틱에 몰아넣는 왜곡이 생기므로, 차라리 스킵하는 편이 안전하다.
+        누적값이 감소하면(자정 넘어간 재구독, 서버 리셋 등) 같은 이유로
+        새 기준점만 잡고 델타는 스킵한다."""
+        if not stock_code:
+            return
+        with self._lock:
+            self._reset_if_new_day()
+            last = self._last_cum.get(stock_code)
+            self._last_cum[stock_code] = cum_value
+        if last is None:
+            return
+        delta = cum_value - last
+        if delta < 0:
+            return
+        self.add_minute_delta(stock_code, delta, minute=minute, stock_name=stock_name)
 
     def add_minute_delta(self, stock_code: str, delta: float,
                          minute: datetime | None = None, stock_name: str = ""):

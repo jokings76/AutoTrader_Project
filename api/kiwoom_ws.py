@@ -23,6 +23,12 @@ from utils.logger import logger
 
 TYPE_TRADE = "0B"
 TYPE_ORDERBOOK = "0D"
+# 종목프로그램매매 실시간 타입 (2026-07-31 신규) — FID 118/119/120/122/123/124.
+# 주의: 이 타입 코드값("0g")은 문서 확인 기준 추정치이고 이 프로젝트에서 실제
+# 구독으로 검증된 적은 아직 없다. 장 시작 후 아래 진단 로그("🔑 0g 프로그램매매
+# raw 키")가 한 번이라도 찍히면 맞는 것 — 안 찍히면(0B/0D는 계속 찍히는데 이것만
+# 조용하면) 타입 코드가 틀린 것이므로 재확인 필요.
+TYPE_PROGRAM = "0g"
 
 # WS REG 빈도 제한 회피 (키움 정책)
 REG_INTERVAL_SEC = 0.3
@@ -43,6 +49,7 @@ class KiwoomWS:
         on_signal=None,
         on_trade=None,
         on_orderbook=None,
+        on_program=None,
         on_disconnect=None,
         on_reconnect=None,
     ):
@@ -52,6 +59,7 @@ class KiwoomWS:
         self.on_signal = on_signal
         self.on_trade = on_trade
         self.on_orderbook = on_orderbook
+        self.on_program = on_program  # 종목프로그램매매(0g) 콜백 (2026-07-31)
         self.on_disconnect = on_disconnect  # 단절 감지 직후 1회 호출 (인자 없음)
         self.on_reconnect = on_reconnect  # 재연결+재구독 완료 직후 1회 호출(outage_seconds: float)
 
@@ -68,6 +76,7 @@ class KiwoomWS:
         self._subscribed_realtime: dict[str, set[str]] = {}
         self._cond_keys_logged = False
         self._orderbook_keys_logged = False
+        self._program_keys_logged = False
 
         # REG 호출 직렬화 + 빈도 제한
         self._reg_lock = asyncio.Lock()
@@ -366,6 +375,8 @@ class KiwoomWS:
                 await self._dispatch_trade_item(item)
             elif item_type == TYPE_ORDERBOOK:
                 await self._dispatch_orderbook_item(item)
+            elif item_type == TYPE_PROGRAM:
+                await self._dispatch_program_item(item)
             else:
                 await self._dispatch_condition_item(item)
 
@@ -451,6 +462,47 @@ class KiwoomWS:
                 asyncio.create_task(asyncio.to_thread(self.on_orderbook, parsed))
         except Exception:
             logger.exception(f"on_orderbook 콜백 예외: {stock_code}")
+
+    async def _dispatch_program_item(self, item: dict):
+        """종목프로그램매매(0g) 파싱 (2026-07-31 신규).
+
+        FID 118/119/120/122/123/124는 장 시작부터의 **누적값**(다른 누적계열
+        FID들, 예: 13 누적거래량과 동일 관례)이라고 보고 그대로 전달한다 —
+        분 단위 순유입(델타)으로의 변환은 여기서 하지 않고
+        core/program_flow.ProgramFlowTracker.record_cumulative()에 위임한다
+        (그쪽이 종목별 마지막 누적값을 기억하고 있어야 델타를 낼 수 있어서
+        parsing 계층인 여기 둘 이유가 없음).
+
+        raw 키 로깅은 최초 1회만 — 여기 실려있는 실제 FID 구성을 확인해 이
+        타입 코드("0g")가 맞는지, FID 번호가 문서와 일치하는지 검증하는 용도.
+        0B/0D는 찍히는데 이게 안 찍히면 타입 코드부터 재확인할 것."""
+        if not self.on_program:
+            return
+        stock_code = (item.get("item") or "").lstrip("A").strip()
+        values = item.get("values") or {}
+
+        if not self._program_keys_logged:
+            logger.info(f"🔑 0g 프로그램매매 raw 키: {sorted(values.keys(), key=str)}")
+            self._program_keys_logged = True
+
+        parsed = {
+            "stock_code": stock_code,
+            "sell_qty_cum": self._parse_signed_int(values.get("118")),
+            "buy_qty_cum": self._parse_signed_int(values.get("119")),
+            "net_qty_cum": self._parse_signed_int(values.get("120")),
+            "sell_amt_cum": self._parse_signed_int(values.get("122")),
+            "buy_amt_cum": self._parse_signed_int(values.get("123")),
+            "net_amt_cum": self._parse_signed_int(values.get("124")),
+            "time": values.get("20", ""),
+            "raw": values,
+        }
+        try:
+            if asyncio.iscoroutinefunction(self.on_program):
+                asyncio.create_task(self.on_program(parsed))
+            else:
+                asyncio.create_task(asyncio.to_thread(self.on_program, parsed))
+        except Exception:
+            logger.exception(f"on_program 콜백 예외: {stock_code}")
 
     async def _dispatch_condition_item(self, item: dict):
         stock_code = (

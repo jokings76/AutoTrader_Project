@@ -98,6 +98,7 @@ class TradingBot:
             on_signal=self._on_signal,
             on_trade=self._on_trade,
             on_orderbook=self._on_orderbook,
+            on_program=self._on_program,
             on_disconnect=self._on_ws_disconnect,
             on_reconnect=self._on_ws_reconnect,
         )
@@ -206,7 +207,7 @@ class TradingBot:
 
             if code not in self._subscribed:
                 try:
-                    await self.ws.subscribe_realtime([code], ["0B", "0D"])
+                    await self.ws.subscribe_realtime([code], ["0B", "0D", "0g"])
                     self._subscribed.add(code)
                 except Exception:
                     logger.exception(f"[{code}] 스냅샷 실시간 구독 실패")
@@ -234,7 +235,7 @@ class TradingBot:
         if not batch:
             return
         try:
-            await self.ws.subscribe_realtime(batch, ["0B", "0D"])
+            await self.ws.subscribe_realtime(batch, ["0B", "0D", "0g"])
             self._subscribed.update(batch)
         except Exception:
             logger.exception(f"배치 구독 실패: {batch}")
@@ -365,6 +366,23 @@ class TradingBot:
             self.strategy_mgr.on_orderbook(parsed_orderbook)
         except Exception:
             logger.exception("on_orderbook 예외")
+
+    async def _on_program(self, parsed_program: dict):
+        """종목프로그램매매(0g) 콜백 — 매매 판단에는 미연결, 기록 전용 (2026-07-31).
+        REST 호출 없이 WS로 공짜로 들어오는 데이터라 여기서 바로 누적값을
+        program_flow에 넘긴다(델타 변환은 ProgramFlowTracker.record_cumulative가 처리)."""
+        try:
+            strat = self.strategy_mgr
+            if not strat or not getattr(strat, "program_flow", None):
+                return
+            code = parsed_program.get("stock_code")
+            net_amt = parsed_program.get("net_amt_cum")
+            if not code or net_amt is None:
+                return
+            name = strat._stock_names.get(code, code)
+            strat.program_flow.record_cumulative(code, net_amt, stock_name=name)
+        except Exception:
+            logger.exception("on_program 예외")
 
     async def task_strategy_tick(self):
         while not self._stop:
