@@ -256,9 +256,12 @@ def _format_report(trades: list, universe_count: int, skipped: int) -> str:
     lines.append("")
     lines.append("[종목별 내역]")
     for t in sorted(trades, key=lambda x: x["net_rate"], reverse=True):
+        buy_hhmm = f"{t['buy_time'][:2]}:{t['buy_time'][2:]}"
+        sell_hhmm = f"{t['sell_time'][:2]}:{t['sell_time'][2:]}"
         lines.append(
             f"  {t['stock_name']}({t['stock_code']}) [{t['sub_strategy']}] "
-            f"{t['buy_time']}→{t['sell_time']} {t['net_rate']*100:+.2f}% ({t['exit_reason']})"
+            f"{buy_hhmm}~{sell_hhmm} {t['buy_price']:,.0f}→{t['sell_price']:,.0f}원 "
+            f"{t['net_rate']*100:+.2f}% ({t['exit_reason']})"
         )
 
     return "\n".join(lines)

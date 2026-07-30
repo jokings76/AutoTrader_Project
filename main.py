@@ -322,7 +322,23 @@ class TradingBot:
                 self._known_hits.setdefault(str(cond_seq), set()).add(stock_code)
 
             # [추가] cond_seq를 이름으로 변환
-            cond_name = self.ws.condition_map.get(str(cond_seq), "기타")
+            cond_name = self.ws.condition_map.get(str(cond_seq), "")
+            if not cond_name:
+                # 키움 실시간 편입 payload엔 조건 seq가 없는 경우가 많다(실측:
+                # raw 키가 ['jmcode'] 하나뿐, 2026-07-23부터 여러 날 동일).
+                # 이때 "기타"로 뭉개면 조건별 시간 게이트(OTHER_COND_START)가
+                # 주도주상위 종목까지 09:20까지 잘못 지연시킨다 — 07-30 실전에서
+                # 09:01~09:20 매매가 통째로 멈춘 원인. 스냅샷/폴링으로 이미
+                # 축적된 _known_hits(seq -> 종목 set)에서 역으로 이 종목이 속한
+                # 조건식 이름을 복원한다. (2026-07-30)
+                matched = [
+                    name
+                    for seq, codes in self._known_hits.items()
+                    if stock_code in codes
+                    for name in [self.ws.condition_map.get(str(seq), "")]
+                    if name
+                ]
+                cond_name = "+".join(matched) if matched else "기타"
 
             try:
                 # [수정] cond_name을 추가로 전달
@@ -601,7 +617,14 @@ class TradingBot:
             await asyncio.sleep(10)
 
     async def task_auto_shutdown(self):
-        target_time = "15:20"
+        # 2026-07-27엔 daily_backtest(15:30 트리거)와 순서가 겹쳐서(15:20에 먼저
+        # 종료되면 백테스트가 못 돔) 통째로 비활성화했었는데, 그 뒤로 재활성화를
+        # 안 해서 2026-07-30 실전에서 장마감(15:15 강제청산) 이후에도 정기보고/
+        # WS재연결/조건재등록이 19:32까지 4시간 넘게 계속 돌아간 문제 발생.
+        # daily_backtest가 15:30에 트리거돼 보통 30~60초 안에 끝나는 걸 감안해
+        # 15:40으로 늦춰서 재활성화(2026-07-30) — 강제청산(15:15)과 백테스트
+        # 리포트(15:30) 둘 다 끝난 뒤에만 종료되도록.
+        target_time = "15:40"
         while not self._stop:
             now_str = datetime.now().strftime("%H:%M")
             if now_str >= target_time:
@@ -838,8 +861,7 @@ class TradingBot:
                 self.task_force_close_watcher(),
                 self.task_signal_watchdog(),
                 self.task_subscribe_flush(),
-                # self.task_auto_shutdown(),  # 2026-07-27 임시 비활성화 (백테스트가 15:30에
-                # 자체 실행돼야 해서, 15:20 자동종료와 충돌 — 재활성화 시 순서 조정 필요)
+                self.task_auto_shutdown(),  # 15:40으로 재활성화 (2026-07-30, 위 주석 참고)
                 self.task_stop_signal_watcher(),
                 self.task_closing_bet_scanner(),
                 self.task_slot_replacement(),

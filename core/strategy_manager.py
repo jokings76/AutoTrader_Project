@@ -523,7 +523,15 @@ class StrategyManager:
             return
 
         self._stock_names[stock_code] = stock_name
-        self._cond_names[stock_code] = cond_name
+        # 이미 실제 조건명이 기록돼 있으면 "기타"/"알수없음" 같은 부실한 값으로
+        # 덮어쓰지 않음 (2026-07-30). 실시간 WS 편입 이벤트(_on_signal)가 cond_seq를
+        # 못 읽어 "기타"로 넘어오는 경우가 있는데, 이게 초기 스냅샷이 이미 정확히
+        # 기록해둔 "주도주상위+..." 같은 값을 덮어써버리면 OTHER_COND_START(09:20)
+        # 게이트가 주도주상위 종목까지 잘못 지연시킴 — 오늘 실전에서 이 때문에
+        # SK이터닉스 등 9종목이 09:01~09:20 사이 18분간 평가 자체가 멈췄던 것 확인.
+        existing_cond = self._cond_names.get(stock_code)
+        if not existing_cond or existing_cond in ("기타", "알수없음"):
+            self._cond_names[stock_code] = cond_name
 
         # 거래대금 폭발 이력(explosion_scorer) 준비는 여기서 더 이상 안 함 —
         # 종가베팅 스캐너(main.py task_closing_bet_scanner, 14:50)에서만 쓰이는
@@ -620,14 +628,17 @@ class StrategyManager:
             ok, info = self.evaluate_pullback(candles, stock_code, obv_mom)
             self._record_watch_list(stock_code, stock_name, phase, info)
 
-            # 눌림 성립(1단계 통과) 즉시 체결강도 감시 시작 — 이후 재평가
-            # 사이클(watchlist_reentry)에서 강도 점수가 실제값을 갖도록.
-            # (2026-07-29 — 기존엔 아래 "즉시매수 실패" 케이스에서만 시작해서
-            # 최초 평가는 항상 강도=0으로 채점되던 구조적 문제 수정. 실측:
-            # 오늘 점수단계 277건 중 268건(97%)이 강도 0.0/2.0이었음.)
+            # 체결강도 FSM(1B) 감시 시작 — Pullback 시간대에 들어온 후보는 눌림
+            # 성립 여부와 무관하게 전부 감시 대상으로 넣는다.
+            # 위치는 점수판정 앞(2026-07-29 변경 유지) — 이후 재평가 사이클에서
+            # 강도 점수가 실제값을 갖도록.
+            # 단, "눌림 성립(setup_ok)"을 감시 시작 조건으로 걸었던 것은 되돌림
+            # (2026-07-30): 1B는 눌림목 패턴이 아니라 매도벽 소멸을 보는 독립
+            # 전략이라 눌림 성립을 전제할 이유가 없고, 실제로 이 조건 때문에
+            # 07-30 주도주 9종목이 전부 "눌림 미성립(되돌림 4~9%)"으로 감시조차
+            # 시작되지 않아 1B 매매가 27건(07-29) -> 7건으로 급감했음.
             if (
-                info.get("setup_ok")
-                and self.phase1b
+                self.phase1b
                 and self.can_buy_phase1b()
                 and not self.phase1b.is_watching(stock_code)
             ):
@@ -863,10 +874,14 @@ class StrategyManager:
         if not is_pass:
             return False, {"reason": "체결강도 지속 미달", "score": 0.0}
 
-        # 3. 점수 계산 (기존 score 시스템 활용)
-        ok, info = self.evaluate_phase1(candles, stock_code)
-        if not ok:
-            return False, {"reason": "기본 점수 미달", "score": 0.0}
+        # 3. 점수 계산 (기존 score 시스템 활용) — evaluate_phase1 자체의 ok는
+        # 안 씀(2026-07-30 수정). self.score_cfg.threshold_ratio(0.75, 12점 만점
+        # 9.0점)가 바로 아래 5번의 진짜 시간대별 커트라인(오전 6.5/10:30이후 8.5)
+        # 보다 항상 더 높아서, ok로 먼저 거르면 "10:30부터 빡빡하게"라는 설계가
+        # 하루 종일 죽은 코드가 됨(9.0을 넘겨야 여기까지 오는데 9.0은 6.5·8.5
+        # 둘 다보다 크므로). base_score는 점수만 뽑아 쓰고 최종 판정은 5번의
+        # required_score 하나로 통일.
+        _, info = self.evaluate_phase1(candles, stock_code)
 
         base_score = info.get("score", 5.0)
 
