@@ -138,6 +138,19 @@ LEADING_MAX_SLOTS = 3
 LEADING_STRENGTH_MIN = 100.0
 LEADING_SUSTAIN = timedelta(minutes=2)
 
+# ── 1B 반등확증 (2026-07-30 신규) ──────────────────────────────
+# 1B FSM은 "60초 내 -1.5% 하락"을 진입 요건으로 요구하는 역추세 전략인데,
+# 매도벽 소실 '즉시' 매수해서 하락 중 반복 진입(칼날잡기)이 발생했음.
+# 07-29+07-30 실거래 37건의 진입 후 분봉 경로를 재생해 확증규칙 10종을
+# 백테스트한 결과, "신호봉 고가를 1분봉 종가로 돌파"가 가장 강건했음:
+#   진입 37 -> 14건, 건당 평균 -1.33% -> -0.33%, 승률 29.7% -> 50.0%
+#   (07-29 -1.44%->-0.27%, 07-30 -0.83%->-0.48% — 양일 모두 개선)
+# 손절/익절 표면도 매끄러운 단조 형태로 과최적화 징후가 없었고, 같은 봉에서
+# 손절/익절 동시 도달 시 손절 우선으로 계산한 보수적 가정이었음.
+# 경제적 의미: "떨어진 자리를 회복해야 산다" — 반등을 가격으로 확인.
+PHASE1B_CONFIRM_WAIT = timedelta(minutes=5)   # 이 시간 내 미돌파면 매수 포기
+PHASE1B_CONFIRM_CHECK_SEC = 55                # 1분봉 종가 기준이라 분당 1회만 확인(REST 절약)
+
 # MDD 일손실 차단
 DAILY_LOSS_LIMIT = COMMON["mdd_daily_loss_limit"]
 
@@ -203,6 +216,9 @@ class StrategyManager:
         self._l1_max_sustain_sec = 0.0          # 오늘 도달한 최장 연속 유지 시간
         self._l1_reset_logged_at: dict[str, datetime] = {}  # 리셋 로그 throttle
         self._l1_block_logged_at: dict[str, datetime] = {}  # 차단 로그 throttle
+
+        # 1B 반등확증 대기 {code: {ref_high, since, last_check}} (2026-07-30)
+        self._1b_confirm: dict[str, dict] = {}
 
         self.sell_fail_count: dict[str, int] = {}
         self.sell_blocked: set[str] = set()
@@ -367,6 +383,7 @@ class StrategyManager:
                 if code not in self.holdings:
                     self.phase1b.stop_watching(code)
 
+        self._check_1b_confirmations()
         self.check_timeouts()
 
     # ========================================
@@ -840,25 +857,109 @@ class StrategyManager:
                 self._try_phase1b_buy(code, now)
 
     def _try_phase1b_buy(self, stock_code: str, now: float = None):
+        """FSM이 READY_TO_BUY 도달 → 즉시 매수하지 않고 '반등확증' 대기 등록.
+        (2026-07-30 변경, 근거는 PHASE1B_CONFIRM_WAIT 상수 주석 참고)"""
+        if stock_code in self.holdings or stock_code in self.pending:
+            return
+        if stock_code in self._1b_confirm:
+            return  # 이미 확증 대기 중
         if not self.can_buy_phase1b():
             logger.info("[%s] Phase 1B READY but 슬롯 부족", stock_code)
-            return
-        if stock_code in self.holdings or stock_code in self.pending:
             return
         blocked, reason = self._is_rebuy_blocked(stock_code)
         if blocked:
             logger.info("[%s] Phase 1B 매수 차단: %s", stock_code, reason)
             return
 
-        current_price = self.phase1b.trade_flow.get_latest_price(stock_code)
-        if not current_price:
-            logger.warning("[%s] Phase 1B 매수 시도 but 가격 없음", stock_code)
+        # 확증 기준선 = 신호 시점 1분봉의 고가("떨어진 자리")
+        try:
+            candles = self.api.get_minute_candles(stock_code, interval=1, count=2)
+        except Exception as e:
+            logger.warning("[%s] 1B 확증 기준선 조회 실패 → 매수 보류: %s", stock_code, e)
+            return
+        if not candles:
+            logger.warning("[%s] 1B 확증 기준선 없음(분봉 0개) → 매수 보류", stock_code)
+            return
+        ref_high = float(candles[0].get("high") or 0)
+        if ref_high <= 0:
+            logger.warning("[%s] 1B 확증 기준선 이상(high=%s) → 매수 보류", stock_code, ref_high)
             return
 
-        stock_name = self._stock_names.get(stock_code, stock_code)
-        info = {"current_price": current_price, "volume_ratio": 0.0}
-        self._execute_buy(stock_code, stock_name, phase=1, info=info, sub_strategy="1B")
-        self.phase1b.stop_watching(stock_code)
+        now_dt = self._now()
+        self._1b_confirm[stock_code] = {
+            "ref_high": ref_high,
+            "since": now_dt,
+            "last_check": now_dt,
+        }
+        logger.info(
+            "[%s] 1B 반등확증 대기 시작 — 기준선(신호봉 고가) %s원 종가돌파 필요, %.0f분 내",
+            stock_code, f"{ref_high:,.0f}", PHASE1B_CONFIRM_WAIT.total_seconds() / 60,
+        )
+
+    def _check_1b_confirmations(self):
+        """반등확증 대기 종목을 '완성된 1분봉 종가'로 확인 (2026-07-30).
+        tick()에서 주기 호출 — FSM이 READY 상태를 벗어나도 계속 추적되어야 하므로
+        _try_phase1b_buy(틱 콜백)가 아니라 여기서 확인한다."""
+        if not self._1b_confirm:
+            return
+        now_dt = self._now()
+        for code in list(self._1b_confirm.keys()):
+            st = self._1b_confirm[code]
+
+            if code in self.holdings or code in self.pending:
+                self._1b_confirm.pop(code, None)
+                continue
+
+            if now_dt - st["since"] >= PHASE1B_CONFIRM_WAIT:
+                self._1b_confirm.pop(code, None)
+                logger.info(
+                    "[%s] 1B 반등확증 실패 — %.0f분 내 기준선 %s원 미돌파, 매수 포기",
+                    code, PHASE1B_CONFIRM_WAIT.total_seconds() / 60,
+                    f"{st['ref_high']:,.0f}",
+                )
+                continue
+
+            if (now_dt - st["last_check"]).total_seconds() < PHASE1B_CONFIRM_CHECK_SEC:
+                continue
+            st["last_check"] = now_dt
+
+            try:
+                candles = self.api.get_minute_candles(code, interval=1, count=2)
+            except Exception as e:
+                logger.warning("[%s] 1B 확증 확인 실패(다음 주기 재시도): %s", code, e)
+                continue
+            if not candles or len(candles) < 2:
+                continue
+
+            # [0]은 진행 중인 봉이라 종가가 확정 안 됨 → [1](마지막 완성봉) 사용
+            closed = candles[1]
+            close_px = float(closed.get("close") or 0)
+            if close_px <= st["ref_high"]:
+                continue
+
+            if not self.can_buy_phase1b():
+                logger.info("[%s] 1B 확증됐으나 슬롯 부족 — 대기 유지", code)
+                continue
+            blocked, reason = self._is_rebuy_blocked(code)
+            if blocked:
+                self._1b_confirm.pop(code, None)
+                logger.info("[%s] 1B 확증됐으나 매수 차단: %s", code, reason)
+                continue
+
+            current_price = (
+                self.phase1b.trade_flow.get_latest_price(code) if self.phase1b else None
+            ) or close_px
+            self._1b_confirm.pop(code, None)
+            logger.info(
+                "[%s] 1B 반등확증 성립 — 완성봉 종가 %s원 > 기준선 %s원 (%.0f초 대기)",
+                code, f"{close_px:,.0f}", f"{st['ref_high']:,.0f}",
+                (now_dt - st["since"]).total_seconds(),
+            )
+            stock_name = self._stock_names.get(code, code)
+            info = {"current_price": current_price, "volume_ratio": 0.0}
+            self._execute_buy(code, stock_name, phase=1, info=info, sub_strategy="1B")
+            if self.phase1b:
+                self.phase1b.stop_watching(code)
 
     # ========================================
     # 진입 평가 (점수 기반 — scoring.py 위임)
