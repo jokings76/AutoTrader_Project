@@ -117,6 +117,16 @@ TRAIL_ACTIVATE = EXIT_POLICY["default"]["trail_activate"]
 TRAIL_GIVEBACK = EXIT_POLICY["default"]["trail_giveback"]
 HOLDING_TIMEOUT = timedelta(minutes=EXIT_POLICY["default"]["holding_timeout_min"])
 
+# 전략/시간대별 익절 캡 (2026-07-30 사용자 지정) — 손절(-3%)은 전부 그대로 유지.
+# 1B/Pullback은 짧은 반등을 노리는 전략이라 기본 2.5%까지 기다리다 되돌림에
+# 물리는 경우가 많았고, 개장 직후 10분은 변동성이 커서 빠른 확정이 유리하다는
+# 판단. 익절 캡은 "매수 시점"으로 결정해 포지션 보유 중에 정책이 바뀌지 않게 한다
+# (09:09에 산 종목이 09:11에 기준이 올라가면 판단이 흔들리므로).
+TAKE_PROFIT_CAP_1B = 0.015
+TAKE_PROFIT_CAP_PULLBACK = 0.015
+TAKE_PROFIT_CAP_EARLY = 0.015
+EARLY_WINDOW_END = time(9, 10)  # GROUP_A_START~이 시각 사이 매수분은 1.5%
+
 # 매도 실패 & 쿨다운 & 워밍업
 MAX_SELL_FAIL = 3
 REBUY_COOLDOWN = timedelta(minutes=COMMON["rebuy_cooldown_min"])
@@ -1531,8 +1541,12 @@ class StrategyManager:
                             f"({give:+.2f}%, 순 {net_rate*100:+.2f}%)"
                         )
             else:
-                if net_rate >= TAKE_PROFIT_CAP:
-                    exit_reason = f"익절 캡 순+{net_rate*100:.2f}% (가격 +{gross_rate*100:.2f}%)"
+                cap, cap_label = self._take_profit_cap(pos)
+                if net_rate >= cap:
+                    exit_reason = (
+                        f"익절 캡({cap_label} {cap*100:.1f}%) 순+{net_rate*100:.2f}% "
+                        f"(가격 +{gross_rate*100:.2f}%)"
+                    )
 
         # 3) 시간정리 30분
         if exit_reason is None:
@@ -1541,6 +1555,28 @@ class StrategyManager:
 
         if exit_reason:
             self._execute_sell(stock_code, current_price, exit_reason)
+
+    @staticmethod
+    def _take_profit_cap(pos: dict) -> tuple[float, str]:
+        """포지션별 익절 캡과 표시용 라벨 (2026-07-30 신규).
+        매수 시점 기준으로 고정 — 보유 중에 기준이 바뀌면 판단이 흔들리므로.
+        1L은 트레일링을 쓰므로 이 함수를 타지 않는다(호출부에서 분기).
+        개장초반(09:01~09:10) 매수분은 전략보다 우선해서 1.5% 적용."""
+        buy_time = pos.get("buy_time")
+        if buy_time is not None:
+            try:
+                bt = buy_time.time()
+                if GROUP_A_START <= bt < EARLY_WINDOW_END:
+                    return TAKE_PROFIT_CAP_EARLY, "개장초반"
+            except AttributeError:
+                pass  # buy_time 형식이 예상과 다르면 전략별 기준으로 넘어감
+
+        sub = pos.get("sub_strategy")
+        if sub == "1B":
+            return TAKE_PROFIT_CAP_1B, "1B"
+        if sub == "1A_눌림":
+            return TAKE_PROFIT_CAP_PULLBACK, "눌림"
+        return TAKE_PROFIT_CAP, "기본"
 
     def _execute_sell(self, stock_code, current_price, exit_reason):
         pos = self.holdings.get(stock_code)

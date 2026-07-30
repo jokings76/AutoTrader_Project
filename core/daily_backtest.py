@@ -30,6 +30,9 @@ from core.strategy.vwap_strategy import VWAPStrategy, calc_vwap
 from core.strategy_manager import (
     STOP_LOSS_RATE,
     TAKE_PROFIT_CAP,
+    TAKE_PROFIT_CAP_PULLBACK,
+    TAKE_PROFIT_CAP_EARLY,
+    EARLY_WINDOW_END,
     HOLDING_TIMEOUT,
     ROUND_TRIP_COST,
     VOLUME_LOOKBACK,
@@ -44,6 +47,7 @@ GROUP_A_START_HHMM = "0901"
 PULLBACK_END_HHMM = "1030"
 PHASE1A_TIGHTEN_HHMM = "1030"
 PHASE1A_END_HHMM = "1450"
+EARLY_WINDOW_END_HHMM = EARLY_WINDOW_END.strftime("%H%M")  # 개장초반 익절 1.5% 경계
 
 EXIT_CATEGORY_ORDER = ["손절", "익절", "시간정리", "강제청산"]
 
@@ -135,6 +139,16 @@ def _entry_signal(candles: list, idx: int, vwap_strategy: VWAPStrategy):
     return None
 
 
+def _take_profit_cap(position: dict) -> float:
+    """라이브 StrategyManager._take_profit_cap과 동일 규칙 (2026-07-30).
+    수치가 갈라지면 백테스트가 라이브를 재현하지 못하므로 함께 갱신할 것."""
+    if position.get("buy_hhmm", "") < EARLY_WINDOW_END_HHMM:
+        return TAKE_PROFIT_CAP_EARLY
+    if position.get("sub_strategy") == "1A_눌림":
+        return TAKE_PROFIT_CAP_PULLBACK
+    return TAKE_PROFIT_CAP
+
+
 def _exit_signal(position: dict, current_price: float, hhmm: str, minutes_held: float):
     """라이브 core/strategy_manager.py의 청산 규칙(손절/익절캡/시간정리)을 그대로 재현.
     트레일링은 1L 전용인데 1L은 백테스트에서 재현 안 하므로 항상 flat 익절캡."""
@@ -148,7 +162,7 @@ def _exit_signal(position: dict, current_price: float, hhmm: str, minutes_held: 
     if gross_rate <= STOP_LOSS_RATE:
         return "손절", net_rate
 
-    if net_rate >= TAKE_PROFIT_CAP:
+    if net_rate >= _take_profit_cap(position):
         return "익절", net_rate
 
     if minutes_held >= HOLDING_TIMEOUT.total_seconds() / 60:
