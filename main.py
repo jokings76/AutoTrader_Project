@@ -758,6 +758,44 @@ class TradingBot:
             except Exception as e:
                 logger.exception("종가베팅 스캔 중 에러: %s", e)
 
+    async def task_tick_archive(self):
+        """매일 09:20에 1회, 오늘 조건검색에 걸린 종목들의 개장초반(09:00~09:15)
+        틱을 아카이빙 — 1A(체결강도 단독) 백테스트용 데이터 축적 (2026-07-31 신규).
+        반드시 09:20 직후에 실행해야 한다 — ka10079가 '현재 시각'에서 과거로
+        페이징하는 구조라, 이 태스크가 늦게 돌수록(예: 장마감 후) 09:00~09:15
+        구간까지 내려가는 데 필요한 REST 호출이 급격히 늘어난다(실측: 종목당
+        최대 185콜까지도 나옴, core/tick_archive.py 모듈 docstring 참고).
+        07-31(주말 전)은 소급 수집이 무의미하다고 판단해 건너뛰고 다음 거래일
+        (08-03 월요일)부터 이 태스크로 자동 축적 시작."""
+        done_date = None
+        trigger_h, trigger_m = 9, 20
+        while not self._stop:
+            await asyncio.sleep(20)
+            now = datetime.now()
+            if now.hour != trigger_h or now.minute < trigger_m:
+                continue
+            if done_date == now.date():
+                continue
+
+            done_date = now.date()
+            try:
+                from core.daily_backtest import _get_today_universe
+                from core.tick_archive import archive_universe
+
+                universe = _get_today_universe()
+                codes = [row["stock_code"] for row in universe]
+                if codes:
+                    logger.info("[틱아카이브] %d종목 개장초반 틱 수집 시작", len(codes))
+                    results = await asyncio.to_thread(
+                        archive_universe, self.rest.host, self.token, codes
+                    )
+                    ok = sum(1 for v in results.values() if v > 0)
+                    logger.info("[틱아카이브] 완료: %d/%d종목 성공", ok, len(codes))
+                else:
+                    logger.info("[틱아카이브] 오늘 신호 종목 없음 — 스킵")
+            except Exception:
+                logger.exception("틱 아카이브 실행 중 에러")
+
     async def task_daily_backtest(self):
         """매일 15:30에 1회, 오늘 신호 종목(watch_list_log+trades) 대상으로
         라이브 진입/청산 로직을 분봉 기준 재현해 텔레그램(오토트레이더)으로 전송."""
@@ -929,6 +967,7 @@ class TradingBot:
                 self.task_watchlist_reentry(),
                 self.task_daily_backtest(),
                 self.task_program_flow(),
+                self.task_tick_archive(),
                 # self.task_condition_snapshot_poll(),
             )
         except asyncio.CancelledError:

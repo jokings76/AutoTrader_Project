@@ -3,17 +3,26 @@
 대상으로, 라이브와 동일한 진입 스코어링 함수(core/strategy/scoring.py, vwap_strategy.py)와
 청산 정책 상수(core/strategy_manager.py)를 그대로 재사용해 분봉 기준으로 매매를 재현한다.
 (2026-07-27: 1S/1N/Phase2/Phase3 삭제된 신규 전략 구조에 맞춰 갱신 — 1A/Pullback만 재현)
+(2026-07-31: 1A가 체결강도 단독(틱 필요) 방식으로 전면 교체되며 재현 대상에서
+제외 — 아래 "Pullback만 재현" 참고, 1L도 이날 주석처리되어 이제 라이브에서도
+안 돎)
 
 한계 (심플하게 유지하기 위한 의도적 단순화):
-  - 1B(체결강도 FSM), 1L(주도주 실시간강도 2분지속)는 틱/호가 데이터가 없으면 재현 불가 → 제외.
+  - **1A/1B/1L 전부 제외, Pullback만 재현**(2026-07-31 갱신). 1A가
+    evaluate_1a_leading_strength(체결강도 100 이상 1분 유지)로 바뀌면서
+    1B(체결강도 FSM)/1L(주도주 실시간강도 지속)과 같은 이유(틱 단위 체결강도
+    데이터 필요, 1분봉만으로 재현 불가)로 제외 대상에 합류했다. 1L은 이날
+    라이브에서도 주석처리되어(1A와 설계 중복 판단) 실제로 안 도는 상태.
   - 체결강도(current_strength)는 분봉만으로 알 수 없어 중립값 100.0 고정
-    (라이브에서 phase1b 없을 때 쓰는 fallback과 동일). 1A의 체결강도 지속 필터, 지수
-    방어 CAUTION 가산점도 같은 이유로 재현하지 않고 시간대 기준 점수 컷만 반영.
+    (라이브에서 phase1b 없을 때 쓰는 fallback과 동일). 지수 방어 CAUTION
+    가산점도 같은 이유로 재현하지 않음(단, 그 가산점을 쓰던 옛 1A 경로 자체가
+    이제 안 돎).
   - 종목별 독립 시뮬레이션 (슬롯/동시보유 한도 미반영) — 진입/청산 규칙 자체의
     유효성을 보는 게 목적이라 자금 배분 제약은 넣지 않음.
 
 실행: 이 모듈은 main.py의 태스크에서 run_daily_backtest(rest_api)로 호출됨.
 """
+import re
 from datetime import date, time as dtime
 from collections import defaultdict
 
@@ -38,6 +47,10 @@ from core.strategy_manager import (
     VOLUME_LOOKBACK,
     PHASE1A_SCORE_NORMAL,
     PHASE1A_SCORE_TIGHT,
+    IMMEDIATE_COND_NAMES,
+    OTHER_COND_START,
+    MAX_BUYS_PER_STOCK,
+    REBUY_COOLDOWN,
 )
 
 NEUTRAL_STRENGTH = 100.0  # 틱데이터 없어 체결강도는 중립값 고정
@@ -48,6 +61,8 @@ PULLBACK_END_HHMM = "1030"
 PHASE1A_TIGHTEN_HHMM = "1030"
 PHASE1A_END_HHMM = "1450"
 EARLY_WINDOW_END_HHMM = EARLY_WINDOW_END.strftime("%H%M")  # 개장초반 익절 1.5% 경계
+OTHER_COND_START_HHMM = OTHER_COND_START.strftime("%H%M")  # 09:20 — 조건검색식별 지연평가 경계
+PULLBACK_ONLY_SOURCE = "눌림목자동"  # core/strategy_manager.py의 pullback_only_source 판정과 동일
 
 EXIT_CATEGORY_ORDER = ["손절", "익절", "시간정리", "강제청산"]
 
@@ -84,48 +99,106 @@ def _volume_ratio(sub: list) -> float:
 
 
 def _get_today_universe() -> list:
-    """오늘 watch_list_log + trades에 기록된 종목(그날 실제 신호/매매 종목) 유니버스."""
+    """오늘 watch_list_log + trades에 기록된 종목(그날 실제 신호/매매 종목) 유니버스.
+
+    각 종목이 어떤 조건검색식(주도주상위/눌림목자동/돌파자동매매용)으로
+    편입됐는지(cond_name)도 함께 가져온다(2026-07-31) — 라이브의
+    on_condition_hit/_evaluate_1a_pullback_entry가 cond_name에 따라 다른
+    경로(skip_setup_check, 09:20 지연게이트)를 타는데, 기존엔 이 출처 정보가
+    백테스트에 전혀 없어서 재현이 불가능했다.
+
+    watch_list_log.cond_name이 우선(매수 안 된 후보도 포함, 최초 평가 시점
+    스냅샷) — 없으면 trades.entry_reason의 "[조건명] ..." 프리픽스에서 파싱
+    (컬럼 추가 이전 과거 데이터 또는 watch_list_log 기록 실패 케이스 대비)."""
     today = date.today()
     try:
         with get_cursor() as cur:
             cur.execute(
                 """
-                SELECT DISTINCT stock_code, stock_name FROM watch_list_log WHERE trade_date = %s
-                UNION
-                SELECT DISTINCT stock_code, stock_name FROM trades WHERE trade_date = %s
+                SELECT DISTINCT ON (stock_code) stock_code, stock_name, cond_name
+                FROM watch_list_log WHERE trade_date = %s
+                ORDER BY stock_code, added_time
                 """,
-                (today, today),
+                (today,),
             )
-            return cur.fetchall()
+            wl_rows = {r["stock_code"]: r for r in cur.fetchall()}
+
+            cur.execute(
+                """
+                SELECT DISTINCT ON (stock_code) stock_code, stock_name, entry_reason
+                FROM trades WHERE trade_date = %s
+                ORDER BY stock_code, buy_time
+                """,
+                (today,),
+            )
+            tr_rows = {r["stock_code"]: r for r in cur.fetchall()}
     except Exception as e:
         logger.error(f"❌ [백테스트] 오늘 종목 유니버스 조회 실패: {e}")
         return []
 
+    universe = []
+    for code in set(wl_rows) | set(tr_rows):
+        wl = wl_rows.get(code) or {}
+        tr = tr_rows.get(code) or {}
+        stock_name = wl.get("stock_name") or tr.get("stock_name") or code
+        cond_name = wl.get("cond_name") or ""
+        if not cond_name and tr.get("entry_reason"):
+            m = re.match(r"^\[(.+?)\]", tr["entry_reason"])
+            if m:
+                cond_name = m.group(1)
+        universe.append(
+            {"stock_code": code, "stock_name": stock_name, "cond_name": cond_name}
+        )
+    return universe
 
-def _entry_signal(candles: list, idx: int, vwap_strategy: VWAPStrategy):
+
+def _entry_signal(candles: list, idx: int, vwap_strategy: VWAPStrategy, cond_name: str = ""):
     """idx 시점(candles[idx]=그 시점 현재봉)에서 서브전략별 진입 판정.
-    반환: (sub_strategy, info) 또는 None. 1A/Pullback만 재현 (1B/1L은 틱데이터 필요해 제외)."""
+    반환: (sub_strategy, info) 또는 None. **Pullback만 재현** (2026-07-31 변경).
+
+    [1A 재현 중단, 2026-07-31] 1A가 evaluate_1a_leading_strength(체결강도
+    100 이상 1분 유지 단독)로 전면 교체되면서, 1A도 이제 1B/1L과 같은 이유
+    (틱 단위 체결강도 데이터 필요, 1분봉만으로 재현 불가)로 백테스트 대상에서
+    제외한다. 아래 옛 1A 로직(거래량증가지속+score_phase1)은 삭제하지 않고
+    주석으로 남겨둠 — 라이브가 다시 옛 방식으로 돌아가면 이 블록도 되살릴 것.
+
+    cond_name 기반 라우팅(2026-07-31) — core/strategy_manager.py의
+    _evaluate_1a_pullback_entry(on_condition_hit 경로)와 동일 규칙:
+    ① 주도주상위/눌림목자동(IMMEDIATE_COND_NAMES) 외 조건식은 09:20 이전 평가 자체를 안 함.
+    ② skip_setup_check=True를 전 소스에 적용(2026-07-31) — 기존엔 눌림목자동
+       단독 소스만 _pullback_setup(로컬 10분 되돌림 재검증)을 건너뛰었는데,
+       라이브가 소스 무관 전면 적용으로 바뀌어 백테스트도 동일하게 맞춤."""
     sub = candles[idx:]
     if len(sub) < 60:
         return None
     hhmm = _hhmm(sub[0])
     if not (GROUP_A_START_HHMM <= hhmm < PHASE1A_END_HHMM):
         return None
+
+    if not any(n in cond_name for n in IMMEDIATE_COND_NAMES) and hhmm < OTHER_COND_START_HHMM:
+        return None
+
     vol_ratio = _volume_ratio(sub)
 
-    # 1A: 거래량증가지속 + score_phase1, 10:30부터 점수 커트라인 상향
-    if is_volume_increasing_streak(sub):
-        ok, info = score_phase1(sub, vol_ratio, NEUTRAL_STRENGTH, PHASE1A_CFG)
-        if ok:
-            required = (
-                PHASE1A_SCORE_TIGHT if hhmm >= PHASE1A_TIGHTEN_HHMM else PHASE1A_SCORE_NORMAL
-            )
-            if info.get("score", 0) >= required:
-                return "1A", info
+    # [주석으로 보류, 2026-07-31] 구 1A(거래량증가지속+score_phase1) — 라이브가
+    # evaluate_1a_leading_strength(체결강도 단독, 틱 필요)로 대체되며 더 이상
+    # 이 분봉 기반 재현과 대응되지 않음. 삭제하지 않고 보류만 함.
+    # pullback_only_source = cond_name == PULLBACK_ONLY_SOURCE
+    # if not pullback_only_source and is_volume_increasing_streak(sub):
+    #     ok, info = score_phase1(sub, vol_ratio, NEUTRAL_STRENGTH, PHASE1A_CFG)
+    #     if ok:
+    #         required = (
+    #             PHASE1A_SCORE_TIGHT if hhmm >= PHASE1A_TIGHTEN_HHMM else PHASE1A_SCORE_NORMAL
+    #         )
+    #         if info.get("score", 0) >= required:
+    #             return "1A", info
 
     # Pullback: 09:01~10:30, 눌림목 반등 점수 + VWAP AND
     if hhmm < PULLBACK_END_HHMM:
-        ok, info = score_pullback(sub, vol_ratio, NEUTRAL_STRENGTH, PULLBACK_CFG)
+        ok, info = score_pullback(
+            sub, vol_ratio, NEUTRAL_STRENGTH, PULLBACK_CFG,
+            skip_setup_check=True,
+        )
         if ok:
             vwap = calc_vwap(sub)
             vr = vwap_strategy.evaluate(
@@ -174,10 +247,29 @@ def _exit_signal(position: dict, current_price: float, hhmm: str, minutes_held: 
     return None, net_rate
 
 
-def _simulate_stock(stock_code: str, stock_name: str, candles: list, vwap_strategy: VWAPStrategy) -> list:
-    """한 종목의 하루치 분봉을 순회하며 진입->청산 1회 재현 (재진입 없음, 심플 유지)."""
+def _simulate_stock(
+    stock_code: str, stock_name: str, candles: list, vwap_strategy: VWAPStrategy,
+    cond_name: str = "",
+) -> list:
+    """한 종목의 하루치 분봉을 순회하며 진입->청산을 재현.
+
+    재진입 규칙 재현(2026-07-31 수정) — 기존 주석은 "재진입 없음"이었지만
+    실제 루프는 청산 후에도 계속 다음 진입을 탐색해 하루 여러 번 매매될 수
+    있었고, 그러면서도 라이브의 재진입 제약(쿨다운/손실차단/횟수상한)은
+    전혀 반영하지 않아 주석·라이브 둘 다와 어긋나 있었다(예: 씨피시스템이
+    하루 4번 매매되는 식으로 과대재현). core/strategy_manager.py._is_rebuy_blocked와
+    동일한 3개 규칙을 그대로 재현한다:
+      ① 손실 청산(net_rate<0)은 사유(손절/시간정리/강제청산 등) 불문 당일
+         재매수 영구 차단
+      ② 종목당 하루 최대 MAX_BUYS_PER_STOCK(3)회 (최초 1 + 재매수 2)
+      ③ 매도 후 REBUY_COOLDOWN(3분) 이내 재매수 금지 (①에 안 걸린 익절만 해당)
+    """
     trades = []
     position = None
+    stoploss_blocked = False   # ① 손실 청산 이후 당일 재매수 영구 차단
+    buy_count = 0              # ② 당일 매수 횟수 (최초 1 + 재매수 2 = 상한 3)
+    sold_at_idx = None         # ③ 마지막 매도 시점 idx (쿨다운 계산용)
+    cooldown_min = REBUY_COOLDOWN.total_seconds() / 60
 
     # run_daily_backtest이 count=FETCH_COUNT(450)로 당겨오는 캔들엔 항상 전일
     # 오후분이 섞여 있는데(하루 거래시간이 390분뿐이라 450개를 채우려면 전일로
@@ -198,17 +290,24 @@ def _simulate_stock(stock_code: str, stock_name: str, candles: list, vwap_strate
             break
 
         if position is None:
-            sig = _entry_signal(candles, idx, vwap_strategy)
-            if sig:
-                sub_strategy, info = sig
-                position = {
-                    "sub_strategy": sub_strategy,
-                    "buy_price": cur["close"],
-                    "buy_hhmm": hhmm,
-                    "buy_idx": idx,
-                    "highest_price": cur["close"],
-                    "info": info,
-                }
+            can_reenter = (
+                not stoploss_blocked
+                and buy_count < MAX_BUYS_PER_STOCK
+                and (sold_at_idx is None or (sold_at_idx - idx) >= cooldown_min)
+            )
+            if can_reenter:
+                sig = _entry_signal(candles, idx, vwap_strategy, cond_name)
+                if sig:
+                    sub_strategy, info = sig
+                    buy_count += 1
+                    position = {
+                        "sub_strategy": sub_strategy,
+                        "buy_price": cur["close"],
+                        "buy_hhmm": hhmm,
+                        "buy_idx": idx,
+                        "highest_price": cur["close"],
+                        "info": info,
+                    }
         else:
             minutes_held = position["buy_idx"] - idx  # 1분봉이므로 인덱스 차 = 경과분
             reason, net_rate = _exit_signal(position, cur["close"], hhmm, minutes_held)
@@ -217,6 +316,7 @@ def _simulate_stock(stock_code: str, stock_name: str, candles: list, vwap_strate
                     {
                         "stock_code": stock_code,
                         "stock_name": stock_name,
+                        "cond_name": cond_name or "미상",
                         "sub_strategy": position["sub_strategy"],
                         "buy_price": position["buy_price"],
                         "buy_time": position["buy_hhmm"],
@@ -226,6 +326,9 @@ def _simulate_stock(stock_code: str, stock_name: str, candles: list, vwap_strate
                         "net_rate": net_rate,
                     }
                 )
+                if net_rate < 0:
+                    stoploss_blocked = True
+                sold_at_idx = idx
                 position = None
 
     return trades
@@ -267,16 +370,38 @@ def _format_report(trades: list, universe_count: int, skipped: int) -> str:
         )
         lines.append(f"  {sub}: {n}건, 승률 {w/n*100:.0f}%, 평균 {avg:+.2f}% ({reason_str})")
 
+    # 조건검색식별 성과 (2026-07-31 신규) — "검색식과 로직이 잘 맞았는지"를
+    # 직접 확인하기 위한 구간. cond_name은 최초 평가 시점 스냅샷(watch_list_log)
+    # 또는 trades.entry_reason 파싱 값 — 컬럼 추가 이전 종목은 "미상"으로 표시.
+    lines.append("")
+    lines.append("[조건검색식별 성과]")
+    by_cond = defaultdict(list)
+    for t in trades:
+        by_cond[t.get("cond_name", "미상")].append(t)
+    for cond, ts in sorted(by_cond.items()):
+        n = len(ts)
+        w = sum(1 for t in ts if t["net_rate"] > 0)
+        avg = sum(t["net_rate"] for t in ts) / n * 100
+        lines.append(f"  {cond}: {n}건, 승률 {w/n*100:.0f}%, 평균 {avg:+.2f}%")
+
     lines.append("")
     lines.append("[종목별 내역]")
     for t in sorted(trades, key=lambda x: x["net_rate"], reverse=True):
         buy_hhmm = f"{t['buy_time'][:2]}:{t['buy_time'][2:]}"
         sell_hhmm = f"{t['sell_time'][:2]}:{t['sell_time'][2:]}"
         lines.append(
-            f"  {t['stock_name']}({t['stock_code']}) [{t['sub_strategy']}] "
+            f"  {t['stock_name']}({t['stock_code']}) [{t['sub_strategy']}/{t.get('cond_name', '미상')}] "
             f"{buy_hhmm}~{sell_hhmm} {t['buy_price']:,.0f}→{t['sell_price']:,.0f}원 "
             f"{t['net_rate']*100:+.2f}% ({t['exit_reason']})"
         )
+
+    lines.append("")
+    lines.append(
+        "⚠️ 한계: 체결강도/OBV는 틱데이터 없어 중립값 고정(1B/1L 자체는 미재현). "
+        "동적 익절캡 상향·조기확정·즉시매도·손실반등 로직도 강도 데이터가 필요해 "
+        "미재현 — 단, 이 로직들이 강도 데이터 부재 시 라이브에서도 기본 캡을 그대로 "
+        "유지하는 것과 동일해 결과가 크게 갈리진 않음."
+    )
 
     return "\n".join(lines)
 
@@ -318,7 +443,7 @@ def run_daily_backtest(rest_api):
             skipped += 1
             continue
         try:
-            trades = _simulate_stock(code, name, candles, vwap_strategy)
+            trades = _simulate_stock(code, name, candles, vwap_strategy, row.get("cond_name", ""))
             all_trades.extend(trades)
         except Exception:
             logger.exception(f"[백테스트] [{code}] 시뮬레이션 실패")

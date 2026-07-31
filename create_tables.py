@@ -79,6 +79,7 @@ CREATE TABLE watch_list_log (
     ma5                  NUMERIC(10,2),
     reason_not_bought    VARCHAR(255),
     is_bought            BOOLEAN DEFAULT FALSE,
+    cond_name            VARCHAR(50),  -- 최초 편입 조건검색식 이름 (2026-07-31 추가)
     
     -- 등록 시 상태
     initial_price        INT,
