@@ -77,6 +77,8 @@ class KiwoomWS:
         self._cond_keys_logged = False
         self._orderbook_keys_logged = False
         self._program_keys_logged = False
+        self._real_empty_logged = False   # 진단용 (2026-07-31)
+        self._seen_item_types: set = set()  # 진단용 (2026-07-31)
 
         # REG 호출 직렬화 + 빈도 제한
         self._reg_lock = asyncio.Lock()
@@ -163,8 +165,18 @@ class KiwoomWS:
     # 조건식 즉시 검색 (현재 진입 종목 스냅샷)
     # ─────────────────────────────────────────
     async def fetch_condition_snapshot(
-        self, seq: str, stex_tp: str = "K", timeout: int = 10,
+        self, seq: str, stex_tp: str = "K", timeout: int = 10, _retry: bool = True,
     ) -> list[str]:
+        """조건식 즉시검색(search_type=0) 스냅샷 조회.
+
+        (2026-07-31) return_code==0인데도 return_msg에 에러가 실려오는 응답을
+        1회 재시도한다 — 실거래에서 돌파자동매매용(seq=2)이 이렇게 빈 데이터로
+        응답받아 그 세션 내내(재시작 전까지) 후보 종목이 전부 누락된 사고가
+        있었다(마키나락스/씨피시스템/HD현대에너지솔루션 등은 다른 조건식과
+        겹쳐서 우연히 살아남았지만, 그 조건식에만 걸리는 다른 종목들은 그날
+        끝까지 완전히 누락됨 — 사용자가 HTS 화면으로 직접 확인). 기존 코드는
+        return_code만 보고 return_msg는 확인하지 않아 이 실패를 조용히
+        '0종목'으로 취급했다."""
         seq = str(seq)
         await self._send({
             "trnm": "CNSRREQ", "seq": seq, "search_type": "0",
@@ -172,10 +184,20 @@ class KiwoomWS:
         })
 
         try:
-            resp = await self._wait_for("CNSRREQ", timeout=timeout)
+            resp = await self._wait_for("CNSRREQ", seq=seq, timeout=timeout)
         except RuntimeError as e:
             logger.warning(f"⚠️ 조건식 스냅샷 [seq={seq}] 응답 없음: {e}")
             return []
+
+        if _retry and resp.get("return_msg") and not (resp.get("data") or []):
+            logger.warning(
+                f"⚠️ 조건식 스냅샷 [seq={seq}] 에러 응답('{resp.get('return_msg')}') "
+                f"-> 1.5초 후 1회 재시도"
+            )
+            await asyncio.sleep(1.5)
+            return await self.fetch_condition_snapshot(
+                seq, stex_tp=stex_tp, timeout=timeout, _retry=False
+            )
 
         logger.info(f"🔍 CNSRREQ 응답원본 [seq={seq}]: {str(resp)[:500]}")
         # [수정] 159번 라인 아래에 추가
@@ -365,12 +387,25 @@ class KiwoomWS:
     async def _dispatch_signal(self, msg: dict):
         data = msg.get("data")
         if not data:
+            # 진단(2026-07-31): 조건검색 실시간 편입 이벤트가 07-31 장중 한 건도
+            # 안 잡히는 문제를 조사하려고 추가. trnm=REAL인데 data가 비어있는
+            # 경우를 한 번만 기록 — Kiwoom이 조건편입을 REAL로 안 보내거나
+            # 다른 payload 형태로 보낼 가능성을 확인하기 위함.
+            if msg.get("trnm") == "REAL" and not self._real_empty_logged:
+                self._real_empty_logged = True
+                logger.info(f"🔎 REAL 메시지인데 data 비어있음(원본): {str(msg)[:400]}")
             return
         if isinstance(data, dict):
             data = [data]
 
         for item in data:
             item_type = item.get("type")
+            # 진단(2026-07-31): 0B/0D/0g 외에 처음 보는 item_type이 오면 1회 기록.
+            # 조건검색 실시간 편입이 우리가 모르는 type 코드로 오고 있어서
+            # _dispatch_condition_item으로 잘못 안 가고 있을 가능성을 확인.
+            if item_type not in self._seen_item_types:
+                self._seen_item_types.add(item_type)
+                logger.info(f"🔎 신규 item_type='{item_type}' 최초 관측: {str(item)[:400]}")
             if item_type == TYPE_TRADE:
                 await self._dispatch_trade_item(item)
             elif item_type == TYPE_ORDERBOOK:
@@ -576,7 +611,18 @@ class KiwoomWS:
             raise RuntimeError("WebSocket 미연결 상태")
         await self.ws.send(json.dumps(payload))
 
-    async def _wait_for(self, trnm: str, timeout: int = 10) -> dict:
+    async def _wait_for(self, trnm: str, seq: str | None = None, timeout: int = 10) -> dict:
+        """trnm(+seq)이 일치하는 응답이 올 때까지 직접 recv().
+
+        (2026-07-31) seq 필터 추가 — CNSRREQ는 조건식 실시간 등록(search_type=1)
+        요청과 스냅샷(search_type=0) 요청이 전부 같은 trnm을 쓰기 때문에, seq
+        없이 "trnm만" 보고 첫 매치를 반환하면 다른 조건의 응답을 엉뚱하게
+        가로챌 수 있다. 실제로 07-31 기동 로그에서 seq=1 스냅샷을 요청했는데
+        본문에 'seq':'3'이 찍힌 응답을 받아오는 교차매칭이 확인됐다(주도주상위
+        요청 -> 눌림목자동 응답, 식으로 한 칸씩 밀림). seq가 안 맞는 CNSRREQ는
+        버리지 않고 다시 대기 목록으로 넘겨(등록 ack 등 다른 용도로 온 것일 수
+        있으니) 계속 기다린다. seq=None이면 기존처럼 trnm만 확인(CNSRLST 등
+        seq 개념이 없는 응답용)."""
         loop = asyncio.get_event_loop()
         end = loop.time() + timeout
         while loop.time() < end:
@@ -590,8 +636,14 @@ class KiwoomWS:
                 await self.ws.send(raw)
                 continue
             if msg.get("trnm") == trnm:
-                return msg
-        raise RuntimeError(f"{trnm} 응답 타임아웃")
+                if seq is None or str(msg.get("seq")) == str(seq):
+                    return msg
+                # seq 불일치 — 다른 요청(등록 ack 등)에 대한 응답이므로 버리지
+                # 않고 로그만 남기고 계속 대기(내가 기다리는 응답은 아직 온 게
+                # 아님). 이 메시지 자체는 실시간 틱/조건편입이 아니라 CNSRREQ류
+                # 부수 응답이라 유실돼도 매매 판단에 영향 없음.
+                logger.info(f"↪️ {trnm} seq 불일치(요청={seq}, 응답={msg.get('seq')}) — 계속 대기")
+        raise RuntimeError(f"{trnm} 응답 타임아웃 (seq={seq})")
 
     async def close(self):
         self._stop = True

@@ -214,7 +214,7 @@ def _pullback_setup(candles: list[dict], ma5: float | None, ma_tol: float):
 
 def score_pullback(candles: list[dict], volume_ratio: float,
                    current_strength: float = 100.0, cfg: ScoreConfig = DEFAULT,
-                   obv_momentum: float = 0.0):
+                   obv_momentum: float = 0.0, skip_setup_check: bool = False):
     """눌림목 반등 평가. 눌림(되돌림+5MA터치) 미성립이면 즉시 False.
     성립 시 반등(양봉+5MA돌파) 확인 후 거래량/체결강도/OBV로 점수화.
 
@@ -222,12 +222,25 @@ def score_pullback(candles: list[dict], volume_ratio: float,
     (눌림 성립+반등 확인)로 둘 다 확정된 상태라 매번 만점이 나와서 변별력이
     없었음(실측: 오늘 277건 전부 MA 2.0/2, 양봉 2.0/2 — 9점 중 4점이 상수).
     obv_momentum: -1.0~1.0. 호출부(strategy_manager._evaluate_1a_pullback_entry)에서
-    당일 전용 캔들(전일 데이터 절대 안 섞음)로 미리 계산해 전달."""
+    당일 전용 캔들(전일 데이터 절대 안 섞음)로 미리 계산해 전달.
+
+    skip_setup_check: True면 _pullback_setup(로컬 되돌림 재검증)을 건너뛴다
+    (2026-07-31 신규). 눌림목자동 조건검색식은 "당일 고가 대비 -3% 눌림"을
+    이미 HTS 쪽에서 확정해서 넘겨주는데, 여기 _pullback_setup은 최근 10봉
+    (10분)짜리 로컬 구간의 고점으로 되돌림을 다시 잰다 — 시간축이 완전히
+    달라서(하루 스케일 vs 10분 스케일) 실거래에서 눌림목자동 26종목이 전부
+    이 재검증을 통과 못 했다(로컬 되돌림이 상한 3%를 넘게 나오거나, 반대로
+    이미 눌림이 끝나고 옆걸음 중이라 '반등' 캔들 자체가 안 나옴). HTS가 이미
+    검증해준 사실을 코드가 다른 잣대로 다시 틀렸다고 판정하던 구조적 문제라,
+    이 경로에서는 되돌림 재검증을 생략하고 반등(양봉+5MA돌파)+점수만 본다."""
     cur = candles[0]
     current_price = cur["close"]
     ma5 = calc_ma(candles, 5)
 
-    setup_ok, drop_rate, recent_high = _pullback_setup(candles, ma5, cfg.ma_tolerance)
+    if skip_setup_check:
+        setup_ok, drop_rate, recent_high = True, 0.0, 0.0
+    else:
+        setup_ok, drop_rate, recent_high = _pullback_setup(candles, ma5, cfg.ma_tolerance)
     if not setup_ok:
         info = {
             "current_price": current_price, "ma5": ma5,

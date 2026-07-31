@@ -97,8 +97,12 @@ OBV_LOOKBACK = 5
 # 프로그램이 매끄럽게 동작 확인되면 True로 되돌릴 것)
 MARKET_DEFENSE_ENABLED = False
 
-# 매수 진입 등락률 상한 (당일 시가 대비). 이미 많이 오른 종목을 추격매수하는 걸
-# 막기 위한 필터 — 1A/Pullback/1B/1L 전체 전략에 동일 적용. (2026-07-28)
+# 매수 진입 등락률 상한. 이미 많이 오른 종목을 추격매수하는 걸 막기 위한 필터
+# — 1A/Pullback/1B/1L 전체 전략에 동일 적용. (2026-07-28)
+# 기준을 "당일 시가 대비"에서 "전일종가 대비"로 변경(2026-07-31, 실거래로 발견) —
+# 시가 기준은 갭상승 출발일에 실제 상승폭을 과소평가한다. 예: 093370(후성)은
+# 시가대비로는 +4.60%(통과)였지만 전일종가 대비로는 +18.18%(실제로는 상한
+# 초과)였다. HTS 조건검색식(F 지표)도 전일종가 기준이라 이제 완전히 일치.
 MAX_ENTRY_CHANGE_PCT = 12.0
 
 # 신규매수 전면 하드 컷오프. 1A(~14:50)/1L(~10:50)은 자체 시간 윈도우가 있지만
@@ -252,7 +256,8 @@ class StrategyManager:
         self.pending: set[str] = set()
         self._stock_names: dict[str, str] = {}
         self._cond_names: dict[str, str] = {}  # stock_code -> 최초 편입 조건검색식 이름
-        self._opening_prices: dict[str, float] = {}  # stock_code -> 당일 시가 (등락률 상한 체크용)
+        self._opening_prices: dict[str, float] = {}  # stock_code -> 당일 시가 (1A 서지율 점수용)
+        self._prev_closes: dict[str, float] = {}  # stock_code -> 전일종가 (등락률 상한 체크용, 2026-07-31)
         # 평상시 상한(MAX_HOLDINGS)이 꽉 찬 시각 — 확장 슬롯(7~8) 판정용 (2026-07-31)
         self._soft_cap_full_since: Optional[datetime] = None
         # 장중 전략 성과 추적 — 잘 되는 전략의 컷라인을 낮추고 안 되는 전략은
@@ -434,8 +439,11 @@ class StrategyManager:
         for w in WatchListRepository.find_by_date(self._now().date()):
             self.watch_list_today.add(w["stock_code"])
 
+        blocked, cooldowns, counts = self._restore_daily_risk_state()
+
         logger.info(
-            "DB 복원: 보유 %d (1A=%d, 눌림=%d, 1B=%d, 1L=%d) / 워치 %d / 워밍업 %ds",
+            "DB 복원: 보유 %d (1A=%d, 눌림=%d, 1B=%d, 1L=%d) / 워치 %d / 워밍업 %ds "
+            "/ 손절차단 %d종목 / 쿨다운 %d종목 / 매수횟수기록 %d종목",
             len(self.holdings),
             self.count_holdings_by_strategy("1A"),
             self.count_holdings_by_strategy("1A_눌림"),
@@ -443,7 +451,50 @@ class StrategyManager:
             self.count_holdings_by_strategy("1L"),
             len(self.watch_list_today),
             int(RESTART_WARMUP.total_seconds()),
+            blocked, cooldowns, counts,
         )
+
+    def _restore_daily_risk_state(self) -> tuple[int, int, int]:
+        """당일 리스크 상태(손절차단/쿨다운/재매수횟수) DB 재구성 (2026-07-31).
+
+        _stoploss_blocked/sold_at/_buy_count_today는 전부 메모리 전용 set/dict라
+        재시작하면 통째로 비워졌다 — 그날 이미 손절한 종목이 재시작 직후 재매수
+        차단 없이 그대로 다시 매수되는 실거래 사고로 발견됨(413630 씨피시스템,
+        09:53 손실청산 -> 재시작 -> 10:09 재매수). holdings처럼 여기도 DB에서
+        재구성해야 재시작이 리스크 관리 기록을 지우는 구멍이 없어진다.
+
+        기준: 오늘자 trades 전체(보유+청산)를 한 번에 읽어
+          - 매수 횟수: 행 하나당 1회(재매수 상한 카운트)
+          - 손절 차단: status='closed' AND 순손익(profit_amount, 없으면
+            profit_rate로 폴백) < 0 인 종목
+          - 쿨다운: status='closed'인 행의 sell_time 중 가장 최근 값
+        반환: (손절차단 종목수, 쿨다운 대상 종목수, 매수횟수 기록 종목수) — 로그용."""
+        try:
+            rows = TradeRepository.find_by_date(self._now().date())
+        except Exception as e:
+            logger.warning("당일 리스크 상태 DB 복원 실패(빈 상태로 시작): %s", e)
+            return 0, 0, 0
+
+        for r in rows:
+            code = r.get("stock_code")
+            if not code:
+                continue
+            self._buy_count_today[code] = self._buy_count_today.get(code, 0) + 1
+
+            if r.get("status") != "closed":
+                continue
+            sell_time = r.get("sell_time")
+            if sell_time and (code not in self.sold_at or sell_time > self.sold_at[code]):
+                self.sold_at[code] = sell_time
+
+            net = r.get("profit_amount")
+            if net is None:
+                pr = r.get("profit_rate")
+                net = -1 if (pr is not None and float(pr) < 0) else 0
+            if net is not None and float(net) < 0:
+                self._stoploss_blocked.add(code)
+
+        return len(self._stoploss_blocked), len(self.sold_at), len(self._buy_count_today)
 
     # ========================================
     # 주기 루프 (주기 호출)
@@ -847,7 +898,9 @@ class StrategyManager:
             except Exception as e:
                 logger.warning("[%s] OBV 계산 실패, 무점수 처리: %s", stock_code, e)
 
-            ok, info = self.evaluate_pullback(candles, stock_code, obv_mom)
+            ok, info = self.evaluate_pullback(
+                candles, stock_code, obv_mom, skip_setup_check=pullback_only_source
+            )
             self._record_watch_list(stock_code, stock_name, phase, info)
 
             # 체결강도 FSM(1B) 감시 시작 — Pullback 시간대에 들어온 후보는 눌림
@@ -1322,7 +1375,8 @@ class StrategyManager:
                 "perf_multiplier": perf_mult,
             }
 
-    def evaluate_pullback(self, candles, stock_code, obv_mom: float = 0.0):
+    def evaluate_pullback(self, candles, stock_code, obv_mom: float = 0.0,
+                          skip_setup_check: bool = False):
         # 주의: 인자명 obv_mom은 일부러 obv_momentum(모듈 임포트된 함수명)과
         # 다르게 지음 — 같은 이름을 지역변수/인자로 쓰면 함수 스코프 내에서
         # obv_momentum이 지역변수로 취급돼 호출부(_evaluate_1a_pullback_entry)의
@@ -1342,6 +1396,7 @@ class StrategyManager:
             self._current_strength(stock_code),
             cfg,
             obv_momentum=obv_mom,
+            skip_setup_check=skip_setup_check,
         )
 
     def _apply_vwap_filter(
@@ -1464,6 +1519,30 @@ class StrategyManager:
             logger.warning("[%s] 시가 조회 실패, 등락률 상한 체크 스킵: %s", stock_code, e)
         return None
 
+    def _get_prev_close(self, stock_code: str, current_price: float) -> Optional[float]:
+        """전일종가 조회/캐시 (2026-07-31, 매수 등락률 상한 체크용).
+
+        전일종가는 하루 내내 불변이므로 종목당 1회만 REST 호출하고 캐시한다.
+        기존 get_stock_change_rate(ka10001, 이미 있는 메서드)는 등락률(%)만
+        주므로, 지금 아는 current_price로 역산해서 전일종가 값 자체를 저장한다
+        — 그래야 이후엔 API 재호출 없이 실시간 current_price만으로 등락률을
+        즉시 계산할 수 있다(분봉 400개를 통째로 받아오던 예전 방식보다 REST
+        부담이 훨씬 적음 — 이 계정은 이미 429가 하루 2천 건대로 포화 상태)."""
+        cached = self._prev_closes.get(stock_code)
+        if cached:
+            return cached
+        try:
+            change_pct = self.api.get_stock_change_rate(stock_code)
+            if not current_price or change_pct is None:
+                return None
+            prev_close = current_price / (1 + change_pct / 100)
+            if prev_close > 0:
+                self._prev_closes[stock_code] = prev_close
+                return prev_close
+        except Exception as e:
+            logger.warning("[%s] 전일종가 조회 실패, 등락률 상한 체크 스킵: %s", stock_code, e)
+        return None
+
     def _execute_buy(self, stock_code, stock_name, phase, info, sub_strategy):
         current_price = info["current_price"]
 
@@ -1481,12 +1560,12 @@ class StrategyManager:
             )
             return
 
-        opening_price = self._get_opening_price(stock_code)
-        if opening_price:
-            change_pct = (current_price - opening_price) / opening_price * 100
+        prev_close = self._get_prev_close(stock_code, current_price)
+        if prev_close:
+            change_pct = (current_price - prev_close) / prev_close * 100
             if change_pct > MAX_ENTRY_CHANGE_PCT:
                 logger.info(
-                    "[%s] %s 매수 차단: 시가대비 +%.1f%% (상한 +%.0f%%) [%s]",
+                    "[%s] %s 매수 차단: 전일종가대비 +%.1f%% (상한 +%.0f%%) [%s]",
                     stock_code, stock_name, change_pct, MAX_ENTRY_CHANGE_PCT, sub_strategy,
                 )
                 return
@@ -1844,6 +1923,17 @@ class StrategyManager:
             except Exception:
                 continue
 
+            # 중립값(틱 부족으로 판단 불가)을 "하락"으로 오판하지 않는다 (2026-07-31
+            # 실거래로 발견 — 매수 66/69초 만에 강도 166->100/253->100으로
+            # "동적캡 즉시매도"가 발동했는데, 가격은 거의 안 움직였고(0.00%/-0.17%)
+            # 실제로는 최근 10초 틱이 부족해 compute_strength가 중립값(100)을
+            # 반환한 것뿐이었다. on_price_update의 _is_strength_rising_vs_entry는
+            # 이미 같은 이유로 중립값을 별도 처리하는데(07-31 도입), 여기 하락
+            # 판정에는 그 방어가 빠져있었다 — 진입강도가 100 초과인 대부분의
+            # 포지션에서 데이터 부족을 곧바로 "하락"으로 오인하게 되는 구조였다.
+            if cur_s <= 0 or cur_s == STRENGTH_NEUTRAL:
+                continue  # 판단 불가 -> 보수적으로 유지(하락 확정 아님)
+
             # 체결강도 하락은 두 경로(익절캡 조기이탈 / 손실반등 매도) 공통 전제.
             # 유지 중이면 어느 쪽도 해당 없으므로 거래량 조회(REST) 전에 끊는다.
             if cur_s >= entry_s * TP_DECLINE_STRENGTH_RATIO:
@@ -1862,7 +1952,13 @@ class StrategyManager:
             cap, _ = self._take_profit_cap(pos)
             # 경로 A(기존): 상한캡(2.5%) 종목의 조기 이탈 — 1A처럼 처음부터
             # 2.5%인 종목과 on_price_update에서 강도상향된 종목 둘 다 포함.
-            cap_exit = cap >= TP_CAP_UPGRADED
+            # 단, 1L은 제외한다(2026-07-31 실거래로 발견) — 1L은 익절 메커니즘이
+            # 트레일링 전용인데, _take_profit_cap이 sub="1L"을 특별 케이스하지
+            # 않아 fallback 기본캡(2.5%)을 반환하고 이게 TP_CAP_UPGRADED(2.5%)와
+            # 우연히 같아서 cap_exit이 잘못 True가 됐다. 그 결과 1L 포지션이
+            # 트레일링과 무관하게 이 캡 조기이탈 체크에 걸려 매수 66/69초 만에
+            # "동적캡 즉시매도"로 조기청산되는 실거래 사고가 있었다(010120, 067310).
+            cap_exit = pos.get("sub_strategy") != "1L" and cap >= TP_CAP_UPGRADED
             # 경로 B(신규): 손실 종목이 저점에서 반등했으나 그 반등이 강도로
             # 뒷받침되지 않는 경우 — 손실 최소화 청산.
             loss_rebound = self._is_loss_rebound_exit(pos, price, now_dt)
