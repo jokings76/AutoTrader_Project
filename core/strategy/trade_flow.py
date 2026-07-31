@@ -169,6 +169,24 @@ class TradeFlowTracker:
         if cur is None or past is None or past == 0:
             return None
         return (cur - past) / past * 100
+
+    def get_trade_value(
+        self,
+        stock_code: str,
+        window_sec: float,
+        now: float = None,
+    ) -> float:
+        """최근 window_sec 동안의 누적 거래대금(가격*수량 합, 원).
+
+        체결강도(compute_strength)와 같은 틱 버퍼를 그대로 재사용 — REST
+        호출도, 추가 대기시간도 없다(2026-07-31, 유동성 필터용 신규).
+        데이터 없으면 0.0(호출부가 "유동성 확인 불가"로 보수적으로 처리)."""
+        now = now if now is not None else time.time()
+        d = self.ticks.get(stock_code)
+        if not d:
+            return 0.0
+        cutoff = now - window_sec
+        return sum(price * volume for ts, price, side, volume in d if ts >= cutoff)
     # ──────────────────────────────────────────
 
     def reset(self, stock_code: str):

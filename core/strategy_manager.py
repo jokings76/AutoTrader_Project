@@ -120,6 +120,14 @@ PHASE1A_LEADING_SUSTAIN_SEC = 60
 # 판단치 — 실전 관찰 필요.
 PHASE1A_LEADING_CAUTION_MULTIPLIER = 1.2
 
+# 거래대금 최소 유동성 필터 (2026-07-31 사용자 지정) — 체결강도 100 하나만
+# 보는 게 불안하다는 우려에서 "지연 없이" 보완할 방법으로 채택한 1순위 아이디어.
+# 오늘(07-31) 실제 유니버스 35종목의 09:00~09:15 분당 거래대금 실측 분포
+# (중앙값 4.8억원, 5퍼센타일 5,350만원)에서 하위 극단치(폴라리스AI 등 일부
+# 종목이 분당 500만~2,500만원대로 나머지와 뚜렷이 분리)만 걸러내는 보수적인
+# 값으로 잡음 — 대부분의 정상 종목엔 영향 없어야 함. 실전 관찰 후 조정할 것.
+PHASE1A_MIN_TRADE_VALUE = 30_000_000  # 60초 기준 3천만원
+
 # 주도주상위 시가대비 급등 매수보류 (2026-07-31, 사용자 지정) — 개장 직후
 # 시가 대비 이미 5% 이상 오른 종목은 가파른 상승 뒤 눌림(되돌림) 가능성이
 # 크다고 보고 보수적으로 매수를 보류한다. 주도주상위 소스에만 적용(사용자가
@@ -1564,6 +1572,31 @@ class StrategyManager:
                 "reason": "체결강도 데이터 소스 없음(phase1b 미연결)",
             }
 
+        # 거래대금 최소 유동성 필터 (2026-07-31 사용자 지정) — 체결강도만으로는
+        # 저유동성 종목에서 몇 건의 큰 주문이 우연히 강도를 밀어올린 "가짜 강세"를
+        # 못 거른다. compute_strength와 같은 틱 버퍼(get_trade_value)에서 그대로
+        # 계산하므로 REST 호출도 대기시간도 추가되지 않는다. 임계값은 오늘 실제
+        # 유니버스 35종목의 09:00~09:15 분당 거래대금 분포로 보정(1분봉 근사,
+        # 아직 틱 아카이브가 없어 정확한 60초 롤링은 아님) — 중앙값 4.8억원 대비
+        # 하위 1~2%(폴라리스AI 등 일부 종목이 분당 500만~2500만원대로 나머지와
+        # 뚜렷이 분리)만 걸러내는 보수적인 값으로 잡음. 실전 관찰 후 조정 예정.
+        try:
+            trade_value = self.phase1b.trade_flow.get_trade_value(
+                stock_code, window_sec=PHASE1A_LEADING_SUSTAIN_SEC
+            )
+        except Exception:
+            trade_value = 0.0
+        if trade_value < PHASE1A_MIN_TRADE_VALUE:
+            return False, {
+                "current_price": current_price,
+                "trade_value": trade_value,
+                "reason": (
+                    f"최근 {PHASE1A_LEADING_SUSTAIN_SEC:.0f}초 거래대금 "
+                    f"{trade_value:,.0f}원 < 최소 {PHASE1A_MIN_TRADE_VALUE:,.0f}원 "
+                    f"— 저유동성 매수 보류"
+                ),
+            }
+
         try:
             current_strength = self.phase1b.trade_flow.compute_strength(
                 stock_code, window_sec=10
@@ -2198,24 +2231,41 @@ class StrategyManager:
                 # 거래량 확인이 필요한 '즉시매도'는 _update_dynamic_caps에서 담당.
                 if pos.get("tp_cap") is None and net_rate >= TP_UPGRADE_TRIGGER:
                     rising = self._is_strength_rising_vs_entry(pos, stock_code)
-                    if rising is True:
+                    # 주도테마 부합 가산점 (2026-07-31 사용자 지정) — 매수 "전"
+                    # 조건이 아니라 매수 "후" 판단으로 전환. 1L이 하던 "주도테마
+                    # 소속이어야 매수"라는 사전 게이트는 없앴지만(1L 자체 주석
+                    # 처리), 매수 이후 시점에 마침 주도테마에 부합해 있으면
+                    # 그것도 강도상승과 동등한 '가산점'으로 취급해 동적캡을
+                    # 올린다 — 강도가 애매(None/False)해도 주도테마면 구제됨.
+                    is_leading = bool(
+                        self.theme_mgr and self.theme_mgr.is_leading_theme_stock(stock_code)
+                    )
+                    if rising is True or is_leading:
+                        reasons = []
+                        if rising is True:
+                            reasons.append("강도상향")
+                        if is_leading:
+                            reasons.append("주도테마")
+                        label = "+".join(reasons)
                         pos["tp_cap"] = TP_CAP_UPGRADED
-                        pos["tp_cap_label"] = "강도상향"
-                        cap, cap_label = TP_CAP_UPGRADED, "강도상향"
+                        pos["tp_cap_label"] = label
+                        cap, cap_label = TP_CAP_UPGRADED, label
                         logger.info(
-                            "[%s] %s 익절캡 상향 -> %.1f%% (순+%.2f%% 도달, 체결강도 "
-                            "진입 %.0f -> 현재 %.0f)",
+                            "[%s] %s 익절캡 상향 -> %.1f%% (순+%.2f%% 도달, 사유=%s, "
+                            "체결강도 진입 %.0f -> 현재 %.0f, 테마=%s)",
                             stock_code, pos.get("stock_name", ""),
-                            TP_CAP_UPGRADED * 100, net_rate * 100,
+                            TP_CAP_UPGRADED * 100, net_rate * 100, label,
                             pos.get("entry_strength") or 0,
                             self._current_strength(stock_code),
+                            self.theme_mgr.code_to_theme.get(stock_code, "-")
+                            if self.theme_mgr else "-",
                         )
                     elif rising is False:
                         exit_reason = (
                             f"익절 조기확정(강도 미상승) 순+{net_rate*100:.2f}% "
                             f"(가격 +{gross_rate*100:.2f}%)"
                         )
-                    # rising is None = 강도 판단 불가 -> 기본 캡 그대로 진행
+                    # rising is None and not is_leading = 판단 불가 -> 기본 캡 유지
 
                 if exit_reason is None and net_rate >= cap:
                     exit_reason = (
