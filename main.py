@@ -252,15 +252,27 @@ class TradingBot:
             logger.exception(f"배치 구독 실패: {batch}")
 
     async def task_subscribe_flush(self):
-        """버퍼에 남은(3개 미만) 종목을 SUB_FLUSH_SEC 후 발사."""
+        """버퍼에 남은(3개 미만) 종목을 SUB_FLUSH_SEC 후 발사.
+
+        (2026-08-02) try/except 추가 — 이 루프는 **1초마다** 도는데다 WS
+        전송을 건드린다. 여기서 예외가 하나라도 새어나가면 asyncio.gather()가
+        통째로 무너져 봇이 종료된다(2026-07-27 실제 장애와 같은 붕괴 경로).
+        _flush_subscribe가 자체 예외처리를 갖고 있어 지금은 안전하지만,
+        나머지 16개 태스크와 같은 방어 패턴을 맞춰 둔다.
+        """
         while not self._stop:
             await asyncio.sleep(1)
-            async with self._sub_buffer_lock:
-                if (self._sub_buffer
-                        and time.time() - self._last_buffer_add >= self.SUB_FLUSH_SEC):
-                    batch = self._sub_buffer
-                    self._sub_buffer = []
-                    await self._flush_subscribe(batch)
+            try:
+                async with self._sub_buffer_lock:
+                    if (self._sub_buffer
+                            and time.time() - self._last_buffer_add >= self.SUB_FLUSH_SEC):
+                        batch = self._sub_buffer
+                        self._sub_buffer = []
+                        await self._flush_subscribe(batch)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("구독 플러시 예외")
 
     async def task_condition_snapshot_poll(self):
         """주기적으로 조건식 결과 재조회 -> 새 종목만 on_condition_hit.
@@ -676,12 +688,36 @@ class TradingBot:
                 triggered = True
                 logger.info("장마감 강제청산 시작")
                 for code in list(self.strategy_mgr.holdings.keys()):
+                    # 기준가 확보: 실시간 체결가 -> 분봉 순 (2026-08-02).
+                    # 예전엔 분봉(REST) 하나만 썼는데, 이 시각은 429가 가장
+                    # 심한 구간이라 조회가 실패하면 `if candles:`에 걸려
+                    # **_execute_sell이 아예 안 불리고 포지션이 오버나이트로
+                    # 넘어갔다**(장 마감 후엔 재시도할 태스크도 없다).
+                    # 매도는 시장가라 기준가는 기록/로깅용이므로, 실시간
+                    # 체결가만 있어도 청산을 진행하는 게 훨씬 안전하다.
+                    px = 0
                     try:
-                        candles = self.rest.get_minute_candles(code, interval=1, count=1)
-                        if candles:
-                            self.strategy_mgr._execute_sell(
-                                code, candles[0]["close"], "장마감 강제청산"
-                            )
+                        px = self.strategy_mgr._fresh_tick_price(code, max_age_sec=600) or 0
+                    except Exception:
+                        px = 0
+                    if not px:
+                        try:
+                            candles = self.rest.get_minute_candles(code, interval=1, count=1)
+                            if candles:
+                                px = candles[0]["close"]
+                        except Exception:
+                            logger.exception(f"[{code}] 강제청산 기준가 조회 실패")
+                    if not px:
+                        px = self.strategy_mgr.holdings.get(code, {}).get("buy_price", 0)
+                        logger.warning(
+                            "[%s] 강제청산 기준가를 못 구해 매수가로 대체 — 시장가로 청산 진행",
+                            code,
+                        )
+                    try:
+                        if px:
+                            self.strategy_mgr._execute_sell(code, px, "장마감 강제청산")
+                        else:
+                            logger.error("[%s] 강제청산 불가 — 기준가 전무", code)
                     except Exception:
                         logger.exception(f"[{code}] 강제청산 실패")
                 await asyncio.sleep(60)
@@ -701,7 +737,12 @@ class TradingBot:
             if now_str >= target_time:
                 msg = f"⏰ 설정된 시간({target_time}) 도달. 매매를 중지하고 프로그램을 안전하게 자동 종료합니다."
                 logger.info(msg)
-                send_telegram(msg, target="signal")
+                # 텔레그램 실패가 종료 절차를 막지 않게 한다 (2026-08-02) —
+                # 여기서 예외가 나면 gather가 무너져 shutdown()이 안 불린다.
+                try:
+                    send_telegram(msg, target="signal")
+                except Exception:
+                    logger.exception("자동종료 알림 실패(종료는 계속 진행)")
 
                 self._stop = True
 

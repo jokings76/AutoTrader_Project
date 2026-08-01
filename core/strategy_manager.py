@@ -1030,6 +1030,10 @@ class StrategyManager:
             if in_window and code in self.watch_list_today:
                 continue
             self.phase1b.stop_watching(code)
+            # 틱 버퍼(trade_flow)를 비우면서 강도 타이머만 남겨두면 데이터와
+            # 상태가 어긋난다 — 다시 감시가 켜졌을 때 옛 타이머로 즉시
+            # 무장되므로 반드시 같이 지운다 (2026-08-02).
+            self.reset_tick_entry_state(code)
 
     # ========================================
     # Phase 판별 (09:00~14:50 그룹A 활성 여부)
@@ -1617,8 +1621,18 @@ class StrategyManager:
         existing_cond = self._cond_names.get(stock_code)
         if not existing_cond or existing_cond in ("기타", "알수없음"):
             self._cond_names[stock_code] = cond_name
-        elif "주도주상위" in cond_name and "주도주상위" not in existing_cond:
-            self._cond_names[stock_code] = f"{existing_cond}+{cond_name}"
+        elif cond_name and cond_name not in ("기타", "알수없음"):
+            # (2026-08-02 수정) 예전엔 **주도주상위가 나중에 온 경우에만**
+            # 병합했다. 그래서 주도주상위가 먼저 걸리고 눌림목자동이 나중에
+            # 온 종목은 영영 "주도주상위" 단독으로 남아, 중복 편입 종목의
+            # 10:30 전략 전환(DUAL_SOURCE_PULLBACK_FROM)이 절반만 작동했다.
+            # 이제 방향과 무관하게 새 조건식이면 병합한다 — resolve_strategy가
+            # 정확한 라우팅을 하려면 실제로 걸린 조건식이 **전부** 있어야 한다.
+            parts = [p for p in existing_cond.split("+") if p]
+            for part in cond_name.split("+"):
+                if part and part not in parts:
+                    parts.append(part)
+            self._cond_names[stock_code] = "+".join(parts)
 
         # 거래대금 폭발 이력(explosion_scorer) 준비는 여기서 더 이상 안 함 —
         # 종가베팅 스캐너(main.py task_closing_bet_scanner, 14:50)에서만 쓰이는
@@ -1642,12 +1656,22 @@ class StrategyManager:
             # '버리는' 게 아니라 '미루는' 것이 핵심.
             if now_t < GROUP_A_START:
                 self.watch_list_today.add(stock_code)
+                # ⚠️ 장 시작 전에도 **감시는 반드시 켠다** (2026-08-02 수정).
+                # 예전엔 여기서 그냥 return 해서 08:59 기동 스냅샷 종목들이
+                # 09:00 이후 첫 watchlist_reentry(15초 주기)가 돌 때까지
+                # 체결틱을 한 개도 못 쌓았다. 무장(강도 3초 연속)은 틱이
+                # 쌓여야 시작되므로, **개장 직후 가장 중요한 최대 15초**를
+                # 통째로 날리는 구조였다(그 15초는 하루 중 거래가 가장
+                # 폭발하는 구간이다). 매수는 여전히 09:00부터만 일어난다 —
+                # 여기서 켜는 건 데이터 수집뿐이다.
+                self.prearm_candidate(stock_code)
                 self._note_reject(
                     stock_code,
                     f"장 시작 전 편입 — {GROUP_A_START.strftime('%H:%M')}부터 평가",
                 )
                 logger.info(
-                    "[%s] %s 장 시작 전 편입 — %s부터 평가 대기 (후보 등록)",
+                    "[%s] %s 장 시작 전 편입 — %s부터 평가 대기 "
+                    "(후보 등록 + 체결틱 수집 시작)",
                     stock_code, stock_name, GROUP_A_START.strftime("%H:%M"),
                 )
                 return
@@ -1656,10 +1680,26 @@ class StrategyManager:
             if now_t >= ENTRY_WINDOW_END:
                 return
 
+            # ⚠️ 감시 시작(pre-arm)을 분봉 조회보다 **먼저** 한다 (2026-08-02).
+            # 예전엔 분봉이 15개 미만이면 여기서 return 해서, 그 종목은
+            # 체결틱 수집조차 시작되지 않았다 — 즉 신규 상장주나 거래가
+            # 뜸한 종목은 무장이 원천적으로 불가능했다. 틱 구동 진입은
+            # 분봉이 전혀 필요 없으므로 분봉 실패가 진입을 막으면 안 된다.
+            self.prearm_candidate(stock_code)
+
             candles = self._get_merged_candles(stock_code, interval=1, count=15)
             if not candles or len(candles) < VOLUME_LOOKBACK + 1:
                 logger.warning(
-                    "[%s] 분봉 부족 (%d개)", stock_code, len(candles) if candles else 0
+                    "[%s] 분봉 부족 (%d개) — 시가 캐시만 생략하고 틱 경로는 계속",
+                    stock_code, len(candles) if candles else 0
+                )
+                # 분봉이 없어도 실시간 체결가가 있으면 그대로 평가로 넘어간다.
+                px = self._fresh_tick_price(stock_code)
+                if not px:
+                    return
+                self._evaluate_1a_pullback_entry(
+                    stock_code, stock_name, 1, None, int(px),
+                    self._opening_prices.get(stock_code, 0.0), now_t
                 )
                 return
 
@@ -2317,6 +2357,26 @@ class StrategyManager:
             return 0.0
         return max(0.0, now - since)
 
+    def reset_tick_entry_state(self, stock_code: str) -> None:
+        """틱 진입 상태(강도 타이머/무장/쿨다운)를 완전히 지운다.
+
+        **매도 직후와 감시 해제 시 반드시 불러야 한다.** 안 부르면
+        `_strength_since`에 매수 전의 옛 타임스탬프가 그대로 남아, 그 종목이
+        재매수 가능해진 뒤 첫 틱에서 `now - since`가 수 분~수 시간으로 계산돼
+        **3초 확인을 건너뛰고 즉시 무장**된다. 그 상태로 버스트가 하나 오면
+        진입 조건의 절반(무장)이 사실상 없는 채로 매수가 나간다.
+
+        재매수 차단(_is_rebuy_blocked)이 손실청산·쿨다운·횟수는 막아주지만,
+        **익절 후 3분 쿨다운이 지난 종목**은 그 그물을 정상적으로 통과하므로
+        여기서 지우지 않으면 실제로 뚫린다.
+
+        stop_watching(trade_flow.reset)과 짝을 이룬다 — 틱 버퍼는 비웠는데
+        타이머만 살아있는 불일치 상태를 만들지 않기 위함이다.
+        """
+        self._strength_since.pop(stock_code, None)
+        self._armed_at.pop(stock_code, None)
+        self._tick_entry_last.pop(stock_code, None)
+
     def check_burst(self, stock_code: str, now: float = None,
                     now_dt: datetime = None) -> tuple[bool, dict]:
         """대량체결 버스트 3경로(OR) 판정. (통과여부, 상세) 반환.
@@ -2515,6 +2575,14 @@ class StrategyManager:
         cond_name = self._cond_names.get(stock_code)
         if cond_name is None:
             return False
+
+        # 감시가 안 켜져 있으면 여기서 켠다 — 자가 치유 (2026-08-02).
+        # 무장은 FID 228만 보므로 감시 여부와 무관하게 진행되는데, 정작
+        # 버스트 판정은 trade_flow 버퍼를 읽는다. 감시가 꺼져 있으면 버퍼가
+        # 비어 **영원히 무장만 되고 발사는 안 되는** 상태가 된다(pre-arm이
+        # 어떤 이유로든 누락되면 그 종목은 조용히 매매에서 빠진다).
+        if self.phase1b and not self.phase1b.is_watching(stock_code):
+            self.phase1b.start_watching(stock_code)
 
         # ── ② 무장: 강도 3초 연속 (여기까지가 틱의 대부분) ────────
         sustained = self.update_strength_timer(
@@ -4027,6 +4095,10 @@ class StrategyManager:
             stock_name = pos["stock_name"]
             sub = pos.get("sub_strategy", "?")
             del self.holdings[stock_code]
+            # 틱 진입 상태 초기화 (2026-08-02) — 이걸 빼먹으면 매수 전에 켜둔
+            # 강도 타이머가 그대로 남아, 재매수 가능해진 순간 "3초 연속"이
+            # 이미 충족된 것으로 계산돼 무장 단계를 통째로 건너뛴다.
+            self.reset_tick_entry_state(stock_code)
 
             # 장중 전략 성과에 반영 (2026-07-31) — 이후 이 전략의 점수 컷라인이
             # 자동 조정된다. net_rate는 위에서 %로 환산돼 있으므로 소수로 되돌림.
