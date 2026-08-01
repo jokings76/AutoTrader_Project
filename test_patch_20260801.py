@@ -1000,6 +1000,63 @@ check("진단 생성 중 예외 없음(어떤 상태에서도 문자열 반환)"
       isinstance(build_strat().build_entry_diagnostics(), str))
 
 # ═════════════════════════════════════════════════════════
+print("\n[28] 전략별 등락률 상한 + 눌림목 전용 라우팅 하드가드")
+# ═════════════════════════════════════════════════════════
+CAP = SM.StrategyManager._entry_change_cap
+check("1A 상한 16%", CAP("1A", "주도주상위") == 16.0)
+check("돌파자동매매용도 16%", CAP("1A", "돌파자동매매용") == 16.0)
+check("눌림목 상한 10% (전략 기준)", CAP("1A_눌림", "") == 10.0)
+check("눌림목 상한 10% (조건명 기준)", CAP("1A", "눌림목자동") == 10.0)
+check("병합 조건명에 눌림목자동 있으면 보수적으로 10%",
+      CAP("1A", "주도주상위+눌림목자동") == 10.0)
+
+def buy_at(change_pct, sub, cond):
+    """전일종가 대비 change_pct 상태에서 매수가 성립하는지."""
+    st = build_strat()
+    st.api.get_stock_change_rate = lambda c: change_pct
+    st.phase1b.start_watching("E")
+    st.phase1b.orderbook.update("E", {"ask_prices": [10_000], "ask_volumes": [10]}, now=now)
+    feed(st.phase1b.trade_flow, "E", 5, 1_000_000)
+    st._cond_names["E"] = cond
+    st._execute_buy("E", "E", 1, {"current_price": 10_000}, sub)
+    return "E" in st.holdings
+
+check("1A: +14% 통과 (구버전 12% 상한이면 차단됐음)", buy_at(14.0, "1A", "주도주상위"))
+check("1A: +17% 차단", not buy_at(17.0, "1A", "주도주상위"))
+check("눌림목: +8% 통과", buy_at(8.0, "1A_눌림", "눌림목자동"))
+check("눌림목: +12% 차단 (1A였다면 통과했을 값)", not buy_at(12.0, "1A_눌림", "눌림목자동"))
+
+s = build_strat()
+s.phase1b.start_watching("PBONLY")
+s.phase1b.orderbook.update("PBONLY", {"ask_prices": [10_000], "ask_volumes": [10]}, now=now)
+feed(s.phase1b.trade_flow, "PBONLY", 5, 1_000_000)
+s._cond_names["PBONLY"] = "눌림목자동"
+s._execute_buy("PBONLY", "PBONLY", 1, {"current_price": 10_000}, "1A")
+check("눌림목자동 종목을 1A로 매수 시도 -> 주문 직전 하드가드가 차단",
+      "PBONLY" not in s.holdings and not s.order_manager.orders,
+      str(s.order_manager.orders))
+s._execute_buy("PBONLY", "PBONLY", 1, {"current_price": 10_000}, "1A_눌림")
+check("같은 종목을 Pullback으로 매수하면 정상 통과", "PBONLY" in s.holdings)
+
+s2 = build_strat()
+s2.phase1b.start_watching("MERGED")
+s2.phase1b.orderbook.update("MERGED", {"ask_prices": [10_000], "ask_volumes": [10]}, now=now)
+feed(s2.phase1b.trade_flow, "MERGED", 5, 1_000_000)
+s2._cond_names["MERGED"] = "주도주상위+눌림목자동"   # 나중에 병합된 경우
+s2._execute_buy("MERGED", "MERGED", 1, {"current_price": 10_000}, "1A")
+check("병합 조건명이어도 눌림목자동이 포함되면 1A 매수 차단",
+      "MERGED" not in s2.holdings)
+
+s3 = build_strat(datetime(2026, 8, 3, 9, 30, 0))
+calls = []
+s3.evaluate_1a_leading_strength = lambda *a, **k: (calls.append("1A"), (False, {"reason": "x"}))[1]
+s3.evaluate_pullback = lambda *a, **k: (calls.append("PB"), (False, {"reason": "x"}))[1]
+s3._cond_names["RT"] = "주도주상위+눌림목자동"
+s3._evaluate_1a_pullback_entry("RT", "RT", 1, make_candles(15), 10_000, 9_900,
+                               datetime(2026, 8, 3, 9, 30, 0).time())
+check("라우팅 단계에서도 눌림목자동 포함이면 Pullback만 평가", calls == ["PB"], str(calls))
+
+# ═════════════════════════════════════════════════════════
 print("\n" + "=" * 60)
 print(f"통과 {len(PASS)}건 / 실패 {len(FAIL)}건")
 if FAIL:

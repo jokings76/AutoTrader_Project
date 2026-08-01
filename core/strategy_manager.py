@@ -162,7 +162,7 @@ PHASE1A_ASK_DEPTH_MIN = 50_000_000  # 5천만원
 # 주도주상위 시가대비 급등 매수보류 (2026-07-31, 사용자 지정) — 개장 직후
 # 시가 대비 이미 5% 이상 오른 종목은 가파른 상승 뒤 눌림(되돌림) 가능성이
 # 크다고 보고 보수적으로 매수를 보류한다. 주도주상위 소스에만 적용(사용자가
-# 그렇게 범위 지정) — 전일종가 기준 MAX_ENTRY_CHANGE_PCT(12%)와는 별개로,
+# 그렇게 범위 지정) — 전일종가 기준 MAX_ENTRY_CHANGE_PCT(16%)와는 별개로,
 # 이건 "당일 시가 대비"라 갭상승 여부와 무관하게 장중 상승폭만 본다.
 PHASE1A_LEADING_OPEN_SURGE_CAP = 5.0
 
@@ -235,7 +235,14 @@ MARKET_DEFENSE_ENABLED = False
 # 시가 기준은 갭상승 출발일에 실제 상승폭을 과소평가한다. 예: 093370(후성)은
 # 시가대비로는 +4.60%(통과)였지만 전일종가 대비로는 +18.18%(실제로는 상한
 # 초과)였다. HTS 조건검색식(F 지표)도 전일종가 기준이라 이제 완전히 일치.
-MAX_ENTRY_CHANGE_PCT = 12.0
+# (2026-08-01 사용자 지정) 전략별 분리. 1A는 12% -> 16%로 완화하고, 눌림목은
+# 10%로 더 조인다. 근거: 1A는 "지금 매수세가 터지는 자리"를 잡는 추세추종이라
+# 이미 오른 종목이 더 가는 경우를 12%에서 잘라내고 있었고, 반대로 Pullback은
+# "고가에서 되돌린 자리"를 사는 전략이라 애초에 전일종가 대비 많이 오른 종목은
+# 되돌림 폭도 그만큼 커서 위험하다. 같은 상한을 두 전략에 쓰면 한쪽은 기회를
+# 잃고 다른 쪽은 과도한 위험을 진다.
+MAX_ENTRY_CHANGE_PCT = 16.0           # 1A 및 기본
+MAX_ENTRY_CHANGE_PCT_PULLBACK = 10.0  # 눌림목자동 조건검색 -> Pullback 전용
 
 # 신규매수 전면 하드 컷오프. 1A(~14:50)/1L(~10:50)은 자체 시간 윈도우가 있지만
 # 1B(FSM 감시)는 Pullback 미체결 후보를 계속 지켜보다 READY_TO_BUY가 되면 바로
@@ -621,6 +628,20 @@ class StrategyManager:
 
         # 전일 조회 실패 시 그냥 당일 데이터라도 반환
         return today_candles
+
+    @staticmethod
+    def _entry_change_cap(sub_strategy: str, cond_name: str) -> float:
+        """전략별 매수 등락률 상한(전일종가 대비 %) (2026-08-01 사용자 지정).
+
+        눌림목 = 10% / 그 외(1A 등) = 16%.
+        sub_strategy와 cond_name **둘 다** 확인한다 — 라우팅상 둘은 항상 같이
+        움직이지만(눌림목자동 -> 1A_눌림), 어느 한쪽만 보면 나중에 경로가
+        추가됐을 때 조용히 느슨한 상한이 적용될 수 있다. 더 보수적인 쪽으로
+        수렴시키는 게 안전하다.
+        """
+        if sub_strategy == "1A_눌림" or "눌림목자동" in (cond_name or ""):
+            return MAX_ENTRY_CHANGE_PCT_PULLBACK
+        return MAX_ENTRY_CHANGE_PCT
 
     @staticmethod
     def cond_perf_key(cond_name: str) -> str:
@@ -2706,13 +2727,32 @@ class StrategyManager:
             )
             return
 
+        cond_name_now = self._cond_names.get(stock_code, "")
+
+        # 눌림목 조건검색 종목은 Pullback 전략으로만 매수 (2026-08-01 사용자 지정).
+        # 라우팅(_evaluate_1a_pullback_entry)에서 이미 배타적으로 갈리지만,
+        # 다른 경로가 추가되거나 cond_name이 뒤늦게 병합돼도 절대 새지 않도록
+        # 실제 주문 직전인 여기서 한 번 더 막는다(단일 차단 지점).
+        if "눌림목자동" in cond_name_now and sub_strategy != "1A_눌림":
+            logger.info(
+                "[%s] %s 매수 차단: 눌림목자동 종목은 Pullback 전용 [요청 전략=%s]",
+                stock_code, stock_name, sub_strategy,
+            )
+            self._note_reject(stock_code, "눌림목자동 종목은 Pullback 전용")
+            return
+
+        entry_cap = self._entry_change_cap(sub_strategy, cond_name_now)
         prev_close = self._get_prev_close(stock_code, current_price)
         if prev_close:
             change_pct = (current_price - prev_close) / prev_close * 100
-            if change_pct > MAX_ENTRY_CHANGE_PCT:
+            if change_pct > entry_cap:
                 logger.info(
                     "[%s] %s 매수 차단: 전일종가대비 +%.1f%% (상한 +%.0f%%) [%s]",
-                    stock_code, stock_name, change_pct, MAX_ENTRY_CHANGE_PCT, sub_strategy,
+                    stock_code, stock_name, change_pct, entry_cap, sub_strategy,
+                )
+                self._note_reject(
+                    stock_code,
+                    f"등락률 상한 초과 (전일종가대비 +{change_pct:.1f}% > +{entry_cap:.0f}%)",
                 )
                 return
 
