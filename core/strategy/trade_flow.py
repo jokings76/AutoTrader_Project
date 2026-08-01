@@ -194,6 +194,55 @@ class TradeFlowTracker:
         cutoff = now - window_sec
         return sum(price * volume for ts, price, side, volume in d if ts >= cutoff)
 
+    def avg_trade_value(
+        self,
+        stock_code: str,
+        window_sec: float,
+        now: float = None,
+        min_ticks: int = 20,
+        exclude_recent_sec: float = 0.0,
+    ) -> float:
+        """구간 내 **1틱당 평균 체결금액**(원). 없으면 0.0.
+
+        exclude_recent_sec: 최근 이 시간(초)만큼을 평균에서 **제외**한다.
+        상대 버스트 판정의 분모로 쓸 때 반드시 필요하다 — 지금 터지고 있는
+        대량체결이 평균에 같이 들어가면 그 체결이 클수록 문턱도 같이 올라가서
+        (분자와 분모가 함께 커짐) 정작 큰 버스트일수록 통과가 어려워지는
+        자기모순이 생긴다. 실제로 이 값이 0일 때 격리 테스트에서
+        "평균의 40배짜리 체결 2건"이 탈락했다.
+        즉 여기서 재는 건 '버스트 직전까지의 평상시 체결 크기'다.
+
+        (2026-08-02 신규) 대량체결 버스트의 '상대 경로' 판정용 —
+        "단일 체결이 이 종목 평소 체결의 몇 배인가"를 재는 분모다.
+
+        절대금액(3천만원)만 쓰면 종목마다 난이도가 다르다: 조건검색식이
+        보장하는 건 일 거래대금 100억 이상뿐이라 평균 1틱 금액이 30만원인
+        종목과 300만원인 종목이 같은 풀에 섞인다(10배 차이). 전자에게
+        3천만원은 평균의 100배(사실상 불가능)지만 후자에겐 10배다.
+
+        시간대 보정이 자동으로 되는 것도 이 지표의 핵심 성질이다 — 점심에
+        시장 전체가 마르면 분모(평균 1틱)도 같이 줄어들어 '평균의 N배'라는
+        난이도가 시각과 무관하게 유지된다. 별도 시간계수가 필요 없다.
+
+        min_ticks: 표본이 너무 적으면 평균이 우연에 휘둘리므로(체결 3건 중
+        하나가 큰 건이면 평균이 통째로 끌려올라가 배수 판정이 무력화된다)
+        미달 시 0.0을 반환한다 — 호출부는 이걸 '상대 경로 판단 불가'로 보고
+        절대 경로만 쓴다.
+        """
+        now = now if now is not None else time.time()
+        d = self.ticks.get(stock_code)
+        if not d:
+            return 0.0
+        cutoff = now - window_sec
+        upper = now - max(0.0, exclude_recent_sec)
+        vals = [
+            price * volume for ts, price, _, volume in d
+            if cutoff <= ts <= upper
+        ]
+        if len(vals) < min_ticks:
+            return 0.0
+        return float(sum(vals)) / len(vals)
+
     def tick_count(self, stock_code: str, window_sec: float, now: float = None) -> int:
         """최근 window_sec 안의 체결 틱 수 (2026-08-01 신규).
 

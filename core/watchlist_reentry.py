@@ -13,10 +13,18 @@
 전체를 훑기 때문에, 후보가 40종목이면 예전 방식으로는 한 사이클에 REST 40콜
 (자체 상한 분당 100콜의 절반 이상)을 태웠다 — 실시간 조건검색 편입 유실을
 고치면서 후보 수가 크게 늘어난 만큼 이 경로가 없으면 429가 급증한다.
+
+(2026-08-02) **이 태스크의 역할이 主에서 안전망으로 내려갔다.** 진입 평가가
+on_trade(체결 틱 콜백)로 옮겨가면서 실제 진입은 거의 전부 거기서 일어난다
+— 3초짜리 신호를 15초 주기로 들여다보던 구조가 근본 원인이었기 때문이다
+(평균 7.5초 지연 + 짧게 스치는 신호는 관측조차 불가).
+여기 남겨두는 이유는 틱이 끊긴 구간(WS 재연결 직후 등)에서 슬롯이 비었을 때
+후보를 다시 훑어주는 백스톱 역할 때문이다. Pullback도 틱 구동으로 바뀌어
+이제 두 전략 모두 REST를 한 콜도 쓰지 않는다.
 """
 
 from utils.logger import logger
-from core.strategy_manager import GROUP_A_START, ENTRY_WINDOW_END, VOLUME_LOOKBACK
+from core.strategy_manager import GROUP_A_START, ENTRY_WINDOW_END
 
 
 def try_watchlist_reentry(strat, now) -> int:
@@ -47,49 +55,28 @@ def try_watchlist_reentry(strat, now) -> int:
             break  # 재평가 도중 슬롯이 다 찼으면 중단
 
         stock_name = strat._stock_names.get(code, code)
-        cond_name = strat._cond_names.get(code, "")
-        is_pullback_source = "눌림목자동" in cond_name
 
-        candles = None
-        current_price = 0
-        open_price = 0.0
-
-        if not is_pullback_source:
-            # ── 1A 고속 경로: REST 0콜 ──────────────────────────────
-            # 조건: ① 최근 체결가가 신선하고 ② 당일 시가가 이미 캐시돼 있을 것.
-            # 시가 캐시가 없으면(장 시작 전에 편입돼 아직 분봉을 한 번도 안
-            # 받은 종목 등) 아래 REST 경로로 내려가 한 번만 채우고, 그 다음
-            # 사이클부터는 이 고속 경로를 탄다(자가 치유).
-            # 시가를 0으로 두고 그냥 진행하면 "주도주상위 시가대비 +5% 보류"
-            # 필터가 조용히 꺼져버리므로 절대 생략하지 않는다.
-            px = strat._fresh_tick_price(code)
-            cached_open = strat._opening_prices.get(code)
-            if px and cached_open:
-                current_price = int(px)
-                open_price = float(cached_open)
-
-        if not current_price:
-            # ── 기존 REST 경로 (Pullback 또는 캐시 미비 시) ───────────
-            try:
-                candles = strat._get_merged_candles(code, interval=1, count=15)
-            except Exception as e:
-                logger.warning("[%s] watchlist 재평가 분봉조회 실패: %s", code, e)
-                continue
-            if not candles or len(candles) < VOLUME_LOOKBACK + 1:
-                continue
-
-            current_price = int(candles[0].get("close", 0))
-            # 당일 시가 — candles[-1]["open"]은 내림차순이라 '가장 오래된 봉'이고
-            # 개장 직후엔 전일 봉이 섞여 들어와 사실상 전일 시가였다(2026-08-01 수정,
-            # on_condition_hit과 동일한 헬퍼를 써서 두 경로가 항상 같은 값을 보게 함).
-            open_price = strat._today_open(candles)
-            # 시가는 하루 내내 불변 — 여기서 캐시해두면 다음 사이클부터 REST가 0이 된다.
-            if open_price > 0:
-                strat._opening_prices.setdefault(code, open_price)
+        # ── REST 0콜 경로 (2026-08-02: 1A/Pullback 공통) ────────────────
+        # 예전엔 Pullback만 분봉(REST)을 받아야 했는데, Pullback이 틱 구동으로
+        # 전환되면서 두 전략 모두 체결틱만으로 판정한다. 이 루프는 15초마다
+        # 후보 전체를 훑기 때문에 후보가 40종목이면 예전엔 한 사이클에
+        # REST 40콜(자체 상한 분당 100콜의 절반 가까이)을 태웠다 — 이제 0콜이다.
+        #
+        # 실시간 체결가가 없으면(그 종목에 최근 틱이 없음) 재평가할 근거 자체가
+        # 없으므로 조용히 건너뛴다. 어차피 틱이 없으면 무장(강도 3초 연속)도
+        # 성립할 수 없다.
+        px = strat._fresh_tick_price(code)
+        if not px:
+            continue
+        current_price = int(px)
+        # 시가는 하루 내내 불변이라 pre-arm이 채워둔 캐시를 그대로 쓴다.
+        # 없으면 0 -> "시가대비 +5% 보류" 필터만 건너뛴다(모르는 값으로
+        # 매수를 막지 않는다. 그 필터는 1A 전용 보조 게이트다).
+        open_price = float(strat._opening_prices.get(code, 0.0))
 
         try:
             executed = strat._evaluate_1a_pullback_entry(
-                code, stock_name, 1, candles, current_price, open_price, now_t
+                code, stock_name, 1, None, current_price, open_price, now_t
             )
         except Exception as e:
             logger.warning("[%s] watchlist 재평가 실패: %s", code, e)

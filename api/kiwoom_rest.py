@@ -22,6 +22,14 @@ class KiwoomREST:
 
     # 호출 빈도 제어 (1초 5회 제한 → 0.6초 안전마진)
     MIN_INTERVAL = 0.6
+    # 주문 전용 우선 레인 (2026-08-02 신설) —
+    # 조회 요청과 주문이 같은 큐에 서면, 진입 트리거가 걸린 **가장 급한 순간에**
+    # 방금 나간 조회 때문에 최대 0.6초를 기다린다. 429가 겹치면 _request의
+    # 2초 blocking sleep까지 붙는다(하루 2,400건대로 포화된 계정이다).
+    # 주문은 이 별도 타임스탬프만 보고 나가므로 조회 대기열을 건너뛴다.
+    # 0.2초로 잡은 근거: 키움 제한이 '초당 5회'이므로 주문 간 0.2초 간격은
+    # 그 자체로 한도 안이다. 주문은 하루 수십 건이라 조회 예산을 잠식하지도 않는다.
+    ORDER_MIN_INTERVAL = 0.2
 
     def __init__(self, token: str, is_mock: bool = True):
         self.token = token
@@ -32,13 +40,38 @@ class KiwoomREST:
         # asyncio.to_thread로 감싸면서(2026-07-28) 이 클라이언트가 실제로 멀티스레드
         # 접근을 받게 됨. CandleCache가 이미 같은 이유로 락을 쓰고 있던 것과 동일하게 보호.
         self._throttle_lock = threading.Lock()
+        # 주문 우선 레인 전용 타임스탬프/락 (2026-08-02). 조회용과 분리해야
+        # 주문이 조회 대기열을 건너뛸 수 있다 — 같은 락을 쓰면 조회가 자고 있는
+        # 동안 주문이 그 락을 기다리게 되어 우선 레인의 의미가 사라진다.
+        self._order_throttle_lock = threading.Lock()
+        self._last_order_ts = 0.0
         self._candle_cache = CandleCache(
             self._raw_get_minute_candles, ttl_sec=8.0, logger=logger)
 
     # ─────────────────────────────────────
     # 공통 호출
     # ─────────────────────────────────────
-    def _throttle(self):
+    def _throttle(self, priority: bool = False):
+        """호출 간격 제어. priority=True면 주문 전용 우선 레인을 쓴다.
+
+        우선 레인은 조회용 타임스탬프(_last_request_ts)를 아예 보지 않는다 —
+        진입 트리거가 걸린 순간에 방금 나간 조회 때문에 0.6초를 기다리는 걸
+        없애는 게 목적이다. 대신 주문끼리는 ORDER_MIN_INTERVAL(0.2초)을 지켜
+        키움의 '초당 5회' 제한 안에 머문다.
+
+        조회 타임스탬프도 같이 갱신한다 — 그래야 주문 직후에 나가는 조회가
+        너무 붙어서 429를 유발하지 않는다(우선권은 주문에만 주고, 전체
+        호출 밀도는 여전히 관리한다).
+        """
+        if priority:
+            with self._order_throttle_lock:
+                elapsed = time.time() - self._last_order_ts
+                if elapsed < self.ORDER_MIN_INTERVAL:
+                    time.sleep(self.ORDER_MIN_INTERVAL - elapsed)
+                now = time.time()
+                self._last_order_ts = now
+                self._last_request_ts = now
+            return
         with self._throttle_lock:
             elapsed = time.time() - self._last_request_ts
             if elapsed < self.MIN_INTERVAL:
@@ -46,9 +79,13 @@ class KiwoomREST:
             self._last_request_ts = time.time()
 
     def _request(self, path: str, api_id: str, body: dict,
-                 cont_yn: str = "N", next_key: str = "") -> dict:
-        """공통 POST 요청. 429는 자동 재시도."""
-        self._throttle()
+                 cont_yn: str = "N", next_key: str = "",
+                 priority: bool = False) -> dict:
+        """공통 POST 요청. 429는 자동 재시도.
+
+        priority=True는 주문(kt10000/kt10001) 전용 — 조회 대기열을 건너뛴다.
+        """
+        self._throttle(priority=priority)
         url = f"{self.host}{path}"
         headers = {
             "Content-Type": "application/json;charset=UTF-8",
@@ -105,7 +142,9 @@ class KiwoomREST:
             "trde_tp": trde_tp,
             "cond_uv": "",
         }
-        result = self._request("/api/dostk/ordr", "kt10000", body)
+        # priority=True — 주문 우선 레인 (2026-08-02). 진입 트리거가 걸린
+        # 순간에 조회 대기열 뒤에 서지 않는다(최대 0.6초 + 429 시 2초 절약).
+        result = self._request("/api/dostk/ordr", "kt10000", body, priority=True)
         if result.get("return_code") == 0:
             logger.info(
                 f"✅ 매수주문 성공 | {stock_code} | {qty}주 | "
@@ -124,7 +163,8 @@ class KiwoomREST:
             "trde_tp": trde_tp,
             "cond_uv": "",
         }
-        result = self._request("/api/dostk/ordr", "kt10001", body)
+        # 매도도 우선 레인 — 손절이 0.6초 늦으면 그만큼 더 밀린 가격에 나간다.
+        result = self._request("/api/dostk/ordr", "kt10001", body, priority=True)
         if result.get("return_code") == 0:
             logger.info(
                 f"✅ 매도주문 성공 | {stock_code} | {qty}주 | "

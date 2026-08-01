@@ -416,8 +416,12 @@ print("\n[10] 전략 라우팅 배타성 (눌림목매수는 눌림목자동에�
 def route(cond_name, now_dt=datetime(2026, 8, 3, 9, 30, 0)):
     st = build_strat(now_dt)
     calls = []
-    st.evaluate_1a_leading_strength = lambda *a, **k: (calls.append("1A"), (False, {"reason": "x"}))[1]
-    st.evaluate_pullback = lambda *a, **k: (calls.append("PB"), (False, {"reason": "x"}))[1]
+    # (2026-08-02) 1A/Pullback이 같은 틱 평가함수를 쓰게 되면서, 어느 전략으로
+    # 라우팅됐는지는 함수 이름이 아니라 sub_strategy 인자로 구분한다.
+    def spy(stock_code, sub_strategy, *a, **k):
+        calls.append("PB" if sub_strategy == "1A_눌림" else "1A")
+        return (False, {"reason": "x"})
+    st.evaluate_tick_entry = spy
     st._cond_names["R"] = cond_name
     st._evaluate_1a_pullback_entry("R", "R", 1, make_candles(15), 10_000, 9_900,
                                    now_dt.time())
@@ -617,29 +621,61 @@ check("둘 다 실패하면 포지션 등록 안 함", "F2" not in s.holdings)
 check("실패해도 pending은 반드시 해제(슬롯 영구점유 방지)", "F2" not in s.pending)
 
 # ═════════════════════════════════════════════════════════
-print("\n[17] 통합 — 실시간 편입 이벤트부터 매수까지")
+print("\n[17] 통합 — 실시간 편입 이벤트부터 매수까지 (2026-08-02 틱 구동)")
 # ═════════════════════════════════════════════════════════
+# [사양 변경] 예전엔 "대량체결만 터지면" watchlist_reentry(15초 폴링)가 샀다.
+# 이제는 무장(체결강도 FID 228이 100 이상 3초 연속) -> 발사(버스트) 2단이고,
+# 발사는 on_trade(체결 틱 콜백) 안에서 즉시 일어난다.
 s = build_strat(datetime(2026, 8, 3, 9, 7, 0))
 # WS가 파싱해 넘겨주는 값 그대로 (seq=1 -> 주도주상위)
 s.on_condition_hit("INT1", "통합종목", is_surge=False, cond_name="주도주상위")
-check("편입 즉시 체결틱 감시가 켜짐(1A 평가 진입 확인)",
+check("편입 즉시 체결틱 감시가 켜짐(pre-arm 확인)",
       s.phase1b.is_watching("INT1"))
 check("첫 평가는 틱이 없어 탈락하고 후보로만 남음",
       "INT1" in s.watch_list_today and "INT1" not in s.holdings)
 
-# 대량체결이 터진 뒤 재평가(watchlist_reentry가 15초마다 하는 일)
-from core.watchlist_reentry import try_watchlist_reentry
 s.phase1b.orderbook.update("INT1", {"ask_prices": [10_000, 10_010, 10_020],
                                     "ask_volumes": [3_000, 3_000, 3_000]}, now=now)
-feed(s.phase1b.trade_flow, "INT1", 3, 30_000_000)
-bought = try_watchlist_reentry(s, s._now())
-check("대량체결 발생 후 재진입 스캔에서 매수 성립", bought == 1 and "INT1" in s.holdings,
-      f"bought={bought}")
+t0 = time.time()
+# 강도 100 이상이 들어오기 시작 -> 타이머 시작(아직 무장 아님)
+s.on_trade({"stock_code": "INT1", "price": 10_000, "side": "buy",
+            "volume": 10, "strength": 120.0}, now=t0)
+check("강도 100+ 첫 틱: 타이머만 시작, 아직 무장 아님",
+      "INT1" in s._strength_since and "INT1" not in s._armed_at)
+check("무장 전에는 매수하지 않음", "INT1" not in s.holdings)
+
+# 2초 경과 — 아직 3초 미달
+s.on_trade({"stock_code": "INT1", "price": 10_000, "side": "buy",
+            "volume": 10, "strength": 115.0}, now=t0 + 2.0)
+check("2초 경과(3초 미달)에도 무장 안 됨", "INT1" not in s._armed_at)
+
+# 3.5초 경과 + 그 틱 자체가 대량체결(3천만원 x 2건)
+feed(s.phase1b.trade_flow, "INT1", 2, 30_000_000, now=t0 + 3.5, span=1.0)
+s.on_trade({"stock_code": "INT1", "price": 10_000, "side": "buy",
+            "volume": 3_000, "strength": 130.0}, now=t0 + 3.5)
+check("3초 연속 유지 -> 무장 성립", "INT1" in s._armed_at)
+check("무장 + 버스트 -> 그 틱에서 즉시 매수(폴링 대기 없음)",
+      "INT1" in s.holdings, f"holdings={list(s.holdings)}")
 check("매수 방식이 호가 두께에 따라 시장가로 선택됨",
       s.order_manager.orders[-1]["style"] == "market")
 check("sub_strategy가 1A로 기록", s.holdings["INT1"]["sub_strategy"] == "1A")
 check("entry_strength 기록(동적캡/슬롯교체 전제조건)",
       s.holdings["INT1"]["entry_strength"] > 0)
+
+# 강도가 100 밑으로 떨어지면 타이머가 리셋되는지 (별도 종목으로 확인)
+s2 = build_strat(datetime(2026, 8, 3, 9, 7, 0))
+s2.on_condition_hit("RST1", "리셋종목", is_surge=False, cond_name="주도주상위")
+s2.on_trade({"stock_code": "RST1", "price": 10_000, "side": "buy",
+             "volume": 10, "strength": 120.0}, now=t0)
+s2.on_trade({"stock_code": "RST1", "price": 10_000, "side": "sell",
+             "volume": 10, "strength": 88.0}, now=t0 + 1.0)
+check("강도가 100 밑으로 떨어지면 연속 타이머 리셋",
+      "RST1" not in s2._strength_since)
+feed(s2.phase1b.trade_flow, "RST1", 2, 30_000_000, now=t0 + 4.0, span=1.0)
+s2.on_trade({"stock_code": "RST1", "price": 10_000, "side": "buy",
+             "volume": 3_000, "strength": 130.0}, now=t0 + 4.0)
+check("리셋 후엔 버스트가 와도 매수 안 됨(3초 다시 채워야 함)",
+      "RST1" not in s2.holdings)
 
 # 매수 후에도 틱이 계속 쌓여 동적캡이 살아있는지
 s.holdings["INT1"]["warmup_until"] = s._now() - timedelta(seconds=1)
@@ -651,6 +687,20 @@ check("보유 후에도 강도 갱신됨 -> 동적캡/손실반등 매도가 살
 # ═════════════════════════════════════════════════════════
 print("\n[18] watchlist 재평가 REST 예산 (429 포화 대응)")
 # ═════════════════════════════════════════════════════════
+# [사양 변경 2026-08-02] Pullback이 틱 구동으로 바뀌면서 분봉이 전혀 필요
+# 없어졌다 — 이제 **두 전략 모두** REST 0콜이다(구버전은 Pullback 후보마다
+# 분봉 2콜: _get_merged_candles + OBV용 400봉).
+from core.watchlist_reentry import try_watchlist_reentry
+
+
+def arm(strat, code, t_base, strength=130.0):
+    """강도 100+ 를 3초 이상 연속 유지시켜 무장 상태로 만든다."""
+    strat.on_trade({"stock_code": code, "price": 10_000, "side": "buy",
+                    "volume": 10, "strength": strength}, now=t_base)
+    strat.on_trade({"stock_code": code, "price": 10_000, "side": "buy",
+                    "volume": 10, "strength": strength}, now=t_base + 3.5)
+
+
 s = build_strat(datetime(2026, 8, 3, 9, 30, 0))
 for i in range(10):
     code = f"Q{i}"
@@ -673,13 +723,7 @@ s2.phase1b.start_watching("NOOPEN")
 feed(s2.phase1b.trade_flow, "NOOPEN", 3, 1_000_000)
 s2.api.calls.clear()
 try_watchlist_reentry(s2, s2._now())
-check("시가 캐시 없으면 REST로 1회 조회(필터를 조용히 끄지 않음)",
-      len([c for c in s2.api.calls if c[0] == "candles"]) == 1, str(s2.api.calls))
-check("조회한 시가를 캐시 -> 다음 사이클은 REST 0콜",
-      s2._opening_prices.get("NOOPEN", 0) > 0, str(s2._opening_prices))
-s2.api.calls.clear()
-try_watchlist_reentry(s2, s2._now())
-check("두 번째 사이클은 실제로 REST 0콜",
+check("시가 캐시가 없어도 REST를 부르지 않음(틱 경로는 분봉 불필요)",
       len([c for c in s2.api.calls if c[0] == "candles"]) == 0, str(s2.api.calls))
 
 s3 = build_strat(datetime(2026, 8, 3, 9, 30, 0))
@@ -691,10 +735,10 @@ s3.phase1b.start_watching("PB1")
 feed(s3.phase1b.trade_flow, "PB1", 3, 1_000_000)
 s3.api.calls.clear()
 try_watchlist_reentry(s3, s3._now())
-check("Pullback 후보는 분봉이 필요하므로 REST 조회 유지",
-      len([c for c in s3.api.calls if c[0] == "candles"]) >= 1, str(s3.api.calls))
+check("Pullback 후보도 이제 REST 0콜 (구버전은 분봉 2콜)",
+      len([c for c in s3.api.calls if c[0] == "candles"]) == 0, str(s3.api.calls))
 
-# 고속 경로에서도 매수까지 정상 성립하는지
+# 무장된 종목이 재진입 스캔에서도 매수까지 성립하는지(백스톱 역할 확인)
 s4 = build_strat(datetime(2026, 8, 3, 9, 30, 0))
 s4.watch_list_today.add("FAST")
 s4._cond_names["FAST"] = "주도주상위"
@@ -703,12 +747,27 @@ s4._opening_prices["FAST"] = 10_000
 s4.phase1b.start_watching("FAST")
 s4.phase1b.orderbook.update("FAST", {"ask_prices": [10_000, 10_010, 10_020],
                                      "ask_volumes": [3_000, 3_000, 3_000]}, now=now)
-feed(s4.phase1b.trade_flow, "FAST", 3, 30_000_000)
+_t = time.time()
+# 무장만 시켜두고(버스트는 아직) 슬롯이 꽉 찼다가 풀린 상황을 가정
+s4._strength_since["FAST"] = _t - 5.0
+feed(s4.phase1b.trade_flow, "FAST", 2, 30_000_000, now=_t, span=1.0)
 s4.api.calls.clear()
 n = try_watchlist_reentry(s4, s4._now())
-check("REST 0콜 경로로도 1A 매수 성립", n == 1 and "FAST" in s4.holdings, f"n={n}")
-check("고속 경로 매수 시에도 분봉 조회 없음",
+check("무장된 종목은 재진입 스캔(백스톱)에서도 매수 성립",
+      n == 1 and "FAST" in s4.holdings, f"n={n}")
+check("그 경로에서도 분봉 조회 없음",
       len([c for c in s4.api.calls if c[0] == "candles"]) == 0, str(s4.api.calls))
+
+s5 = build_strat(datetime(2026, 8, 3, 9, 30, 0))
+s5.watch_list_today.add("NOARM")
+s5._cond_names["NOARM"] = "주도주상위"
+s5._stock_names["NOARM"] = "NOARM"
+s5._opening_prices["NOARM"] = 10_000
+s5.phase1b.start_watching("NOARM")
+feed(s5.phase1b.trade_flow, "NOARM", 3, 30_000_000)
+n5 = try_watchlist_reentry(s5, s5._now())
+check("무장 안 된 종목은 버스트가 있어도 재진입 스캔에서 매수 안 됨",
+      n5 == 0 and "NOARM" not in s5.holdings, f"n={n5}")
 
 # ═════════════════════════════════════════════════════════
 print("\n[19] 시간대별 1A 캡 + 확장 슬롯 도달 가능성")
@@ -803,6 +862,8 @@ s.phase1b.orderbook.update("FREE", {"ask_prices": [10_000, 10_010, 10_020],
                                     "ask_volumes": [3_000, 3_000, 3_000]}, now=now)
 feed(s.phase1b.trade_flow, "FREE", 3, 30_000_000)
 s._cond_names["FREE"] = "주도주상위"
+# (2026-08-02) 무장(강도 100+ 3초 연속)이 진입의 선행조건 — 버스트만으로는 안 산다.
+s._strength_since["FREE"] = time.time() - 5.0
 s._evaluate_1a_pullback_entry("FREE", "FREE", 1, None, 10_000, 9_800,
                               datetime(2026, 8, 3, 9, 30, 0).time())
 check("슬롯 여유 시 매수 성립", "FREE" in s.holdings)
@@ -1125,8 +1186,10 @@ check("주도주상위 '단독'을 Pullback으로 사려 하면 차단 (반대 �
 def route_stage(cond, hm):
     st = build_strat(datetime(2026, 8, 3, *hm))
     calls = []
-    st.evaluate_1a_leading_strength = lambda *a, **k: (calls.append("1A"), (False, {"reason": "x"}))[1]
-    st.evaluate_pullback = lambda *a, **k: (calls.append("PB"), (False, {"reason": "x"}))[1]
+    def spy(stock_code, sub_strategy, *a, **k):
+        calls.append("PB" if sub_strategy == "1A_눌림" else "1A")
+        return (False, {"reason": "x"})
+    st.evaluate_tick_entry = spy
     st._cond_names["RT"] = cond
     st._evaluate_1a_pullback_entry("RT", "RT", 1, make_candles(15), 10_000, 9_900,
                                    datetime(2026, 8, 3, *hm).time())
@@ -1316,12 +1379,24 @@ check("ENTRY_WINDOW_END = 두 전략 공통 종료(14:50)",
 import core.watchlist_reentry as WR
 check("watchlist_reentry도 같은 종료 시각을 씀", WR.ENTRY_WINDOW_END == SM.ENTRY_WINDOW_END)
 
-s = build_strat(datetime(2026, 8, 3, 14, 45, 0))   # 진입창 안
-s.watch_list_today.add("LATEPB")
-s._cond_names["LATEPB"] = "눌림목자동"
-s._stock_names["LATEPB"] = "LATEPB"
-try_watchlist_reentry(s, s._now())
-check("14:45엔 재평가가 돌아감", any(c[1] == "LATEPB" for c in s.api.calls), str(s.api.calls))
+def _reentry_evaluated(now_dt):
+    """그 시각에 재진입 스캔이 실제로 후보를 평가했는지. (REST 호출로는 더 이상
+    확인할 수 없다 — 2026-08-02부터 이 경로는 REST를 한 콜도 쓰지 않는다.)"""
+    st = build_strat(now_dt)
+    st.watch_list_today.add("LATEPB")
+    st._cond_names["LATEPB"] = "눌림목자동"
+    st._stock_names["LATEPB"] = "LATEPB"
+    st.phase1b.start_watching("LATEPB")
+    feed(st.phase1b.trade_flow, "LATEPB", 3, 1_000_000)   # 신선한 체결가
+    seen = []
+    st._evaluate_1a_pullback_entry = lambda code, *a, **k: (seen.append(code), False)[1]
+    try_watchlist_reentry(st, st._now())
+    return seen
+
+
+check("14:45엔 재평가가 돌아감",
+      _reentry_evaluated(datetime(2026, 8, 3, 14, 45, 0)) == ["LATEPB"],
+      str(_reentry_evaluated(datetime(2026, 8, 3, 14, 45, 0))))
 
 s2 = build_strat(datetime(2026, 8, 3, 14, 55, 0))  # 진입창 종료 후
 s2.watch_list_today.add("OVER")
