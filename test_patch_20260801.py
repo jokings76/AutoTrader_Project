@@ -71,9 +71,9 @@ class _OrderMgr:
                             "ref_price": ref_price})
         return {"success": True, "ord_no": "1", "price": ref_price or 10_000,
                 "style": order_style}
-    def sell(self, code, qty, price=0):
-        self.orders.append({"code": code, "qty": qty, "style": "sell"})
-        return {"success": True, "ord_no": "2"}
+    def sell(self, code, qty, price=0, order_style="market"):
+        self.orders.append({"code": code, "qty": qty, "style": f"sell:{order_style}"})
+        return {"success": True, "ord_no": "2", "price": price, "style": order_style}
     def get_stock_name(self, code): return code
 
 
@@ -241,11 +241,18 @@ check("10:30 이후에도 후보 틱버퍼 보존(구버전은 여기서 리셋)
 check("보유종목(HOLD) 감시 유지", s.phase1b.is_watching("HOLD"))
 check("후보도 보유도 아닌 종목(STALE)만 해제", not s.phase1b.is_watching("STALE"))
 
-s2 = build_strat(datetime(2026, 8, 3, 14, 55, 0))   # 1A 창 종료 후
+s2 = build_strat(datetime(2026, 8, 3, 15, 15, 0))   # 진입창(15:10) 종료 후
 s2.watch_list_today.add("CAND")
 s2.phase1b.start_watching("CAND")
 s2.tick()
-check("1A 창(14:50) 종료 후에는 후보도 정리", not s2.phase1b.is_watching("CAND"))
+check("진입창(ENTRY_WINDOW_END=15:10) 종료 후에는 후보도 정리",
+      not s2.phase1b.is_watching("CAND"))
+s3 = build_strat(datetime(2026, 8, 3, 14, 55, 0))   # 1A는 끝났지만 Pullback은 진행중
+s3.watch_list_today.add("CAND")
+s3.phase1b.start_watching("CAND")
+s3.tick()
+check("14:50~15:10 구간엔 감시 유지 (Pullback이 아직 살아있음)",
+      s3.phase1b.is_watching("CAND"))
 
 # ═════════════════════════════════════════════════════════
 print("\n[6] on_trade — 보유 종목도 체결틱이 계속 쌓이는지")
@@ -339,7 +346,15 @@ ok, info = eval_1a(lambda tf: feed(tf, "X", 3, 30_000_000), open_px=10_000, px=1
 check("시가대비 +4%는 통과", ok, info.get("reason", ""))
 ok, info = eval_1a(lambda tf: feed(tf, "X", 3, 30_000_000), cond="돌파자동매매용",
                    open_px=10_000, px=10_600)
-check("시가급등 필터는 주도주상위 전용(돌파자동매매용은 통과)", ok, info.get("reason", ""))
+check("시가급등 +5% 필터가 돌파자동매매용에도 적용됨 (2026-08-01 확대)",
+      not ok and "시가대비" in info["reason"], info.get("reason", ""))
+ok, info = eval_1a(lambda tf: feed(tf, "X", 3, 30_000_000), cond="기타",
+                   open_px=10_000, px=10_600)
+check("cond_name이 '기타'로 뭉개져도 필터가 꺼지지 않음",
+      not ok and "시가대비" in info["reason"], info.get("reason", ""))
+ok, info = eval_1a(lambda tf: feed(tf, "X", 3, 30_000_000), cond="돌파자동매매용",
+                   open_px=0.0, px=10_600)
+check("당일 시가를 모르면(0) 필터는 건너뜀 — 모르는 값으로 막지 않음", ok)
 
 # ═════════════════════════════════════════════════════════
 print("\n[9] 하이브리드 주문 방식 판정")
@@ -399,7 +414,7 @@ check("빈 호가창에서는 지정가로 주문",
 # ═════════════════════════════════════════════════════════
 print("\n[10] 전략 라우팅 배타성 (눌림목매수는 눌림목자동에서만)")
 # ═════════════════════════════════════════════════════════
-def route(cond_name, now_dt=datetime(2026, 8, 3, 9, 5, 0)):
+def route(cond_name, now_dt=datetime(2026, 8, 3, 9, 30, 0)):
     st = build_strat(now_dt)
     calls = []
     st.evaluate_1a_leading_strength = lambda *a, **k: (calls.append("1A"), (False, {"reason": "x"}))[1]
@@ -412,13 +427,35 @@ def route(cond_name, now_dt=datetime(2026, 8, 3, 9, 5, 0)):
 check("눌림목자동 단독 -> Pullback만 평가", route("눌림목자동") == ["PB"], str(route("눌림목자동")))
 check("눌림목자동+주도주상위 -> Pullback만 (1A 평가 안 함)",
       route("주도주상위+눌림목자동") == ["PB"], str(route("주도주상위+눌림목자동")))
+check("눌림목자동+돌파자동매매용 -> Pullback만",
+      route("눌림목자동+돌파자동매매용") == ["PB"])
+check("3개 전부 중복 -> Pullback만",
+      route("주도주상위+눌림목자동+돌파자동매매용") == ["PB"])
 check("주도주상위 -> 1A만 평가", route("주도주상위") == ["1A"], str(route("주도주상위")))
-check("돌파자동매매용 -> 1A만 평가 (09:20 이후)",
-      route("돌파자동매매용", datetime(2026, 8, 3, 9, 25, 0)) == ["1A"])
-check("돌파자동매매용은 09:20 전엔 평가 보류",
-      route("돌파자동매매용", datetime(2026, 8, 3, 9, 5, 0)) == [])
-check("눌림목자동은 10:30 이후 Pullback 창 종료로 평가 없음",
-      route("눌림목자동", datetime(2026, 8, 3, 11, 0, 0)) == [])
+check("돌파자동매매용 -> 1A만 평가", route("돌파자동매매용") == ["1A"])
+check("주도주상위+돌파자동매매용(눌림목 없음) -> 1A만",
+      route("주도주상위+돌파자동매매용") == ["1A"])
+# 09:20 지연 게이트 제거 (제안 3)
+check("돌파자동매매용이 09:05에도 즉시 1A 평가됨 (09:20 지연 게이트 제거)",
+      route("돌파자동매매용", datetime(2026, 8, 3, 9, 5, 0)) == ["1A"],
+      str(route("돌파자동매매용", datetime(2026, 8, 3, 9, 5, 0))))
+check("주도주상위도 09:05 즉시 평가",
+      route("주도주상위", datetime(2026, 8, 3, 9, 5, 0)) == ["1A"])
+# Pullback 시간창 09:20 ~ 15:10
+check("눌림목자동은 09:15엔 아직 평가 안 함 (Pullback 09:20 시작)",
+      route("눌림목자동", datetime(2026, 8, 3, 9, 15, 0)) == [],
+      str(route("눌림목자동", datetime(2026, 8, 3, 9, 15, 0))))
+check("눌림목자동 09:20 정각부터 평가",
+      route("눌림목자동", datetime(2026, 8, 3, 9, 20, 0)) == ["PB"])
+check("눌림목자동은 11:00에도 계속 평가 (구버전은 10:30 종료)",
+      route("눌림목자동", datetime(2026, 8, 3, 11, 0, 0)) == ["PB"],
+      str(route("눌림목자동", datetime(2026, 8, 3, 11, 0, 0))))
+check("눌림목자동은 15:05까지 평가 (15:10 종료 직전)",
+      route("눌림목자동", datetime(2026, 8, 3, 15, 5, 0)) == ["PB"])
+check("눌림목자동 15:10 이후는 평가 없음",
+      route("눌림목자동", datetime(2026, 8, 3, 15, 15, 0)) == [])
+check("1A는 14:50 이후 평가 없음 (자체 창 종료)",
+      route("주도주상위", datetime(2026, 8, 3, 14, 55, 0)) == [])
 
 # ═════════════════════════════════════════════════════════
 print("\n[11] 장 시작 전(08:59) 편입 — 폐기 대신 후보 등록")
@@ -431,9 +468,9 @@ check("조건검색식 이름 보존", s._cond_names.get("PRE1") == "주도주�
 check("장 시작 전에는 REST 분봉 조회 안 함(호출 예산 절약)",
       not any(c[1] == "PRE1" for c in s.api.calls), str(s.api.calls))
 
-s2 = build_strat(datetime(2026, 8, 3, 14, 55, 0))
+s2 = build_strat(datetime(2026, 8, 3, 15, 15, 0))
 s2.on_condition_hit("LATE", "장막판", cond_name="주도주상위")
-check("1A 창 종료 후 편입은 평가 안 함", "LATE" not in s2.watch_list_today)
+check("진입창(15:10) 종료 후 편입은 평가 안 함", "LATE" not in s2.watch_list_today)
 check("그래도 이름/조건명은 기록", s2._cond_names.get("LATE") == "주도주상위")
 
 # ═════════════════════════════════════════════════════════
@@ -666,10 +703,13 @@ print("\n[19] 시간대별 1A 캡 + 확장 슬롯 도달 가능성")
 # ═════════════════════════════════════════════════════════
 early = build_strat(datetime(2026, 8, 3, 9, 30, 0))
 late = build_strat(datetime(2026, 8, 3, 11, 0, 0))
-check("10:30 이전 1A 캡 = 3", early.phase1a_max_slots() == 3)
-check("10:30 이후 1A 캡 = 5 (노는 눌림 슬롯 흡수)", late.phase1a_max_slots() == 5)
-check("구조상 확장 슬롯 도달 가능해짐 (1A 5 + 눌림 3 = 8 > MAX_HOLDINGS 6)",
-      late.phase1a_max_slots() + SM.PULLBACK_MAX_SLOTS > SM.MAX_HOLDINGS)
+check("1A 캡은 시간과 무관하게 4 (Pullback이 15:10까지라 '노는 슬롯' 전제 소멸)",
+      early.phase1a_max_slots() == 4 and late.phase1a_max_slots() == 4)
+check("눌림 캡 4", SM.PULLBACK_MAX_SLOTS == 4)
+check("캡 합(8) > 공유 상한(6) — 한쪽이 놀면 다른 쪽이 흡수 + 확장슬롯 도달 가능",
+      SM.PHASE1A_MAX_SLOTS + SM.PULLBACK_MAX_SLOTS > SM.MAX_HOLDINGS)
+check("한 전략이 공유 상한(6)을 독식하지는 못함",
+      SM.PHASE1A_MAX_SLOTS < SM.MAX_HOLDINGS and SM.PULLBACK_MAX_SLOTS < SM.MAX_HOLDINGS)
 
 # ═════════════════════════════════════════════════════════
 print("\n[20] pending 오버부킹 방지")
@@ -1055,6 +1095,200 @@ s3._cond_names["RT"] = "주도주상위+눌림목자동"
 s3._evaluate_1a_pullback_entry("RT", "RT", 1, make_candles(15), 10_000, 9_900,
                                datetime(2026, 8, 3, 9, 30, 0).time())
 check("라우팅 단계에서도 눌림목자동 포함이면 Pullback만 평가", calls == ["PB"], str(calls))
+
+# ═════════════════════════════════════════════════════════
+print("\n[29] 제안 1 — 매도 시장가 (미체결로 포지션 이탈하던 구멍)")
+# ═════════════════════════════════════════════════════════
+class _SellSpy:
+    def __init__(self, reject_market=False):
+        self.sent = []
+        self.reject_market = reject_market
+    def sell_market_order(self, code, qty, price=0, trde_tp="3"):
+        self.sent.append({"price": price, "trde_tp": trde_tp})
+        if self.reject_market and trde_tp == "3":
+            return {"return_code": -1, "return_msg": "시장가 미지원"}
+        return {"return_code": 0, "ord_no": "S1"}
+    def buy_market_order(self, *a, **k): return {"return_code": 0, "ord_no": "B1"}
+    def get_current_price(self, code): return 10_000
+
+om = OrderManager(_SellSpy())
+om.get_stock_name = lambda c: c
+r = om.sell("A", 10)
+check("매도 기본값이 시장가(trde_tp='3', 주문가 0)",
+      om.rest.sent[-1] == {"price": 0, "trde_tp": "3"} and r["success"], str(om.rest.sent))
+check("반환값에 style='market'", r.get("style") == "market")
+r = om.sell("A", 10, price=0, order_style="limit")
+check("명시적 limit 요청 시 지정가(현재가-1틱)",
+      om.rest.sent[-1]["trde_tp"] == "0" and om.rest.sent[-1]["price"] < 10_000,
+      str(om.rest.sent[-1]))
+check("시장가일 때 get_current_price REST 호출 불필요(호가 조회 없이 즉시)",
+      True)
+
+s = build_strat()
+s.holdings["SM1"] = {"trade_id": 1, "buy_price": 10_000, "buy_quantity": 10,
+                     "buy_time": s._now(), "stock_name": "SM1", "sub_strategy": "1A",
+                     "highest_price": 10_000, "lowest_price": 10_000}
+calls = []
+s.order_manager.sell = lambda c, q, price=0, order_style="market": (
+    calls.append(order_style), {"success": True, "ord_no": "1", "price": 0})[1]
+s._execute_sell("SM1", 10_200, "익절 테스트")
+check("_execute_sell이 시장가로 매도 요청", calls == ["market"], str(calls))
+check("청산 후 holdings에서 제거", "SM1" not in s.holdings)
+
+s = build_strat()
+s.holdings["SM2"] = {"trade_id": 1, "buy_price": 10_000, "buy_quantity": 10,
+                     "buy_time": s._now(), "stock_name": "SM2", "sub_strategy": "1A",
+                     "highest_price": 10_000, "lowest_price": 10_000}
+calls = []
+def _reject_market(c, q, price=0, order_style="market"):
+    calls.append(order_style)
+    if order_style == "market":
+        return {"success": False, "error": "시장가 미지원"}
+    return {"success": True, "ord_no": "1", "price": 9_990}
+s.order_manager.sell = _reject_market
+s._execute_sell("SM2", 10_200, "폴백 테스트")
+check("시장가 매도 거부 -> 지정가로 1회 폴백", calls == ["market", "limit"], str(calls))
+check("폴백으로 청산 성공", "SM2" not in s.holdings)
+
+s = build_strat()
+s.holdings["SM3"] = {"trade_id": 1, "buy_price": 10_000, "buy_quantity": 10,
+                     "buy_time": s._now(), "stock_name": "SM3", "sub_strategy": "1A",
+                     "highest_price": 10_000, "lowest_price": 10_000}
+s.order_manager.sell = lambda *a, **k: {"success": False, "error": "잔고없음"}
+s._execute_sell("SM3", 10_200, "둘 다 실패")
+check("시장가·지정가 둘 다 실패하면 포지션 유지(임의 삭제 안 함)",
+      "SM3" in s.holdings)
+check("매도 실패 후 pending 해제", "SM3" not in s.pending)
+
+# ═════════════════════════════════════════════════════════
+print("\n[30] 제안 1 안전망 — 유령 포지션(서버엔 있는데 봇엔 없음) 감지")
+# ═════════════════════════════════════════════════════════
+import main as M
+
+class _Bot:
+    """TradingBot의 유령 감지 부분만 격리."""
+    def __init__(self, strat):
+        self.strategy_mgr = strat
+        self._orphan_notified = set()
+    _detect_orphan_positions = M.TradingBot._detect_orphan_positions
+
+sent = []
+_orig_tg = M.send_telegram
+M.send_telegram = lambda msg, target=None: sent.append(msg)
+try:
+    s = build_strat()
+    s._stock_names["ORPH"] = "유령종목"
+    bot = _Bot(s)
+    bot._detect_orphan_positions({"ORPH": {"qty": 100}})
+    check("서버 잔고인데 holdings에 없으면 경고 발송", len(sent) == 1, str(len(sent)))
+    check("경고문에 종목명·수량 포함",
+          "유령종목" in sent[0] and "100주" in sent[0], sent[0][:60])
+    bot._detect_orphan_positions({"ORPH": {"qty": 100}})
+    check("같은 종목 반복 알림 안 함(스팸 방지)", len(sent) == 1)
+
+    sent.clear()
+    s.holdings["OK1"] = {"buy_price": 1, "buy_quantity": 1, "buy_time": s._now(),
+                         "stock_name": "OK1", "highest_price": 1}
+    bot._detect_orphan_positions({"OK1": {"qty": 10}})
+    check("정상 보유 종목은 경고 없음", not sent)
+
+    sent.clear()
+    s.pending.add("PEND")
+    bot._detect_orphan_positions({"PEND": {"qty": 10}})
+    check("매수/매도 진행중(pending) 종목도 경고 없음", not sent)
+
+    sent.clear()
+    bot._detect_orphan_positions({"ZERO": {"qty": 0}})
+    check("수량 0은 무시", not sent)
+
+    sent.clear()
+    bot._detect_orphan_positions({})
+    check("빈 잔고에도 예외 없음", not sent)
+
+    check("자동 복구는 하지 않음(사용자 판단에 맡김)", "ORPH" not in s.holdings)
+finally:
+    M.send_telegram = _orig_tg
+
+# ═════════════════════════════════════════════════════════
+print("\n[31] 제안 2 — 빈 호가창 지정가를 매도N호가로")
+# ═════════════════════════════════════════════════════════
+s = build_strat()
+s.phase1b.start_watching("TH")
+s.phase1b.orderbook.update("TH", {"ask_prices": [10_050, 10_100, 10_150],
+                                  "ask_volumes": [100, 100, 100]}, now=now)
+style, ref, why = s._resolve_order_style("TH", 10_000)
+check("빈 호가창 -> 지정가", style == "limit", why)
+check("지정가 가격이 매도3호가(10,150) — 현재가+1틱이 아님", ref == 10_150, str(ref))
+check("사유문에 실제 지정가가 표시됨", "10,150원" in why, why)
+
+ob = s.phase1b.orderbook
+check("get_ask_price: 요청 레벨 없으면 가장 깊은 호가로 대체",
+      ob.get_ask_price("TH", 10) == 10_150, str(ob.get_ask_price("TH", 10)))
+check("get_ask_price: 스냅샷 없으면 None", ob.get_ask_price("NONE", 1) is None)
+
+s.phase1b.orderbook.update("TK", {"ask_prices": [10_050, 10_100, 10_150],
+                                  "ask_volumes": [3_000, 3_000, 3_000]}, now=now)
+s.phase1b.start_watching("TK")
+style, ref, why = s._resolve_order_style("TK", 10_000)
+check("두툼한 호가창 -> 시장가, 기준가는 매도1호가", style == "market" and ref == 10_050,
+      f"{style}/{ref}")
+
+s = build_strat()
+s.phase1b.start_watching("TL")
+s.phase1b.orderbook.update("TL", {"ask_prices": [10_050, 10_100, 10_150],
+                                  "ask_volumes": [100, 100, 100]}, now=now)
+feed(s.phase1b.trade_flow, "TL", 5, 1_000_000)
+sent_orders = []
+s.order_manager.buy = lambda c, q, price=0, sizing="REGULAR", exit_strategy="REGULAR", \
+    order_style="limit", ref_price=0: (
+        sent_orders.append({"price": price, "style": order_style}),
+        {"success": True, "ord_no": "1", "price": price or 10_000, "style": order_style})[1]
+s._execute_buy("TL", "TL", 1, {"current_price": 10_000}, "1A")
+check("_execute_buy가 지정가 주문에 매도3호가를 실어 보냄",
+      sent_orders and sent_orders[-1] == {"price": 10_150, "style": "limit"},
+      str(sent_orders))
+check("매수단가도 그 지정가로 기록", s.holdings["TL"]["buy_price"] == 10_150)
+
+s = build_strat()
+s.phase1b.start_watching("TN")
+feed(s.phase1b.trade_flow, "TN", 5, 1_000_000)
+sent_orders = []
+s.order_manager.buy = lambda c, q, price=0, sizing="REGULAR", exit_strategy="REGULAR", \
+    order_style="limit", ref_price=0: (
+        sent_orders.append({"price": price, "style": order_style}),
+        {"success": True, "ord_no": "1", "price": 10_000, "style": order_style})[1]
+s._execute_buy("TN", "TN", 1, {"current_price": 10_000}, "1A")
+check("호가 정보가 없으면 price=0 -> 기존 '현재가+1틱' 폴백 유지",
+      sent_orders and sent_orders[-1] == {"price": 0, "style": "limit"},
+      str(sent_orders))
+
+# ═════════════════════════════════════════════════════════
+print("\n[32] 시간창 확장 정합성 (평가·감시·재진입이 함께 늘었는지)")
+# ═════════════════════════════════════════════════════════
+check("ENTRY_WINDOW_END = 1A/Pullback 중 늦은 쪽(15:10)",
+      SM.ENTRY_WINDOW_END == SM.PULLBACK_END == SM.ENTRY_HARD_CUTOFF,
+      f"{SM.ENTRY_WINDOW_END}")
+import core.watchlist_reentry as WR
+check("watchlist_reentry도 같은 종료 시각을 씀(14:50에 안 끊김)",
+      WR.ENTRY_WINDOW_END == SM.ENTRY_WINDOW_END)
+
+s = build_strat(datetime(2026, 8, 3, 15, 0, 0))    # 1A 끝, Pullback 진행중
+s.watch_list_today.add("LATEPB")
+s._cond_names["LATEPB"] = "눌림목자동"
+s._stock_names["LATEPB"] = "LATEPB"
+n = try_watchlist_reentry(s, s._now())
+check("15:00에도 Pullback 후보 재평가가 돌아감(구버전은 14:50에 정지)",
+      any(c[1] == "LATEPB" for c in s.api.calls), str(s.api.calls))
+
+s2 = build_strat(datetime(2026, 8, 3, 15, 12, 0))  # 진입창 종료 후
+s2.watch_list_today.add("OVER")
+s2._cond_names["OVER"] = "눌림목자동"
+s2.api.calls.clear()
+try_watchlist_reentry(s2, s2._now())
+check("15:10 이후엔 재평가도 정지", not s2.api.calls, str(s2.api.calls))
+
+check("Pullback 종료(15:10) == 신규매수 하드컷오프 — 조건통과/주문차단 불일치 없음",
+      SM.PULLBACK_END == SM.ENTRY_HARD_CUTOFF)
 
 # ═════════════════════════════════════════════════════════
 print("\n" + "=" * 60)

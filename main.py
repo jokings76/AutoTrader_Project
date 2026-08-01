@@ -74,6 +74,7 @@ class TradingBot:
         self._raw_keys_logged = False
         self.surge_seqs: set[str] = set()   # 급등 즉시매수 대상 조건 seq
         self._known_hits: dict[str, set[str]] = {}  # cond_seq -> 이미 본 종목 (폴링 diff용)
+        self._orphan_notified: set[str] = set()  # 유령 포지션 알림 중복 방지 (2026-08-01)
         self._last_signal_time = time.time()  # task_signal_watchdog와 WS 재연결 핸들러가 공유
 
     async def setup(self):
@@ -503,6 +504,48 @@ class TradingBot:
                         f"보유수량 {tracked_qty}주 -> {server_qty}주로 갱신 (남은 수량 자동청산 계속)",
                         target="order",
                     )
+
+        self._detect_orphan_positions(server_positions)
+
+    def _detect_orphan_positions(self, server_positions: dict):
+        """서버엔 있는데 봇 holdings엔 없는 종목 감지 (2026-08-01 신규 안전망).
+
+        기존 _reconcile_manual_sells는 holdings -> 서버 방향만 봤다. 그래서
+        **매도 주문이 접수는 됐는데 체결이 안 된 경우**(지정가 시절의 실제 위험),
+        봇은 holdings에서 지우고 "매도 체결" 알림까지 보내지만 주식은 계좌에
+        그대로 남아 아무도 관리하지 않는 상태가 됐다. 손절도 익절도 안 되고
+        장마감 강제청산 대상도 아니다(강제청산은 holdings를 순회하므로).
+
+        매도를 시장가로 바꿔 발생 확률 자체를 크게 낮췄지만, 그래도 남는
+        경우(부분체결, 수동 매수, API 이상)를 놓치지 않으려고 감지만 해서
+        알린다. **자동 복구는 하지 않는다** — 사용자가 직접 산 종목까지 봇이
+        멋대로 관리 대상에 넣어 팔아버리면 더 큰 사고이므로, 판단은 사람에게
+        맡기는 것이 맞다. 알림은 종목당 1회만(장중 반복 스팸 방지).
+        """
+        strat = self.strategy_mgr
+        if not strat or not server_positions:
+            return
+        for code, info in server_positions.items():
+            if code in strat.holdings or code in strat.pending:
+                continue
+            if code in self._orphan_notified:
+                continue
+            qty = (info or {}).get("qty", 0)
+            if qty <= 0:
+                continue
+            self._orphan_notified.add(code)
+            name = strat._stock_names.get(code, code)
+            logger.warning(
+                "[%s] %s 유령 포지션 감지 — 서버 잔고 %d주인데 봇 관리 목록에 없음",
+                code, name, qty,
+            )
+            send_telegram(
+                f"⚠️ 미관리 잔고 감지\n{name} ({code}) {qty}주\n"
+                f"봇이 '매도 완료'로 처리했지만 계좌에 남아 있습니다.\n"
+                f"(매도 미체결 또는 수동 매수 가능성 — 자동 청산 대상이 아니므로 "
+                f"직접 확인 필요)",
+                target="order",
+            )
 
     def _on_ws_disconnect(self):
         """WS 단절 감지 직후 1회 호출 (KiwoomWS 콜백, 동기)."""

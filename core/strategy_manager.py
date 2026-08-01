@@ -76,19 +76,32 @@ from config.phase_settings import EXIT_POLICY
 # 분봉이 아직 안 쌓였으면 자연히 게이트에서 보류될 뿐 에러는 없음 — 1분을
 # 그냥 버릴 이유가 없어 앞당김.
 GROUP_A_START = time(9, 0)
-PULLBACK_END = time(10, 30)
+# Pullback 시간창 (2026-08-01 사용자 지정으로 09:00~10:30 -> 09:20~15:10 변경).
+#   시작 09:20: 눌림목은 정의상 "당일 고가 대비 되돌림"인데 개장 직후엔 당일
+#     고가 자체가 아직 형성되지 않아 눌림 판정이 성립하기 어렵다. 개장 20분은
+#     1A(체결강도 버스트)에 맡기고, 눌림목은 고가가 잡힌 뒤부터 본다.
+#   종료 15:10: 기존 10:30은 "오전 눌림목"만 노린 값이었는데, 눌림목자동
+#     조건검색이 하루 종일 돌아가는 이상 오후 눌림을 통째로 버릴 이유가 없다.
+#     신규매수 하드컷오프(ENTRY_HARD_CUTOFF)와 같은 시각으로 맞춰 둘이
+#     어긋나 "조건은 통과했는데 주문은 막히는" 구간이 생기지 않게 했다.
+PULLBACK_START = time(9, 20)
+PULLBACK_END = time(15, 10)
 PHASE1A_TIGHTEN_TIME = time(10, 30)  # 이 시각부터 1A 점수 상향
 PHASE1A_END = time(14, 50)
-# 주도주상위 조건검색은 GROUP_A_START(09:00)부터 그대로 감시하되, 나머지
-# 조건검색식(돌파자동매매용 등)은 09:20부터 감시 시작.
-# (2026-07-29) on_condition_hit에서 cond_name 기준으로 적용.
-OTHER_COND_START = time(9, 20)
-# 즉시평가(09:00부터) 대상 조건식 이름. 주도주상위 외에 눌림목자동도 포함
-# (2026-07-31, 조건식 3개 체제 재편) — Pullback 시간창은 09:00~10:30로 90분뿐이라
-# 1A(~14:50)와 달리 09:20까지 19분(전체 창의 21%) 지연되면 손실이 큼. 눌림목자동은
-# Pullback 전용으로 만든 검색식이라 지연시킬 이유가 없음. 돌파자동매매용은 대형주
-# 위주라 상대적으로 덜 급하므로 그대로 09:20 지연 유지.
-IMMEDIATE_COND_NAMES = ("주도주상위", "눌림목자동")
+# 두 전략을 통틀어 진입 평가가 살아있는 마지막 시각 (2026-08-01).
+# on_condition_hit / watchlist_reentry / 감시목록 정리가 공통으로 쓴다 —
+# 예전엔 이 자리에 PHASE1A_END(14:50)를 직접 박아둬서, Pullback을 15:10까지
+# 늘려도 재평가 루프와 감시가 14:50에 먼저 끊겨 마지막 20분이 죽어버린다.
+ENTRY_WINDOW_END = max(PHASE1A_END, PULLBACK_END)
+# [2026-08-01 제거] 조건검색식별 09:20 지연 게이트(OTHER_COND_START).
+# 07-29에 돌파자동매매용을 09:20까지 지연시켰던 근거는 "그때의 1A(거래량
+# 증가지속+점수)는 대형주에 덜 급하다"였는데, 지금 1A는 3초 틱 기반 대량체결
+# 버스트 포착이라 분봉도 워밍업도 필요 없고 09:00부터 그대로 판정 가능하다.
+# 반대로 급등이 가장 많이 나오는 개장 20분을 통째로 버리는 손실이 컸고,
+# 1B 폐지로 돌파자동매매용은 1A 외에 갈 곳도 없어졌다. 진입 품질은 새 1A의
+# 대량체결 게이트가 이미 담당하므로 시간으로 또 막을 근거가 없어 제거한다.
+# (상수는 남겨두지 않는다 — 참조가 사라진 시간 상수는 나중에 "왜 안 걸리지"
+#  하고 다시 붙일 위험이 있어 흔적을 남기지 않는 편이 안전하다.)
 # 1L(주도주) 시간 윈도우 — 09:00 장 시작 즉시부터 감시(2026-07-31, 기존 09:01에서
 # 1분 앞당김). 1L은 REST 분봉이 아니라 실시간 체결 틱(on_trade)만으로 판정하므로
 # 09:00 정각부터도 데이터 공백 없이 그대로 동작.
@@ -346,16 +359,19 @@ SLOT_EXPANSION_SCORE_MARGIN = 1.5   # 컷라인 대비 이 배수 이상이어�
 SLOT_EXPANSION_WAIT_SEC = 90        # 슬롯 만석이 이 시간 이상 지속돼야 확장 허용
                                     # (슬롯교체 태스크가 60초 주기 -> 한 사이클을
                                     #  넘겨도 교체가 안 됐다 = 교체 대상 없음)
-PHASE1A_MAX_SLOTS = PHASE_1A["max_slots"]
-# 10:30(PULLBACK_END) 이후 1A 상한 (2026-08-01 신규).
-# Pullback 창은 09:00~10:30, 하루의 26%뿐인데 슬롯 3칸을 상시 예약하고 있어서
-# 10:30 이후엔 그 3칸이 영구히 논다. 반면 1A는 14:50까지 도는데 캡 3에 묶여
-# 있었다. 실측(07-28~31): 슬롯 용량 8,400 슬롯·분 중 실사용 834분 = 9.9%.
-# 부수 효과로 **확장 슬롯(7~8)의 도달 불가 상태도 해소**된다 — 1B/1L을 끄면서
-# 1A(3)+Pullback(3)=6=MAX_HOLDINGS가 되어, 보유 6 = 두 전략 모두 자기 캡이
-# 꽉 찬 상태 ⟹ 7번째를 요청할 주체가 아무도 없는 구조적 데드코드였다.
-PHASE1A_MAX_SLOTS_LATE = 5
-PULLBACK_MAX_SLOTS = 3
+# 전략별 슬롯 상한 (2026-08-01 재조정, 각 3 -> 4).
+# 직전 버전에선 "10:30 이후 Pullback 슬롯이 노니까 1A 캡을 5로 올린다"였는데,
+# Pullback 창이 15:10까지 늘어나면서 그 전제(노는 슬롯)가 사라졌다. 대신
+# **두 전략의 캡 합(8)이 공유 상한(MAX_HOLDINGS=6)을 넘도록** 잡는다:
+#   - 3/3이면 합이 정확히 6이라 한쪽이 하루 종일 후보를 못 찾아도 다른 쪽이
+#     그 자리를 못 쓰고 슬롯이 논다(실측 슬롯 사용률 9.9%인 상황에서 특히 손해).
+#   - 4/4면 공유 상한이 실제 제한자가 되어, 기회를 찾은 쪽이 최대 4까지 쓰고
+#     경합은 tier 기반 우선순위 교체가 조정한다.
+#   - 부수 효과로 확장 슬롯(7~8)의 구조적 도달 불가도 계속 해소된 상태로 유지
+#     (합 8 > 6이라 7번째를 요청할 주체가 존재).
+# 한 전략이 6칸을 독식하는 일은 여전히 불가능하다(캡 4).
+PHASE1A_MAX_SLOTS = 4
+PULLBACK_MAX_SLOTS = 4
 PHASE1B_MAX_SLOTS = PHASE_1B["max_slots"]
 
 MAX_WATCH_SLOTS = 10
@@ -858,7 +874,7 @@ class StrategyManager:
         """
         if not self.phase1b:
             return
-        in_window = now.time() < PHASE1A_END
+        in_window = now.time() < ENTRY_WINDOW_END
         for code in list(self.phase1b.watched):
             if code in self.holdings:
                 continue
@@ -1073,12 +1089,11 @@ class StrategyManager:
         return n
 
     def phase1a_max_slots(self) -> int:
-        """1A 상한 — 10:30 이후에는 노는 Pullback 슬롯을 흡수 (2026-08-01).
-        근거는 PHASE1A_MAX_SLOTS_LATE 정의부 주석 참고."""
-        return (
-            PHASE1A_MAX_SLOTS if self._now().time() < PULLBACK_END
-            else PHASE1A_MAX_SLOTS_LATE
-        )
+        """1A 전략별 슬롯 상한. (2026-08-01) Pullback 창이 15:10까지 늘어나
+        '노는 슬롯' 전제가 사라져 시간대별 상향은 폐지하고 상수 하나로 통일했다.
+        호출부 호환을 위해 메서드는 유지 — 나중에 다시 시간대별로 바꾸고 싶으면
+        여기만 고치면 된다."""
+        return PHASE1A_MAX_SLOTS
 
     def can_buy_phase1a(self, info: dict | None = None) -> bool:
         # 1A: 09:00~14:50 (evaluate_1a_leading_strength, 체결강도 단독)
@@ -1089,11 +1104,12 @@ class StrategyManager:
         )
 
     def can_buy_pullback(self, info: dict | None = None) -> bool:
-        # 눌림목: 09:00~10:30, 1A와 시간대는 겹치지만 슬롯은 별도(sub_strategy="1A_눌림")
+        # 눌림목: 09:20~15:10 (2026-08-01 확대). 1A와 시간대는 겹치지만
+        # 슬롯은 별도(sub_strategy="1A_눌림"), 조건검색식 소스도 완전히 분리.
         return (
             self.can_buy_more(info, "1A_눌림")
             and self.count_holdings_by_strategy("1A_눌림") < PULLBACK_MAX_SLOTS
-            and GROUP_A_START <= self._now().time() < PULLBACK_END
+            and PULLBACK_START <= self._now().time() < PULLBACK_END
         )
 
     # ========================================
@@ -1482,7 +1498,9 @@ class StrategyManager:
                     stock_code, stock_name, GROUP_A_START.strftime("%H:%M"),
                 )
                 return
-            if now_t >= PHASE1A_END:
+            # 1A(14:50)와 Pullback(15:10) 중 늦은 쪽까지는 평가를 계속한다
+            # (2026-08-01) — PHASE1A_END로 끊으면 Pullback 마지막 20분이 죽는다.
+            if now_t >= ENTRY_WINDOW_END:
                 return
 
             candles = self._get_merged_candles(stock_code, interval=1, count=15)
@@ -1534,23 +1552,11 @@ class StrategyManager:
             self._note_reject(stock_code, reason)
             return False
 
-        # 주도주상위/눌림목자동(IMMEDIATE_COND_NAMES)은 GROUP_A_START(09:00)부터
-        # 바로 평가, 그 외 조건검색식(돌파자동매매용 등)은 09:20 이전이면
-        # 아직 평가하지 않음(2026-07-29, 2026-07-31 눌림목자동 추가). on_condition_hit/
-        # watchlist_reentry 공유 진입점이라 여기 한 곳에 둬야 두 경로 다 일관되게 걸림 —
-        # 특히 task_watchlist_reentry가 15초마다 재시도하므로 on_condition_hit
-        # 쪽에서만 막으면 곧바로 재평가돼서 지연이 무의미해짐.
-        # watch_list_today에는 넣어둬서 09:20이 지나면 watchlist_reentry가
-        # 자연히 다시 평가하게 함(단순 차단이 아니라 지연 평가).
+        # (2026-08-01) 조건검색식별 09:20 지연 게이트 제거 — 근거는
+        # 위 OTHER_COND_START 자리의 주석 참고. 이제 모든 조건검색식이
+        # 각자의 전략 시간창(1A 09:00~14:50 / Pullback 09:20~15:10)에서
+        # 편입 즉시 평가된다.
         cond_name = self._cond_names.get(stock_code, "")
-        if not any(n in cond_name for n in IMMEDIATE_COND_NAMES) and now_t < OTHER_COND_START:
-            self.watch_list_today.add(stock_code)
-            self._note_reject(
-                stock_code,
-                f"조건식 지연 — {cond_name or '기타'}는 "
-                f"{OTHER_COND_START.strftime('%H:%M')}부터 평가",
-            )
-            return False
 
         # ── 전략 라우팅: 상호배타 (2026-08-01 사용자 지정) ──────────────
         # "전략이 오락가락하지 않도록 눌림목매수는 눌림목자동 조건검색에서만".
@@ -1577,7 +1583,12 @@ class StrategyManager:
         # 핵심 목표는 "고가 아닌 트리거 지점에서 매수").
         # evaluate_new_intensity_strategy 자체는 삭제하지 않고 아래 정의부에
         # 그대로 남겨둠(주석으로 보류, 필요시 언제든 되돌릴 수 있게).
-        if current_price > 0 and not is_pullback_source:
+        # 1A 시간창을 여기서도 확인한다 (2026-08-01) — 예전엔 can_buy_phase1a에만
+        # 있어서 14:50 이후에도 평가·워치리스트 기록이 계속 돌고 매수만 막혔다.
+        # Pullback 분기가 자기 창을 직접 확인하는 것과 대칭을 맞춰, 창 밖에서는
+        # 아예 평가하지 않는다(불필요한 계산·로그·오탐 사유 기록 방지).
+        if (current_price > 0 and not is_pullback_source
+                and GROUP_A_START <= now_t < PHASE1A_END):
             ok, info = self.evaluate_1a_leading_strength(
                 stock_code, current_price, open_price, cond_name
             )
@@ -1612,7 +1623,7 @@ class StrategyManager:
         # ==========================================
         # Pullback: 눌림목 반등 점수 + VWAP AND (09:00~10:30, 1A와 시간대 겹침/슬롯 별도)
         # ==========================================
-        if is_pullback_source and now_t < PULLBACK_END:
+        if is_pullback_source and PULLBACK_START <= now_t < PULLBACK_END:
             # 분봉 지연 로딩 (2026-08-01) — Pullback은 분봉이 반드시 필요하다.
             if candles is None:
                 try:
@@ -2156,18 +2167,21 @@ class StrategyManager:
         if self.phase1b and not self.phase1b.is_watching(stock_code):
             self.phase1b.start_watching(stock_code)
 
-        # 주도주상위 시가대비 급등 매수보류 (2026-07-31 사용자 지정) — 개장
-        # 직후 시가 대비 이미 가파르게 오른 종목은 눌림(되돌림) 가능성이 커서
-        # 보수적으로 접근한다는 취지. 주도주상위 소스에만 적용(사용자가 그렇게
-        # 범위를 지정) — 감시(start_watching)는 그대로 유지해서 나중에 되돌림
-        # 이후 재평가될 기회는 남겨둔다(watchlist_reentry가 계속 재시도).
-        if "주도주상위" in cond_name and open_price > 0:
+        # 시가대비 급등 매수보류 — 시가 대비 이미 가파르게 오른 종목은 눌림
+        # (되돌림) 가능성이 커서 보수적으로 접근한다는 취지(2026-07-31 도입).
+        # (2026-08-01 사용자 지정) 주도주상위 전용이던 것을 **1A 전 경로**로 확대.
+        # 조건명을 안 따지는 이유: 1A는 이제 주도주상위/돌파자동매매용만 타므로
+        # 사실상 "둘 다 적용"과 같고, cond_name이 "기타"로 뭉개진 경우에도
+        # 필터가 조용히 꺼지지 않는다(조건명으로 분기하면 그 구멍이 생긴다).
+        # 감시(start_watching)는 그대로 유지해서 되돌림 이후 재평가될 기회는
+        # 남겨둔다(watchlist_reentry가 계속 재시도).
+        if open_price > 0:
             surge_from_open = (current_price - open_price) / open_price * 100
             if surge_from_open >= PHASE1A_LEADING_OPEN_SURGE_CAP:
                 return False, {
                     "current_price": current_price,
                     "reason": (
-                        f"주도주상위 시가대비 +{surge_from_open:.1f}% "
+                        f"시가대비 +{surge_from_open:.1f}% "
                         f">= {PHASE1A_LEADING_OPEN_SURGE_CAP:.0f}% — 눌림 가능성으로 매수 보류"
                     ),
                 }
@@ -2642,8 +2656,16 @@ class StrategyManager:
           호가 스냅샷 없음/예외    : 지정가 (보수적 기본값)
 
         반환: (style, ref_price, 사유문자열)
-          ref_price = 시장가일 때 '예상 체결가'로 쓸 매도1호가(없으면 0 -> 호출부가
-          현재가로 대체). 지정가 경로에선 쓰이지 않는다.
+          - 시장가: ref_price = 매도1호가('예상 체결가'로 기록용).
+          - 지정가: ref_price = **매도N호가**(N=PHASE1A_ASK_DEPTH_LEVELS).
+            (2026-08-01 변경) 예전엔 0을 줘서 order_manager가 '현재가+1틱'으로
+            주문했는데, 호가창이 비었다는 건 매도1호가가 현재가보다 여러 틱 위에
+            있을 가능성이 크다는 뜻이라 +1틱으로는 **아예 안 걸릴 수** 있었다.
+            미체결이면 봇은 산 줄 알고 슬롯을 점유한 채 잘못된 매수가로 손익을
+            계산하다가 45초 뒤 reconcile이 정리한다. 매도N호가로 걸면
+            '슬리피지 상한이 정해진 즉시체결'이 되어 미체결도 막고 시장가처럼
+            위로 훑고 올라가지도 않는다.
+          - 호가 정보가 아예 없으면 0 -> 기존 '현재가+1틱' 폴백.
 
         절대 예외를 밖으로 던지지 않는다 — 호가 판정 실패가 매수 자체를
         막거나 크래시로 번지면 안 되므로, 어떤 실패든 '지정가'로 안전하게 수렴한다.
@@ -2651,28 +2673,29 @@ class StrategyManager:
         try:
             ob = getattr(self.phase1b, "orderbook", None) if self.phase1b else None
             if ob is None:
-                return "limit", 0, "호가 트래커 없음 -> 지정가"
+                return "limit", 0, "호가 트래커 없음 -> 지정가(현재가+1틱)"
             depth_value = ob.get_ask_depth_value(
                 stock_code, levels=PHASE1A_ASK_DEPTH_LEVELS
             )
             if depth_value is None:
-                return "limit", 0, "호가 스냅샷 없음 -> 지정가"
-            ask1, _ = ob.get_top_ask(stock_code)
-            ref = int(ask1) if ask1 else 0
+                return "limit", 0, "호가 스냅샷 없음 -> 지정가(현재가+1틱)"
             if depth_value >= PHASE1A_ASK_DEPTH_MIN:
-                return "market", ref, (
+                ask1 = ob.get_ask_price(stock_code, 1) or 0
+                return "market", int(ask1), (
                     f"매도1~{PHASE1A_ASK_DEPTH_LEVELS}호가 잔량 "
                     f"{depth_value/10000:,.0f}만원 >= {PHASE1A_ASK_DEPTH_MIN/10000:,.0f}만원 "
                     f"-> 시장가"
                 )
-            return "limit", ref, (
+            askn = ob.get_ask_price(stock_code, PHASE1A_ASK_DEPTH_LEVELS) or 0
+            return "limit", int(askn), (
                 f"매도1~{PHASE1A_ASK_DEPTH_LEVELS}호가 잔량 "
                 f"{depth_value/10000:,.0f}만원 < {PHASE1A_ASK_DEPTH_MIN/10000:,.0f}만원 "
-                f"(빈 호가창) -> 지정가"
+                f"(빈 호가창) -> 지정가 "
+                + (f"매도{PHASE1A_ASK_DEPTH_LEVELS}호가 {askn:,}원" if askn else "현재가+1틱")
             )
         except Exception:
             logger.exception("[%s] 호가 두께 판정 실패 -> 지정가로 진행", stock_code)
-            return "limit", 0, "호가 판정 예외 -> 지정가"
+            return "limit", 0, "호가 판정 예외 -> 지정가(현재가+1틱)"
 
     def _fresh_tick_price(self, stock_code: str, max_age_sec: float = 10.0):
         """최근 max_age_sec 안에 체결이 있었을 때만 최신 체결가를 반환.
@@ -2848,7 +2871,9 @@ class StrategyManager:
             result = self.order_manager.buy(
                 stock_code,
                 quantity,
-                price=0,
+                # 지정가 경로: 매도N호가가 있으면 그 가격으로(슬리피지 상한이
+                # 정해진 즉시체결), 없으면 0 -> 기존 '현재가+1틱' 폴백.
+                price=(ask1 if order_style == "limit" else 0),
                 order_style=order_style,
                 ref_price=ask1 or int(current_price),
             )
@@ -3375,7 +3400,19 @@ class StrategyManager:
         self.pending.add(stock_code)
         try:
             quantity = pos.get("qty", pos.get("buy_quantity"))
-            result = self.order_manager.sell(stock_code, quantity, price=0)
+            # 매도는 시장가 (2026-08-01) — 지정가 미체결 시 포지션이 봇의 관리
+            # 대상에서 영구 이탈하는 구멍이 있었다(order_manager.sell 주석 참고).
+            # 시장가가 거부되면 검증된 지정가로 1회 폴백해서, 새 주문 방식 때문에
+            # 청산 자체를 놓치는 일이 없게 한다 — 매수 경로와 같은 안전망.
+            result = self.order_manager.sell(stock_code, quantity, order_style="market")
+            if not result or not result.get("success"):
+                logger.warning(
+                    "[%s] 시장가 매도 실패(%s) -> 지정가로 1회 폴백",
+                    stock_code, (result or {}).get("error", "unknown"),
+                )
+                result = self.order_manager.sell(
+                    stock_code, quantity, price=0, order_style="limit"
+                )
 
             if not result or not result.get("success"):
                 err = (result or {}).get("error", "unknown")

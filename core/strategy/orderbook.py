@@ -133,6 +133,26 @@ class OrderbookTracker:
                 continue
         return total
 
+    def get_ask_price(self, stock_code: str, level: int = 1) -> Optional[int]:
+        """매도 N호가 가격. 해당 호가가 없으면 있는 것 중 가장 깊은 호가를 준다.
+
+        (2026-08-01 신규) 빈 호가창에서 '슬리피지 상한이 정해진 즉시체결
+        지정가'를 만들기 위한 것. 요청한 레벨이 비어 있을 때 None을 돌려주면
+        호출부가 결국 현재가+1틱으로 되돌아가 미체결 위험이 남으므로,
+        확보 가능한 가장 깊은 호가로 대신한다.
+        """
+        snap = self.snapshots.get(stock_code)
+        if not snap:
+            return None
+        prices = [p for p in (snap.get("ask_prices") or []) if p]
+        if not prices:
+            return None
+        idx = min(max(level, 1), len(prices)) - 1
+        try:
+            return int(prices[idx])
+        except (TypeError, ValueError):
+            return None
+
     def reset(self, stock_code: str):
         self.snapshots.pop(stock_code, None)
         self.history.pop(stock_code, None)

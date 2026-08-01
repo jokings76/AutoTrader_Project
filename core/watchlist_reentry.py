@@ -16,14 +16,17 @@
 """
 
 from utils.logger import logger
-from core.strategy_manager import GROUP_A_START, PHASE1A_END, VOLUME_LOOKBACK
+from core.strategy_manager import GROUP_A_START, ENTRY_WINDOW_END, VOLUME_LOOKBACK
 
 
 def try_watchlist_reentry(strat, now) -> int:
     """watch_list_today 중 미보유·미대기 종목을 슬롯 여유가 있을 때만 재평가.
     반환: 이번 호출에서 매수까지 성공한 종목 수."""
     now_t = now.time()
-    if not (GROUP_A_START <= now_t < PHASE1A_END):
+    # (2026-08-01) PHASE1A_END(14:50) -> ENTRY_WINDOW_END(1A/Pullback 중 늦은 쪽).
+    # Pullback을 15:10까지 늘렸는데 이 게이트가 14:50에 먼저 끊기면 마지막
+    # 20분 동안 재평가가 멈춰 사실상 창이 안 늘어난다.
+    if not (GROUP_A_START <= now_t < ENTRY_WINDOW_END):
         return 0  # on_condition_hit과 동일한 시간대 게이트
 
     # 확장 슬롯(2026-07-31)이 열려있을 수 있는 상태면 평상시 상한이 꽉 찼어도

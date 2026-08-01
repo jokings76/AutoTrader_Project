@@ -178,31 +178,53 @@ class OrderManager:
             logger.exception(f"[{stock_code}] buy() 예외")
             return {"success": False, "error": str(e)}
 
-    def sell(self, stock_code: str, qty: int, price: int = 0) -> dict:
+    def sell(self, stock_code: str, qty: int, price: int = 0,
+             order_style: str = "market") -> dict:
         """단순 매도 wrapper (StrategyManager 호출용).
 
         Args:
             stock_code: 종목코드
             qty: 매도 수량
-            price: 0이면 현재가 -1틱, >0이면 그 가격 지정가
+            price: order_style="limit"일 때만 의미. 0이면 현재가 -1틱.
+            order_style: **기본값이 "market"(시장가)** — 2026-08-01 변경.
+
+        왜 매도를 시장가로 바꿨나 (중요):
+          기존엔 모든 매도가 `현재가 -1틱` 지정가였다. 그런데 키움 응답의
+          `return_code == 0`은 "주문 접수 성공"이지 "체결"이 아닌데,
+          StrategyManager._execute_sell은 접수를 체결로 간주해서 holdings에서
+          제거하고 DB에 매도가를 기록해버린다. 미체결이면 그 포지션은
+          **봇의 관리 대상에서 영구 이탈**한다 — _reconcile_manual_sells는
+          holdings->서버 방향만 보고, 서버에는 있는데 holdings엔 없는 종목을
+          되살리는 로직이 없기 때문이다. 손절도 익절도 안 되고 15:15 강제청산
+          (같은 지정가 경로)마저 미체결이면 오버나이트로 넘어간다.
+          미체결 확률 자체는 낮지만 위험 구간이 하필 급락 손절이다:
+          get_current_price(REST) 조회와 주문 도달 사이에 가격이 더 떨어지면
+          지정가가 시장보다 위에 남는데, 429 스로틀 시 그 사이에 2초 blocking
+          sleep이 낀다. -3% 손절이 -6%가 되는 대가로 1틱을 아끼는 거래다.
+          이미 "판다"고 결정한 뒤이므로 체결 확실성이 우선이다.
 
         Returns:
-            {"success": bool, "ord_no"?: str, "price"?: int, "error"?: str}
+            {"success": bool, "ord_no"?: str, "price"?: int, "style"?: str, "error"?: str}
         """
         if qty <= 0:
             return {"success": False, "error": f"qty={qty}"}
+        style = "limit" if str(order_style).lower() == "limit" else "market"
         try:
-            if price <= 0:
-                cur = self.rest.get_current_price(stock_code)
-                if cur <= 0:
-                    return {"success": False, "error": "현재가 조회 실패"}
-                price = round_to_tick(add_ticks(cur, SELL_PRICE_OFFSET_TICKS))
+            if style == "market":
+                result = self.rest.sell_market_order(
+                    stock_code, qty=qty, price=0, trde_tp="3"
+                )
+            else:
                 if price <= 0:
-                    price = cur
-
-            result = self.rest.sell_market_order(
-                stock_code, qty=qty, price=price, trde_tp="0"
-            )
+                    cur = self.rest.get_current_price(stock_code)
+                    if cur <= 0:
+                        return {"success": False, "error": "현재가 조회 실패"}
+                    price = round_to_tick(add_ticks(cur, SELL_PRICE_OFFSET_TICKS))
+                    if price <= 0:
+                        price = cur
+                result = self.rest.sell_market_order(
+                    stock_code, qty=qty, price=price, trde_tp="0"
+                )
             rc = result.get("return_code")
             if rc != 0:
                 err_msg = result.get("return_msg", f"rc={rc}")
@@ -218,7 +240,8 @@ class OrderManager:
             return {
                 "success": True,
                 "ord_no": result.get("ord_no", ""),
-                "price": price,
+                "price": price,      # 시장가면 0 (체결가는 호출부가 아는 현재가로 기록)
+                "style": style,
             }
         except Exception as e:
             logger.exception(f"[{stock_code}] sell() 예외")

@@ -47,8 +47,8 @@ from core.strategy_manager import (
     VOLUME_LOOKBACK,
     PHASE1A_SCORE_NORMAL,
     PHASE1A_SCORE_TIGHT,
-    IMMEDIATE_COND_NAMES,
-    OTHER_COND_START,
+    PULLBACK_START,
+    PULLBACK_END,
     MAX_BUYS_PER_STOCK,
     REBUY_COOLDOWN,
 )
@@ -56,13 +56,16 @@ from core.strategy_manager import (
 NEUTRAL_STRENGTH = 100.0  # 틱데이터 없어 체결강도는 중립값 고정
 FORCE_CLOSE_HHMM = "1515"  # 라이브 FORCE_CLOSE_TIME과 동일
 FETCH_COUNT = 450  # 09:00~15:20 + 60MA 여유
-GROUP_A_START_HHMM = "0901"
-PULLBACK_END_HHMM = "1030"
+GROUP_A_START_HHMM = "0900"
+# (2026-08-01) Pullback 시간창 09:20~15:10 확대를 라이브 상수에서 직접 가져온다
+# — 예전엔 "1030"을 문자열로 박아둬서 라이브를 바꿔도 백테스트가 안 따라왔다.
+PULLBACK_START_HHMM = PULLBACK_START.strftime("%H%M")
+PULLBACK_END_HHMM = PULLBACK_END.strftime("%H%M")
 PHASE1A_TIGHTEN_HHMM = "1030"
 PHASE1A_END_HHMM = "1450"
 EARLY_WINDOW_END_HHMM = EARLY_WINDOW_END.strftime("%H%M")  # 개장초반 익절 1.5% 경계
-OTHER_COND_START_HHMM = OTHER_COND_START.strftime("%H%M")  # 09:20 — 조건검색식별 지연평가 경계
-PULLBACK_ONLY_SOURCE = "눌림목자동"  # core/strategy_manager.py의 pullback_only_source 판정과 동일
+# 라우팅: cond_name에 이 이름이 있으면 Pullback 전용, 없으면 1A 전용(상호배타).
+PULLBACK_ONLY_SOURCE = "눌림목자동"
 
 EXIT_CATEGORY_ORDER = ["손절", "익절", "시간정리", "강제청산"]
 
@@ -162,20 +165,18 @@ def _entry_signal(candles: list, idx: int, vwap_strategy: VWAPStrategy, cond_nam
     제외한다. 아래 옛 1A 로직(거래량증가지속+score_phase1)은 삭제하지 않고
     주석으로 남겨둠 — 라이브가 다시 옛 방식으로 돌아가면 이 블록도 되살릴 것.
 
-    cond_name 기반 라우팅(2026-07-31) — core/strategy_manager.py의
-    _evaluate_1a_pullback_entry(on_condition_hit 경로)와 동일 규칙:
-    ① 주도주상위/눌림목자동(IMMEDIATE_COND_NAMES) 외 조건식은 09:20 이전 평가 자체를 안 함.
-    ② skip_setup_check=True를 전 소스에 적용(2026-07-31) — 기존엔 눌림목자동
-       단독 소스만 _pullback_setup(로컬 10분 되돌림 재검증)을 건너뛰었는데,
-       라이브가 소스 무관 전면 적용으로 바뀌어 백테스트도 동일하게 맞춤."""
+    cond_name 기반 라우팅(2026-08-01 갱신) — core/strategy_manager.py의
+    _evaluate_1a_pullback_entry와 동일 규칙:
+    ① **상호배타**: cond_name에 "눌림목자동"이 있으면 Pullback 전용,
+       없으면 1A 전용. 중복 편입 종목은 Pullback이 우선한다.
+    ② 조건검색식별 09:20 지연 게이트는 제거됨(라이브와 동일).
+    ③ Pullback 시간창 09:20~15:10(라이브 상수에서 직접 가져옴).
+    ④ skip_setup_check=True 유지."""
     sub = candles[idx:]
     if len(sub) < 60:
         return None
     hhmm = _hhmm(sub[0])
     if not (GROUP_A_START_HHMM <= hhmm < PHASE1A_END_HHMM):
-        return None
-
-    if not any(n in cond_name for n in IMMEDIATE_COND_NAMES) and hhmm < OTHER_COND_START_HHMM:
         return None
 
     vol_ratio = _volume_ratio(sub)
@@ -197,7 +198,8 @@ def _entry_signal(candles: list, idx: int, vwap_strategy: VWAPStrategy, cond_nam
     # (2026-08-01) 라이브가 "눌림목매수는 눌림목자동 조건검색에서만"으로
     # 배타 라우팅됐으므로 백테스트도 동일하게 소스를 제한한다 — 안 맞추면
     # 재현 매매 건수가 실제보다 부풀려져 성과 판단이 틀어진다.
-    if PULLBACK_ONLY_SOURCE in cond_name and hhmm < PULLBACK_END_HHMM:
+    if (PULLBACK_ONLY_SOURCE in cond_name
+            and PULLBACK_START_HHMM <= hhmm < PULLBACK_END_HHMM):
         ok, info = score_pullback(
             sub, vol_ratio, NEUTRAL_STRENGTH, PULLBACK_CFG,
             skip_setup_check=True,
