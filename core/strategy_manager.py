@@ -9,15 +9,18 @@
   1A       (09:00 ~ 14:50): 체결강도 100 이상 3초 유지 + 대량체결 버스트 -> 즉시매수
                             (evaluate_1a_leading_strength). 주문은 호가 두께로
                             지정가/시장가 자동 선택.
-  Pullback (09:00 ~ 10:30): **눌림목자동 조건검색식 전용**. 반등확인 + 점수 + VWAP AND.
+  Pullback (09:25 ~ 14:50): 눌림목 반등 점수 + VWAP AND. 중단시각은 1A와 동일.
+  보유분 청산: 15:10 (FORCE_CLOSE_TIME) 전량 강제청산.
   1B       [2026-08-01 비활성화] PHASE1B_ENABLED=False — 1A와 트리거 방향이
                             정반대라 동시 적용 시 진입이 오락가락. 코드는 보존.
   1L       [2026-07-31 주석처리] 1A(체결강도 단독)와 설계 중복 — on_trade 참고
 
-전략 라우팅 (2026-08-01, 상호배타):
-  cond_name에 "눌림목자동" 포함 -> Pullback만 평가
-  그 외(주도주상위/돌파자동매매용/기타) -> 1A만 평가
-  한 종목이 두 전략을 오가지 않게 해서 진입 근거를 항상 하나로 고정한다.
+전략 라우팅 (2026-08-01, 종목당 항상 한 전략만 — resolve_strategy 참고):
+  눌림목자동 단독            -> Pullback 전용
+  주도주상위/돌파자동매매용 단독 -> 1A 전용
+  중복(둘 다 편입)           -> 10:30 이전 1A / 10:30 이후 Pullback
+  진입 근거가 항상 하나로 고정되고, 중복 종목만 시간대에 따라
+  유리한 쪽(오전 모멘텀 / 오후 되돌림)이 가져간다.
 
 슬롯: 1A/Pullback/1L/1B 각각 자체 상한 3개 + 전체 합산 상한 6개(MAX_HOLDINGS) 공유.
       1B는 실시간 틱 콜백에서 즉시 매수(우선권), 1A/Pullback은 조건검색 이벤트 경로.
@@ -77,22 +80,31 @@ from config.phase_settings import EXIT_POLICY
 # 그냥 버릴 이유가 없어 앞당김.
 GROUP_A_START = time(9, 0)
 # Pullback 시간창 (2026-08-01 사용자 지정으로 09:00~10:30 -> 09:20~15:10 변경).
-#   시작 09:20: 눌림목은 정의상 "당일 고가 대비 되돌림"인데 개장 직후엔 당일
-#     고가 자체가 아직 형성되지 않아 눌림 판정이 성립하기 어렵다. 개장 20분은
+#   시작 09:25: 눌림목은 정의상 "당일 고가 대비 되돌림"인데 개장 직후엔 당일
+#     고가 자체가 아직 형성되지 않아 눌림 판정이 성립하기 어렵다. 개장 25분은
 #     1A(체결강도 버스트)에 맡기고, 눌림목은 고가가 잡힌 뒤부터 본다.
-#   종료 15:10: 기존 10:30은 "오전 눌림목"만 노린 값이었는데, 눌림목자동
-#     조건검색이 하루 종일 돌아가는 이상 오후 눌림을 통째로 버릴 이유가 없다.
-#     신규매수 하드컷오프(ENTRY_HARD_CUTOFF)와 같은 시각으로 맞춰 둘이
-#     어긋나 "조건은 통과했는데 주문은 막히는" 구간이 생기지 않게 했다.
-PULLBACK_START = time(9, 20)
-PULLBACK_END = time(15, 10)
+#   종료: 1A와 동일한 14:50(PHASE1A_END). 두 전략의 진입 중단 시각을 하나로
+#     묶어두면 "한쪽만 살아있는 구간"이 없어져 감시/재평가/정리의 종료 시각도
+#     전부 한 점으로 수렴한다. 보유분은 15:10(FORCE_CLOSE_TIME)에 전량 청산.
+PULLBACK_START = time(9, 25)
+# 종료는 1A와 동일(PHASE1A_END=14:50) — 아래 PHASE1A_END 정의 뒤에서 대입한다.
 PHASE1A_TIGHTEN_TIME = time(10, 30)  # 이 시각부터 1A 점수 상향
 PHASE1A_END = time(14, 50)
-# 두 전략을 통틀어 진입 평가가 살아있는 마지막 시각 (2026-08-01).
+PULLBACK_END = PHASE1A_END  # (2026-08-01 사용자 지정) 눌림목 중단시간도 1A와 동일
+
+# 두 전략을 통틀어 진입 평가가 살아있는 마지막 시각.
 # on_condition_hit / watchlist_reentry / 감시목록 정리가 공통으로 쓴다 —
-# 예전엔 이 자리에 PHASE1A_END(14:50)를 직접 박아둬서, Pullback을 15:10까지
-# 늘려도 재평가 루프와 감시가 14:50에 먼저 끊겨 마지막 20분이 죽어버린다.
+# 이 자리에 PHASE1A_END를 직접 박아두면, 나중에 한 전략의 창만 늘렸을 때
+# 재평가 루프와 감시가 먼저 끊겨 그 구간이 조용히 죽는다(실제로 겪음).
 ENTRY_WINDOW_END = max(PHASE1A_END, PULLBACK_END)
+
+# 중복 편입 종목(눌림목자동 + 주도주상위/돌파자동매매용)의 전략 전환 시각.
+# (2026-08-01 사용자 지정) 오전엔 모멘텀(1A)이, 오후엔 되돌림(Pullback)이
+# 유리하다는 판단:
+#   ~10:30  중복 -> 1A
+#   10:30~  중복 -> Pullback
+# 단독 편입 종목은 시각과 무관하게 자기 전략만 탄다(완전 분리).
+DUAL_SOURCE_PULLBACK_FROM = time(10, 30)
 # [2026-08-01 제거] 조건검색식별 09:20 지연 게이트(OTHER_COND_START).
 # 07-29에 돌파자동매매용을 09:20까지 지연시켰던 근거는 "그때의 1A(거래량
 # 증가지속+점수)는 대형주에 덜 급하다"였는데, 지금 1A는 3초 틱 기반 대량체결
@@ -646,16 +658,48 @@ class StrategyManager:
         return today_candles
 
     @staticmethod
-    def _entry_change_cap(sub_strategy: str, cond_name: str) -> float:
+    def source_flags(cond_name: str) -> tuple[bool, bool]:
+        """조건검색식 소스 판별 -> (1A 소스 있음, 눌림목 소스 있음).
+
+        (2026-08-01) 중복 편입 종목의 시간대별 전략 전환을 위해 분리했다.
+        기존엔 "눌림목자동 in cond_name" 하나로만 봤는데, 그러면 중복 종목이
+        시각과 무관하게 항상 Pullback으로 가버려 오전 모멘텀 구간을 못 쓴다.
+        """
+        cn = cond_name or ""
+        has_1a = ("주도주상위" in cn) or ("돌파자동매매용" in cn)
+        has_pb = "눌림목자동" in cn
+        return has_1a, has_pb
+
+    @classmethod
+    def resolve_strategy(cls, cond_name: str, now_t) -> str:
+        """이 종목을 어느 전략이 가져갈지 결정 -> "1A" | "1A_눌림".
+
+        (2026-08-01 사용자 지정) 단독 소스는 완전 분리, 중복 소스만
+        DUAL_SOURCE_PULLBACK_FROM(10:30)을 경계로 갈아탄다:
+            눌림목자동 단독            -> 항상 1A_눌림
+            주도주상위/돌파 단독       -> 항상 1A
+            중복(둘 다)                -> 10:30 이전 1A / 이후 1A_눌림
+            둘 다 아님("기타" 등)      -> 1A (기존 폴백 유지)
+        라우팅과 주문 직전 가드가 같은 함수를 쓰므로 둘이 어긋날 수 없다.
+        """
+        has_1a, has_pb = cls.source_flags(cond_name)
+        if has_pb and has_1a:
+            return "1A_눌림" if now_t >= DUAL_SOURCE_PULLBACK_FROM else "1A"
+        return "1A_눌림" if has_pb else "1A"
+
+    @staticmethod
+    def _entry_change_cap(sub_strategy: str) -> float:
         """전략별 매수 등락률 상한(전일종가 대비 %) (2026-08-01 사용자 지정).
 
-        눌림목 = 10% / 그 외(1A 등) = 16%.
-        sub_strategy와 cond_name **둘 다** 확인한다 — 라우팅상 둘은 항상 같이
-        움직이지만(눌림목자동 -> 1A_눌림), 어느 한쪽만 보면 나중에 경로가
-        추가됐을 때 조용히 느슨한 상한이 적용될 수 있다. 더 보수적인 쪽으로
-        수렴시키는 게 안전하다.
+        눌림목 = 10% / 그 외(1A) = 16%.
+
+        기준을 **실제 매수한 전략(sub_strategy)** 하나로 통일했다. 예전엔
+        cond_name도 같이 봐서 "눌림목자동이 섞여 있으면 무조건 10%"였는데,
+        중복 종목이 오전에 1A로 매수되는 경로가 생기면서 그 종목만 1A인데
+        눌림목 상한(10%)이 걸리는 모순이 생긴다. 상한은 "어떤 전략으로
+        샀는가"를 따라가는 게 맞다.
         """
-        if sub_strategy == "1A_눌림" or "눌림목자동" in (cond_name or ""):
+        if sub_strategy == "1A_눌림":
             return MAX_ENTRY_CHANGE_PCT_PULLBACK
         return MAX_ENTRY_CHANGE_PCT
 
@@ -1558,16 +1602,15 @@ class StrategyManager:
         # 편입 즉시 평가된다.
         cond_name = self._cond_names.get(stock_code, "")
 
-        # ── 전략 라우팅: 상호배타 (2026-08-01 사용자 지정) ──────────────
-        # "전략이 오락가락하지 않도록 눌림목매수는 눌림목자동 조건검색에서만".
-        # 기존엔 눌림목자동 '단독'일 때만 1A를 건너뛰었고, 다른 조건식과 겹친
-        # 종목은 1A와 Pullback 둘 다 평가받아서 같은 종목이 어느 날은 1A로,
-        # 어느 날은 눌림으로 잡히는 일관성 없는 진입이 났다. 이제 완전히 나눈다:
-        #     cond_name에 "눌림목자동" 포함 -> Pullback 전용 (1A 평가 안 함)
-        #     그 외                          -> 1A 전용    (Pullback 평가 안 함)
-        # 전제가 정반대인 두 검색식(눌림목자동=당일고가 -3% 되돌림 /
-        # 주도주상위·돌파=상승 모멘텀)을 각자 맞는 전략에만 연결하는 것이기도 하다.
-        is_pullback_source = "눌림목자동" in cond_name
+        # ── 전략 라우팅 (2026-08-01 사용자 지정) ────────────────────────
+        # 한 종목은 언제나 **한 전략만** 평가한다(오락가락 방지).
+        #   눌림목자동 단독      -> Pullback 전용
+        #   주도주상위/돌파 단독 -> 1A 전용
+        #   중복(둘 다)          -> 10:30 이전 1A / 이후 Pullback
+        # 전제가 정반대인 두 검색식(눌림목자동=당일고가 되돌림 /
+        # 주도주상위·돌파=상승 모멘텀)을 각자 맞는 전략에 연결하되, 둘 다에
+        # 걸린 종목은 시간대에 따라 유리한 쪽(오전 모멘텀/오후 되돌림)이 갖는다.
+        is_pullback_source = self.resolve_strategy(cond_name, now_t) == "1A_눌림"
 
         # ==========================================
         # 1A: 체결강도 단독 즉시진입 (09:00~14:50) — 2026-07-31 전면 단순화
@@ -2752,19 +2795,29 @@ class StrategyManager:
 
         cond_name_now = self._cond_names.get(stock_code, "")
 
-        # 눌림목 조건검색 종목은 Pullback 전략으로만 매수 (2026-08-01 사용자 지정).
-        # 라우팅(_evaluate_1a_pullback_entry)에서 이미 배타적으로 갈리지만,
-        # 다른 경로가 추가되거나 cond_name이 뒤늦게 병합돼도 절대 새지 않도록
-        # 실제 주문 직전인 여기서 한 번 더 막는다(단일 차단 지점).
-        if "눌림목자동" in cond_name_now and sub_strategy != "1A_눌림":
-            logger.info(
-                "[%s] %s 매수 차단: 눌림목자동 종목은 Pullback 전용 [요청 전략=%s]",
-                stock_code, stock_name, sub_strategy,
+        # 조건검색식 <-> 전략 결합 가드 (2026-08-01 사용자 지정).
+        # 라우팅에서 이미 배타적으로 갈리지만, 다른 경로가 추가되거나 cond_name이
+        # 뒤늦게 병합돼도 절대 새지 않도록 주문 직전에 한 번 더 막는다.
+        # **단독 소스만** 막는다 — 중복 종목은 시간대에 따라 두 전략을 오가는 게
+        # 정상이므로(오전 1A / 오후 Pullback) 여기서 막으면 안 된다.
+        if sub_strategy in ("1A", "1A_눌림"):
+            has_1a_src, has_pb_src = self.source_flags(cond_name_now)
+            wrong = (
+                (has_pb_src and not has_1a_src and sub_strategy != "1A_눌림")
+                or (has_1a_src and not has_pb_src and sub_strategy == "1A_눌림")
             )
-            self._note_reject(stock_code, "눌림목자동 종목은 Pullback 전용")
-            return
+            if wrong:
+                logger.info(
+                    "[%s] %s 매수 차단: 조건검색식(%s)과 전략(%s) 불일치 "
+                    "— 단독 소스는 전용 전략으로만 매수",
+                    stock_code, stock_name, cond_name_now or "?", sub_strategy,
+                )
+                self._note_reject(
+                    stock_code, f"조건검색식-전략 불일치 ({cond_name_now}/{sub_strategy})"
+                )
+                return
 
-        entry_cap = self._entry_change_cap(sub_strategy, cond_name_now)
+        entry_cap = self._entry_change_cap(sub_strategy)
         prev_close = self._get_prev_close(stock_code, current_price)
         if prev_close:
             change_pct = (current_price - prev_close) / prev_close * 100

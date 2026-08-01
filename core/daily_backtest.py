@@ -54,7 +54,7 @@ from core.strategy_manager import (
 )
 
 NEUTRAL_STRENGTH = 100.0  # 틱데이터 없어 체결강도는 중립값 고정
-FORCE_CLOSE_HHMM = "1515"  # 라이브 FORCE_CLOSE_TIME과 동일
+FORCE_CLOSE_HHMM = "1510"  # 라이브 FORCE_CLOSE_TIME과 동일 (2026-08-01: 1515 -> 1510)
 FETCH_COUNT = 450  # 09:00~15:20 + 60MA 여유
 GROUP_A_START_HHMM = "0900"
 # (2026-08-01) Pullback 시간창 09:20~15:10 확대를 라이브 상수에서 직접 가져온다
@@ -66,6 +66,12 @@ PHASE1A_END_HHMM = "1450"
 EARLY_WINDOW_END_HHMM = EARLY_WINDOW_END.strftime("%H%M")  # 개장초반 익절 1.5% 경계
 # 라우팅: cond_name에 이 이름이 있으면 Pullback 전용, 없으면 1A 전용(상호배타).
 PULLBACK_ONLY_SOURCE = "눌림목자동"
+
+
+def _hhmm_to_time(hhmm: str):
+    """'0925' -> datetime.time(9,25). 라이브 라우팅 함수에 넘기기 위한 변환."""
+    from datetime import time as _t
+    return _t(int(hhmm[:2]), int(hhmm[2:]))
 
 EXIT_CATEGORY_ORDER = ["손절", "익절", "시간정리", "강제청산"]
 
@@ -194,12 +200,17 @@ def _entry_signal(candles: list, idx: int, vwap_strategy: VWAPStrategy, cond_nam
     #         if info.get("score", 0) >= required:
     #             return "1A", info
 
-    # Pullback: 09:00~10:30, 눌림목 반등 점수 + VWAP AND
-    # (2026-08-01) 라이브가 "눌림목매수는 눌림목자동 조건검색에서만"으로
-    # 배타 라우팅됐으므로 백테스트도 동일하게 소스를 제한한다 — 안 맞추면
-    # 재현 매매 건수가 실제보다 부풀려져 성과 판단이 틀어진다.
-    if (PULLBACK_ONLY_SOURCE in cond_name
-            and PULLBACK_START_HHMM <= hhmm < PULLBACK_END_HHMM):
+    # Pullback: 09:25~14:50, 눌림목 반등 점수 + VWAP AND
+    # (2026-08-01) 라이브 라우팅과 동일하게 재현한다 — 안 맞추면 재현 매매
+    # 건수가 실제와 달라져 성과 판단이 틀어진다.
+    #   눌림목자동 단독      -> 항상 Pullback
+    #   주도주상위/돌파 단독 -> 1A(현재 백테스트 재현 대상 아님)
+    #   중복                 -> 10:30 이전은 1A, 이후 Pullback
+    # 라이브의 StrategyManager.resolve_strategy()를 그대로 호출해서 규칙이
+    # 두 곳에 갈라져 어긋나는 일이 없게 한다.
+    from core.strategy_manager import StrategyManager as _SM
+    _route = _SM.resolve_strategy(cond_name, _hhmm_to_time(hhmm))
+    if _route == "1A_눌림" and PULLBACK_START_HHMM <= hhmm < PULLBACK_END_HHMM:
         ok, info = score_pullback(
             sub, vol_ratio, NEUTRAL_STRENGTH, PULLBACK_CFG,
             skip_setup_check=True,

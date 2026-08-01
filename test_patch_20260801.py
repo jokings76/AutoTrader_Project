@@ -247,12 +247,11 @@ s2.phase1b.start_watching("CAND")
 s2.tick()
 check("진입창(ENTRY_WINDOW_END=15:10) 종료 후에는 후보도 정리",
       not s2.phase1b.is_watching("CAND"))
-s3 = build_strat(datetime(2026, 8, 3, 14, 55, 0))   # 1A는 끝났지만 Pullback은 진행중
+s3 = build_strat(datetime(2026, 8, 3, 14, 45, 0))   # 진입창 안
 s3.watch_list_today.add("CAND")
 s3.phase1b.start_watching("CAND")
 s3.tick()
-check("14:50~15:10 구간엔 감시 유지 (Pullback이 아직 살아있음)",
-      s3.phase1b.is_watching("CAND"))
+check("진입창(14:50) 전에는 후보 감시 유지", s3.phase1b.is_watching("CAND"))
 
 # ═════════════════════════════════════════════════════════
 print("\n[6] on_trade — 보유 종목도 체결틱이 계속 쌓이는지")
@@ -424,38 +423,51 @@ def route(cond_name, now_dt=datetime(2026, 8, 3, 9, 30, 0)):
                                    now_dt.time())
     return calls
 
+T = lambda h, m: datetime(2026, 8, 3, h, m, 0)
+# --- 단독 소스: 시각과 무관하게 완전 분리 ---
 check("눌림목자동 단독 -> Pullback만 평가", route("눌림목자동") == ["PB"], str(route("눌림목자동")))
-check("눌림목자동+주도주상위 -> Pullback만 (1A 평가 안 함)",
-      route("주도주상위+눌림목자동") == ["PB"], str(route("주도주상위+눌림목자동")))
-check("눌림목자동+돌파자동매매용 -> Pullback만",
-      route("눌림목자동+돌파자동매매용") == ["PB"])
-check("3개 전부 중복 -> Pullback만",
-      route("주도주상위+눌림목자동+돌파자동매매용") == ["PB"])
-check("주도주상위 -> 1A만 평가", route("주도주상위") == ["1A"], str(route("주도주상위")))
-check("돌파자동매매용 -> 1A만 평가", route("돌파자동매매용") == ["1A"])
+check("주도주상위 단독 -> 1A만 평가", route("주도주상위") == ["1A"], str(route("주도주상위")))
+check("돌파자동매매용 단독 -> 1A만 평가", route("돌파자동매매용") == ["1A"])
 check("주도주상위+돌파자동매매용(눌림목 없음) -> 1A만",
       route("주도주상위+돌파자동매매용") == ["1A"])
-# 09:20 지연 게이트 제거 (제안 3)
-check("돌파자동매매용이 09:05에도 즉시 1A 평가됨 (09:20 지연 게이트 제거)",
-      route("돌파자동매매용", datetime(2026, 8, 3, 9, 5, 0)) == ["1A"],
-      str(route("돌파자동매매용", datetime(2026, 8, 3, 9, 5, 0))))
-check("주도주상위도 09:05 즉시 평가",
-      route("주도주상위", datetime(2026, 8, 3, 9, 5, 0)) == ["1A"])
-# Pullback 시간창 09:20 ~ 15:10
-check("눌림목자동은 09:15엔 아직 평가 안 함 (Pullback 09:20 시작)",
-      route("눌림목자동", datetime(2026, 8, 3, 9, 15, 0)) == [],
-      str(route("눌림목자동", datetime(2026, 8, 3, 9, 15, 0))))
-check("눌림목자동 09:20 정각부터 평가",
-      route("눌림목자동", datetime(2026, 8, 3, 9, 20, 0)) == ["PB"])
-check("눌림목자동은 11:00에도 계속 평가 (구버전은 10:30 종료)",
-      route("눌림목자동", datetime(2026, 8, 3, 11, 0, 0)) == ["PB"],
-      str(route("눌림목자동", datetime(2026, 8, 3, 11, 0, 0))))
-check("눌림목자동은 15:05까지 평가 (15:10 종료 직전)",
-      route("눌림목자동", datetime(2026, 8, 3, 15, 5, 0)) == ["PB"])
-check("눌림목자동 15:10 이후는 평가 없음",
-      route("눌림목자동", datetime(2026, 8, 3, 15, 15, 0)) == [])
-check("1A는 14:50 이후 평가 없음 (자체 창 종료)",
-      route("주도주상위", datetime(2026, 8, 3, 14, 55, 0)) == [])
+check("눌림목자동 단독은 오후에도 Pullback (전환 규칙 영향 없음)",
+      route("눌림목자동", T(13, 0)) == ["PB"])
+check("주도주상위 단독은 오후에도 1A (전환 규칙 영향 없음)",
+      route("주도주상위", T(13, 0)) == ["1A"])
+
+# --- 중복 소스: 10:30 경계로 전환 ---
+check("중복(주도주상위+눌림목자동) 10:00 -> 1A",
+      route("주도주상위+눌림목자동", T(10, 0)) == ["1A"],
+      str(route("주도주상위+눌림목자동", T(10, 0))))
+check("중복 10:29 -> 아직 1A", route("주도주상위+눌림목자동", T(10, 29)) == ["1A"])
+check("중복 10:30 정각 -> Pullback으로 전환",
+      route("주도주상위+눌림목자동", T(10, 30)) == ["PB"],
+      str(route("주도주상위+눌림목자동", T(10, 30))))
+check("중복 13:00 -> Pullback", route("주도주상위+눌림목자동", T(13, 0)) == ["PB"])
+check("중복(눌림목자동+돌파자동매매용) 09:30 -> 1A",
+      route("눌림목자동+돌파자동매매용", T(9, 30)) == ["1A"])
+check("중복(눌림목자동+돌파자동매매용) 11:00 -> Pullback",
+      route("눌림목자동+돌파자동매매용", T(11, 0)) == ["PB"])
+check("3개 전부 중복도 같은 규칙 (10:00 1A / 11:00 PB)",
+      route("주도주상위+눌림목자동+돌파자동매매용", T(10, 0)) == ["1A"]
+      and route("주도주상위+눌림목자동+돌파자동매매용", T(11, 0)) == ["PB"])
+
+# --- 09:20 지연 게이트 제거 ---
+check("돌파자동매매용이 09:05에도 즉시 1A 평가됨 (지연 게이트 제거)",
+      route("돌파자동매매용", T(9, 5)) == ["1A"], str(route("돌파자동매매용", T(9, 5))))
+check("주도주상위도 09:05 즉시 평가", route("주도주상위", T(9, 5)) == ["1A"])
+
+# --- Pullback 시간창 09:25 ~ 14:50 ---
+check("눌림목자동은 09:24엔 아직 평가 안 함 (Pullback 09:25 시작)",
+      route("눌림목자동", T(9, 24)) == [], str(route("눌림목자동", T(9, 24))))
+check("눌림목자동 09:25 정각부터 평가", route("눌림목자동", T(9, 25)) == ["PB"])
+check("중복 종목은 09:05(Pullback 창 밖)에도 1A로 평가됨",
+      route("주도주상위+눌림목자동", T(9, 5)) == ["1A"])
+check("눌림목자동 14:49까지 평가", route("눌림목자동", T(14, 49)) == ["PB"])
+check("눌림목자동 14:50 이후 평가 없음 (1A와 동일 중단)",
+      route("눌림목자동", T(14, 55)) == [], str(route("눌림목자동", T(14, 55))))
+check("1A도 14:50 이후 평가 없음", route("주도주상위", T(14, 55)) == [])
+check("두 전략의 중단 시각이 같음", SM.PULLBACK_END == SM.PHASE1A_END)
 
 # ═════════════════════════════════════════════════════════
 print("\n[11] 장 시작 전(08:59) 편입 — 폐기 대신 후보 등록")
@@ -1043,12 +1055,10 @@ check("진단 생성 중 예외 없음(어떤 상태에서도 문자열 반환)"
 print("\n[28] 전략별 등락률 상한 + 눌림목 전용 라우팅 하드가드")
 # ═════════════════════════════════════════════════════════
 CAP = SM.StrategyManager._entry_change_cap
-check("1A 상한 16%", CAP("1A", "주도주상위") == 16.0)
-check("돌파자동매매용도 16%", CAP("1A", "돌파자동매매용") == 16.0)
-check("눌림목 상한 10% (전략 기준)", CAP("1A_눌림", "") == 10.0)
-check("눌림목 상한 10% (조건명 기준)", CAP("1A", "눌림목자동") == 10.0)
-check("병합 조건명에 눌림목자동 있으면 보수적으로 10%",
-      CAP("1A", "주도주상위+눌림목자동") == 10.0)
+check("1A 상한 16%", CAP("1A") == 16.0)
+check("눌림목 상한 10%", CAP("1A_눌림") == 10.0)
+check("상한은 '실제 매수 전략'을 따름 — 중복 종목이 오전에 1A로 사면 16%",
+      CAP("1A") == 16.0 and CAP("1A_눌림") == 10.0)
 
 def buy_at(change_pct, sub, cond):
     """전일종가 대비 change_pct 상태에서 매수가 성립하는지."""
@@ -1082,19 +1092,53 @@ s2 = build_strat()
 s2.phase1b.start_watching("MERGED")
 s2.phase1b.orderbook.update("MERGED", {"ask_prices": [10_000], "ask_volumes": [10]}, now=now)
 feed(s2.phase1b.trade_flow, "MERGED", 5, 1_000_000)
-s2._cond_names["MERGED"] = "주도주상위+눌림목자동"   # 나중에 병합된 경우
+s2._cond_names["MERGED"] = "주도주상위+눌림목자동"   # 중복 편입
 s2._execute_buy("MERGED", "MERGED", 1, {"current_price": 10_000}, "1A")
-check("병합 조건명이어도 눌림목자동이 포함되면 1A 매수 차단",
-      "MERGED" not in s2.holdings)
+check("중복 종목은 1A 매수가 허용됨 (오전 전환 규칙 — 가드가 막지 않음)",
+      "MERGED" in s2.holdings)
+s2b = build_strat()
+s2b.phase1b.start_watching("MERGED2")
+s2b.phase1b.orderbook.update("MERGED2", {"ask_prices": [10_000], "ask_volumes": [10]}, now=now)
+feed(s2b.phase1b.trade_flow, "MERGED2", 5, 1_000_000)
+s2b._cond_names["MERGED2"] = "주도주상위+눌림목자동"
+s2b._execute_buy("MERGED2", "MERGED2", 1, {"current_price": 10_000}, "1A_눌림")
+check("중복 종목은 Pullback 매수도 허용됨 (오후 전환 규칙)",
+      "MERGED2" in s2b.holdings)
 
-s3 = build_strat(datetime(2026, 8, 3, 9, 30, 0))
-calls = []
-s3.evaluate_1a_leading_strength = lambda *a, **k: (calls.append("1A"), (False, {"reason": "x"}))[1]
-s3.evaluate_pullback = lambda *a, **k: (calls.append("PB"), (False, {"reason": "x"}))[1]
-s3._cond_names["RT"] = "주도주상위+눌림목자동"
-s3._evaluate_1a_pullback_entry("RT", "RT", 1, make_candles(15), 10_000, 9_900,
-                               datetime(2026, 8, 3, 9, 30, 0).time())
-check("라우팅 단계에서도 눌림목자동 포함이면 Pullback만 평가", calls == ["PB"], str(calls))
+s2c = build_strat()
+s2c.phase1b.start_watching("PBSOLO")
+s2c.phase1b.orderbook.update("PBSOLO", {"ask_prices": [10_000], "ask_volumes": [10]}, now=now)
+feed(s2c.phase1b.trade_flow, "PBSOLO", 5, 1_000_000)
+s2c._cond_names["PBSOLO"] = "눌림목자동"
+s2c._execute_buy("PBSOLO", "PBSOLO", 1, {"current_price": 10_000}, "1A")
+check("눌림목자동 '단독'을 1A로 사려 하면 여전히 차단", "PBSOLO" not in s2c.holdings)
+
+s2d = build_strat()
+s2d.phase1b.start_watching("A1SOLO")
+s2d.phase1b.orderbook.update("A1SOLO", {"ask_prices": [10_000], "ask_volumes": [10]}, now=now)
+feed(s2d.phase1b.trade_flow, "A1SOLO", 5, 1_000_000)
+s2d._cond_names["A1SOLO"] = "주도주상위"
+s2d._execute_buy("A1SOLO", "A1SOLO", 1, {"current_price": 10_000}, "1A_눌림")
+check("주도주상위 '단독'을 Pullback으로 사려 하면 차단 (반대 방향도 막음)",
+      "A1SOLO" not in s2d.holdings)
+
+def route_stage(cond, hm):
+    st = build_strat(datetime(2026, 8, 3, *hm))
+    calls = []
+    st.evaluate_1a_leading_strength = lambda *a, **k: (calls.append("1A"), (False, {"reason": "x"}))[1]
+    st.evaluate_pullback = lambda *a, **k: (calls.append("PB"), (False, {"reason": "x"}))[1]
+    st._cond_names["RT"] = cond
+    st._evaluate_1a_pullback_entry("RT", "RT", 1, make_candles(15), 10_000, 9_900,
+                                   datetime(2026, 8, 3, *hm).time())
+    return calls
+check("라우팅 단계: 중복 종목 09:30 -> 1A만",
+      route_stage("주도주상위+눌림목자동", (9, 30)) == ["1A"],
+      str(route_stage("주도주상위+눌림목자동", (9, 30))))
+check("라우팅 단계: 중복 종목 11:00 -> Pullback만",
+      route_stage("주도주상위+눌림목자동", (11, 0)) == ["PB"])
+check("resolve_strategy와 주문 가드가 같은 함수를 씀(규칙 분기 없음)",
+      SM.StrategyManager.resolve_strategy("주도주상위+눌림목자동",
+                                          datetime(2026, 8, 3, 11, 0).time()) == "1A_눌림")
 
 # ═════════════════════════════════════════════════════════
 print("\n[29] 제안 1 — 매도 시장가 (미체결로 포지션 이탈하던 구멍)")
@@ -1265,30 +1309,38 @@ check("호가 정보가 없으면 price=0 -> 기존 '현재가+1틱' 폴백 유�
 # ═════════════════════════════════════════════════════════
 print("\n[32] 시간창 확장 정합성 (평가·감시·재진입이 함께 늘었는지)")
 # ═════════════════════════════════════════════════════════
-check("ENTRY_WINDOW_END = 1A/Pullback 중 늦은 쪽(15:10)",
-      SM.ENTRY_WINDOW_END == SM.PULLBACK_END == SM.ENTRY_HARD_CUTOFF,
+from core.order_manager import FORCE_CLOSE_TIME
+check("ENTRY_WINDOW_END = 두 전략 공통 종료(14:50)",
+      SM.ENTRY_WINDOW_END == SM.PULLBACK_END == SM.PHASE1A_END == SM.time(14, 50),
       f"{SM.ENTRY_WINDOW_END}")
 import core.watchlist_reentry as WR
-check("watchlist_reentry도 같은 종료 시각을 씀(14:50에 안 끊김)",
-      WR.ENTRY_WINDOW_END == SM.ENTRY_WINDOW_END)
+check("watchlist_reentry도 같은 종료 시각을 씀", WR.ENTRY_WINDOW_END == SM.ENTRY_WINDOW_END)
 
-s = build_strat(datetime(2026, 8, 3, 15, 0, 0))    # 1A 끝, Pullback 진행중
+s = build_strat(datetime(2026, 8, 3, 14, 45, 0))   # 진입창 안
 s.watch_list_today.add("LATEPB")
 s._cond_names["LATEPB"] = "눌림목자동"
 s._stock_names["LATEPB"] = "LATEPB"
-n = try_watchlist_reentry(s, s._now())
-check("15:00에도 Pullback 후보 재평가가 돌아감(구버전은 14:50에 정지)",
-      any(c[1] == "LATEPB" for c in s.api.calls), str(s.api.calls))
+try_watchlist_reentry(s, s._now())
+check("14:45엔 재평가가 돌아감", any(c[1] == "LATEPB" for c in s.api.calls), str(s.api.calls))
 
-s2 = build_strat(datetime(2026, 8, 3, 15, 12, 0))  # 진입창 종료 후
+s2 = build_strat(datetime(2026, 8, 3, 14, 55, 0))  # 진입창 종료 후
 s2.watch_list_today.add("OVER")
 s2._cond_names["OVER"] = "눌림목자동"
 s2.api.calls.clear()
 try_watchlist_reentry(s2, s2._now())
-check("15:10 이후엔 재평가도 정지", not s2.api.calls, str(s2.api.calls))
+check("14:50 이후엔 재평가도 정지", not s2.api.calls, str(s2.api.calls))
 
-check("Pullback 종료(15:10) == 신규매수 하드컷오프 — 조건통과/주문차단 불일치 없음",
-      SM.PULLBACK_END == SM.ENTRY_HARD_CUTOFF)
+check("진입 종료(14:50) < 강제청산(15:10) — 청산 중 신규매수 겹침 없음",
+      SM.ENTRY_WINDOW_END.strftime("%H:%M") < FORCE_CLOSE_TIME,
+      f"{SM.ENTRY_WINDOW_END} vs {FORCE_CLOSE_TIME}")
+check("강제청산 15:10", FORCE_CLOSE_TIME == "15:10")
+check("신규매수 하드컷오프(15:10)도 강제청산과 동일 시각",
+      SM.ENTRY_HARD_CUTOFF.strftime("%H:%M") == FORCE_CLOSE_TIME)
+import core.daily_backtest as DBT
+check("백테스트 강제청산 시각도 동기화", DBT.FORCE_CLOSE_HHMM == "1510")
+check("백테스트 Pullback 창도 라이브와 동일",
+      DBT.PULLBACK_START_HHMM == "0925" and DBT.PULLBACK_END_HHMM == "1450",
+      f"{DBT.PULLBACK_START_HHMM}~{DBT.PULLBACK_END_HHMM}")
 
 # ═════════════════════════════════════════════════════════
 print("\n" + "=" * 60)

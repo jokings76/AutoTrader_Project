@@ -36,7 +36,10 @@ TIME_STOP_MIN = 30  # 30분 보유 후 0% 미만이면 정리
 
 TRADING_START = "09:03"  # 거래 시작
 TRADING_END = "15:10"  # 거래 종료 (이후 신규매수 X)
-FORCE_CLOSE_TIME = "15:15"  # 강제 청산 시각
+# 강제 청산 시각 (2026-08-01 사용자 지정으로 15:15 -> 15:10).
+# 진입은 14:50(1A/Pullback 공통)에 끝나고, 남은 보유분은 여기서 전량 청산한다.
+# ENTRY_HARD_CUTOFF(15:10)와 같은 시각이라 "청산 중에 새로 사는" 겹침이 없다.
+FORCE_CLOSE_TIME = "15:10"
 
 BUY_PRICE_OFFSET_TICKS = 1  # 현재가 +1틱 매수
 SELL_PRICE_OFFSET_TICKS = -1  # 현재가 -1틱 매도
