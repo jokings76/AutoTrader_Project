@@ -99,31 +99,58 @@ class OrderManager:
         price: int = 0,
         sizing: str = "REGULAR",
         exit_strategy: str = "REGULAR",
+        order_style: str = "limit",
+        ref_price: int = 0,
     ) -> dict:
         """단순 매수 wrapper (StrategyManager 호출용).
 
         Args:
             stock_code: 종목코드
             qty: 매수 수량
-            price: 0이면 현재가 +1틱, >0이면 그 가격 지정가
+            price: 0이면 현재가 +1틱, >0이면 그 가격 지정가 (order_style="limit"일 때만 의미 있음)
             sizing: "MAX_VOLUME" | "REGULAR_VOLUME" | "MIN_VOLUME"
             exit_strategy: "REGULAR" | "TRAILING_EXIT" (특수 청산 필요시 사용)
+            order_style: "limit"(지정가, trde_tp=0) | "market"(시장가, trde_tp=3)
+                (2026-08-01 신규) 호가창 두께에 따라 호출부가 선택한다 —
+                매도 1~3호가가 두툼하면 시장가가 유리하고, 텅 비어 있으면
+                시장가는 위쪽 호가를 훑어 올라가므로 지정가로 간다.
+            ref_price: 시장가 주문 시 '예상 체결가'로 기록할 기준가(보통 매도1호가).
+                주문 자체에는 안 쓰이고 반환값 price(=DB/손익 계산 기준)에만 쓴다.
+                0이면 REST로 현재가를 1회 조회해 채운다.
 
         Returns:
-            {"success": bool, "ord_no"?: str, "price"?: int, "error"?: str}
+            {"success": bool, "ord_no"?: str, "price"?: int, "style"?: str, "error"?: str}
+            price는 지정가면 주문가, 시장가면 '예상 체결가'다 — 호출부는 이 값을
+            매수단가로 기록해야 실제 체결가와의 괴리가 최소가 된다.
         """
         if qty <= 0:
             return {"success": False, "error": f"qty={qty}"}
+        style = "market" if str(order_style).lower() == "market" else "limit"
         try:
-            if price <= 0:
-                cur = self.rest.get_current_price(stock_code)
-                if cur <= 0:
-                    return {"success": False, "error": "현재가 조회 실패"}
-                price = round_to_tick(add_ticks(cur, BUY_PRICE_OFFSET_TICKS))
+            if style == "market":
+                # 기록용 기준가만 확보 — 실패해도 주문 자체는 낼 수 있지만,
+                # 매수단가를 모르면 손절/익절 판정이 통째로 무의미해지므로
+                # 기준가를 못 구하면 주문을 내지 않는다(보수적).
+                expected = int(ref_price or 0)
+                if expected <= 0:
+                    expected = self.rest.get_current_price(stock_code)
+                if expected <= 0:
+                    return {"success": False, "error": "시장가 기준가 조회 실패"}
+                result = self.rest.buy_market_order(
+                    stock_code, qty=qty, price=0, trde_tp="3"
+                )
+                fill_price = expected
+            else:
+                if price <= 0:
+                    cur = self.rest.get_current_price(stock_code)
+                    if cur <= 0:
+                        return {"success": False, "error": "현재가 조회 실패"}
+                    price = round_to_tick(add_ticks(cur, BUY_PRICE_OFFSET_TICKS))
+                result = self.rest.buy_market_order(
+                    stock_code, qty=qty, price=price, trde_tp="0"
+                )
+                fill_price = price
 
-            result = self.rest.buy_market_order(
-                stock_code, qty=qty, price=price, trde_tp="0"
-            )
             rc = result.get("return_code")
             if rc != 0:
                 return {"success": False, "error": result.get("return_msg", f"rc={rc}")}
@@ -131,19 +158,21 @@ class OrderManager:
             name = self.get_stock_name(stock_code)
             self.positions[stock_code] = {
                 "qty": qty,
-                "avg_price": price,
+                "avg_price": fill_price,
                 "bought_at": time.time(),
                 "name": name,
                 "ord_no": result.get("ord_no", ""),
                 "sizing": sizing,
                 "exit_strategy": exit_strategy,
+                "order_style": style,
             }
             self.last_buy_ts[stock_code] = time.time()
 
             return {
                 "success": True,
                 "ord_no": result.get("ord_no", ""),
-                "price": price,
+                "price": fill_price,
+                "style": style,
             }
         except Exception as e:
             logger.exception(f"[{stock_code}] buy() 예외")

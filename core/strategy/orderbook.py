@@ -106,6 +106,33 @@ class OrderbookTracker:
             return None, 0
         return prices[0], (vols[0] if vols else 0)
 
+    def get_ask_depth_value(self, stock_code: str, levels: int = 3) -> Optional[float]:
+        """매도 1~N호가에 쌓인 총 잔량의 '금액'(호가 x 잔량 합, 원).
+
+        (2026-08-01 신규) 1A 하이브리드 주문 판정용 — 호가창이 두툼하면
+        시장가로 때려도 미끄러지지 않고, 텅 비어 있으면 시장가가 위쪽
+        호가를 훑어 올라가 크게 불리하게 체결되므로 지정가로 간다.
+
+        반환 None = 호가 스냅샷이 아예 없음(판단 불가). 0.0과 구분해야 한다 —
+        호출부는 None이면 '보수적으로 지정가'를 택한다.
+        """
+        snap = self.snapshots.get(stock_code)
+        if not snap:
+            return None
+        prices = snap.get("ask_prices") or []
+        vols = snap.get("ask_volumes") or []
+        if not prices or not vols:
+            return None
+        total = 0.0
+        # zip으로 짧은 쪽에 맞춰 안전하게 — 일부 호가가 누락돼 두 리스트
+        # 길이가 어긋나도 인덱스 에러가 나지 않게 한다.
+        for price, vol in list(zip(prices, vols))[:max(1, levels)]:
+            try:
+                total += float(price) * float(vol)
+            except (TypeError, ValueError):
+                continue
+        return total
+
     def reset(self, stock_code: str):
         self.snapshots.pop(stock_code, None)
         self.history.pop(stock_code, None)

@@ -540,15 +540,39 @@ class KiwoomWS:
             logger.exception(f"on_program 콜백 예외: {stock_code}")
 
     async def _dispatch_condition_item(self, item: dict):
-        stock_code = (
-            item.get("9001") or item.get("jmcode") or item.get("stk_cd") or ""
-        ).strip()
+        """조건검색 편입/이탈 이벤트 파싱.
+
+        (2026-08-01 수정 — 치명적 유실 버그) 키움은 조건검색 실시간을 두 가지
+        서로 다른 형태로 보낸다:
+          ① 조건식 등록(CNSRREQ search_type=1) 응답 — 플랫 구조
+             {'9001': 'A002990', '302': '금호건설', '10': '...', ...}
+          ② 실시간 편입/이탈 push — type='02' + values 중첩 구조
+             {'type':'02','name':'조건검색','item':'079650',
+              'values':{'841':'3','9001':'079650','843':'I','20':'100621'}}
+        기존 코드는 item 최상위에서만 9001/843/841을 찾아서 ②가 전부
+        stock_code='' -> 조용히 return 되어 **실시간 편입이 100% 유실**됐다
+        (07-31 로그 실측: WS 레벨 편입/이탈 로그 0건, 종목은 기동 스냅샷
+        1회분만 들어오고 있었음). ①/② 어느 쪽이든 읽도록 통합한다.
+        """
+        values = item.get("values") or {}
+
+        def _pick(*keys) -> str:
+            """최상위 -> values 순으로 첫 유효값. 두 형태를 모두 커버."""
+            for k in keys:
+                v = item.get(k)
+                if v not in (None, ""):
+                    return str(v).strip()
+                v = values.get(k)
+                if v not in (None, ""):
+                    return str(v).strip()
+            return ""
+
+        # ②는 종목코드가 item['item']에도 들어있어 최후 폴백으로 쓴다.
+        stock_code = _pick("9001", "jmcode", "stk_cd") or str(item.get("item") or "").strip()
         if stock_code.startswith("A"):
             stock_code = stock_code[1:]
-        signal_type = item.get("843") or item.get("insert_delete_tp") or "I"
-        cond_seq = str(
-            item.get("841") or item.get("cond_idx") or item.get("seq") or ""
-        ).strip()
+        signal_type = _pick("843", "insert_delete_tp") or "I"
+        cond_seq = _pick("841", "cond_idx", "seq")
         if not stock_code:
             return
 

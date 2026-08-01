@@ -193,8 +193,11 @@ def _entry_signal(candles: list, idx: int, vwap_strategy: VWAPStrategy, cond_nam
     #         if info.get("score", 0) >= required:
     #             return "1A", info
 
-    # Pullback: 09:01~10:30, 눌림목 반등 점수 + VWAP AND
-    if hhmm < PULLBACK_END_HHMM:
+    # Pullback: 09:00~10:30, 눌림목 반등 점수 + VWAP AND
+    # (2026-08-01) 라이브가 "눌림목매수는 눌림목자동 조건검색에서만"으로
+    # 배타 라우팅됐으므로 백테스트도 동일하게 소스를 제한한다 — 안 맞추면
+    # 재현 매매 건수가 실제보다 부풀려져 성과 판단이 틀어진다.
+    if PULLBACK_ONLY_SOURCE in cond_name and hhmm < PULLBACK_END_HHMM:
         ok, info = score_pullback(
             sub, vol_ratio, NEUTRAL_STRENGTH, PULLBACK_CFG,
             skip_setup_check=True,

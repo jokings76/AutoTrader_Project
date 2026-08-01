@@ -51,6 +51,7 @@ class TradeFlowTracker:
         window_sec: float,
         now: float = None,
         weight_fn: Callable[[float, float], float] = None,
+        min_ticks: int = None,
     ) -> float:
         """
         시간가중 체결강도 = 가중 매수체결량 / 가중 매도체결량 × 100.
@@ -63,6 +64,11 @@ class TradeFlowTracker:
         충분해도 결과는 STRENGTH_CAP으로 상한(매수 우세라는 의미는 200이나
         9999나 같아서 세분화할 근거가 없고, 극단값일수록 실전에서 노이즈였을
         확률이 높았음).
+
+        min_ticks: 기본값(STRENGTH_MIN_TICKS=5)을 호출부가 덮어쓸 수 있게 한 것
+        (2026-08-01 신규). 1A가 3초짜리 짧은 윈도우로 판정하게 바뀌면서 5틱은
+        과도한 요구가 됐다 — 다만 호출부는 반환값이 중립값인지(=판단 불가)
+        틱 수로 직접 확인해야 한다(tick_count() 참고).
         """
         now = now if now is not None else time.time()
         d = self.ticks.get(stock_code)
@@ -84,7 +90,7 @@ class TradeFlowTracker:
             elif side == "sell":
                 w_sell += vol * w
 
-        if tick_count < STRENGTH_MIN_TICKS:
+        if tick_count < (STRENGTH_MIN_TICKS if min_ticks is None else min_ticks):
             return STRENGTH_NEUTRAL
 
         if w_sell == 0:
@@ -187,6 +193,61 @@ class TradeFlowTracker:
             return 0.0
         cutoff = now - window_sec
         return sum(price * volume for ts, price, side, volume in d if ts >= cutoff)
+
+    def tick_count(self, stock_code: str, window_sec: float, now: float = None) -> int:
+        """최근 window_sec 안의 체결 틱 수 (2026-08-01 신규).
+
+        compute_strength가 중립값(100.0)을 돌려줬을 때 그게 '진짜 1:1'인지
+        '틱이 부족해 판단 불가'인지 호출부가 구분할 수 있어야 해서 추가했다 —
+        이 구분이 없어서 07-31에 보유종목이 매수 66초 만에 잘려나간 사고가 있었다.
+        """
+        now = now if now is not None else time.time()
+        d = self.ticks.get(stock_code)
+        if not d:
+            return 0
+        cutoff = now - window_sec
+        return sum(1 for ts, _, _, _ in d if ts >= cutoff)
+
+    def count_large_trades(
+        self,
+        stock_code: str,
+        window_sec: float,
+        min_value: float,
+        now: float = None,
+    ) -> int:
+        """최근 window_sec 안에서 '단일 체결 금액 >= min_value'인 체결 건수.
+
+        (2026-08-01 신규, 사용자 지정 1A 진입조건) 누적 거래대금은 잔챙이
+        체결이 길게 쌓여도 채워지지만, 이건 '큰 손이 지금 때리고 있는가'를
+        본다 — 같은 틱 버퍼를 재사용하므로 REST 호출도 대기시간도 없다.
+        """
+        now = now if now is not None else time.time()
+        d = self.ticks.get(stock_code)
+        if not d:
+            return 0
+        cutoff = now - window_sec
+        return sum(
+            1 for ts, price, _, volume in d
+            if ts >= cutoff and price * volume >= min_value
+        )
+
+    def max_single_trade_value(
+        self,
+        stock_code: str,
+        window_sec: float,
+        now: float = None,
+    ) -> float:
+        """최근 window_sec 안의 최대 단일 체결 금액(원). 없으면 0.0.
+
+        (2026-08-01 신규) '단일 체결 1억원 이상' 조건 판정용.
+        """
+        now = now if now is not None else time.time()
+        d = self.ticks.get(stock_code)
+        if not d:
+            return 0.0
+        cutoff = now - window_sec
+        vals = [price * volume for ts, price, _, volume in d if ts >= cutoff]
+        return float(max(vals)) if vals else 0.0
     # ──────────────────────────────────────────
 
     def reset(self, stock_code: str):

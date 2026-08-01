@@ -5,11 +5,19 @@
 중복이라 주석처리, 1B는 WallDetector(매도벽 FSM) 제거하고 가격 하락폭
 트리거+확증게이트만 남김 — 근거는 각 상수 정의부 주석 참고)
 
-시간대:
-  1A       (09:00 ~ 14:50): 체결강도 100 이상 1분 유지 시 즉시매수 (evaluate_1a_leading_strength)
-  Pullback (09:00 ~ 10:30): 눌림목 반등 점수 + VWAP AND 필터 (로컬 되돌림 재검증 생략)
-  1B       (Pullback 미체결 후보 감시): 60초 내 -2.0% 하락 -> 신호봉 고가 완성봉 종가돌파 확증
+시간대 (2026-08-01 개편 — 1B 비활성화, 전략 2개 체제):
+  1A       (09:00 ~ 14:50): 체결강도 100 이상 3초 유지 + 대량체결 버스트 -> 즉시매수
+                            (evaluate_1a_leading_strength). 주문은 호가 두께로
+                            지정가/시장가 자동 선택.
+  Pullback (09:00 ~ 10:30): **눌림목자동 조건검색식 전용**. 반등확인 + 점수 + VWAP AND.
+  1B       [2026-08-01 비활성화] PHASE1B_ENABLED=False — 1A와 트리거 방향이
+                            정반대라 동시 적용 시 진입이 오락가락. 코드는 보존.
   1L       [2026-07-31 주석처리] 1A(체결강도 단독)와 설계 중복 — on_trade 참고
+
+전략 라우팅 (2026-08-01, 상호배타):
+  cond_name에 "눌림목자동" 포함 -> Pullback만 평가
+  그 외(주도주상위/돌파자동매매용/기타) -> 1A만 평가
+  한 종목이 두 전략을 오가지 않게 해서 진입 근거를 항상 하나로 고정한다.
 
 슬롯: 1A/Pullback/1L/1B 각각 자체 상한 3개 + 전체 합산 상한 6개(MAX_HOLDINGS) 공유.
       1B는 실시간 틱 콜백에서 즉시 매수(우선권), 1A/Pullback은 조건검색 이벤트 경로.
@@ -113,20 +121,43 @@ PHASE1A_SCORE_CAUTION_BONUS = 1.0
 # 전부 빠지는 트레이드오프를 사용자가 인지하고 수용함(핵심 목표는 "고가 아닌
 # 트리거 지점에서 매수").
 PHASE1A_LEADING_STRENGTH_MIN = 100.0
-PHASE1A_LEADING_SUSTAIN_SEC = 60
+# (2026-08-01 사용자 지정) 60초 -> 3초. "트리거 지점에서 사자"는 목표에 60초
+# 유지는 너무 느리다는 판단. 대신 아래 대량체결 버스트 조건을 AND로 걸어서
+# 짧은 창의 노이즈를 막는다 — 시간을 줄인 만큼 '체결의 질'로 보완하는 구조.
+PHASE1A_LEADING_SUSTAIN_SEC = 3
+# 3초 윈도우 체결강도 판정 최소 틱 수. 이 미만이면 compute_strength가 중립값
+# (100.0)을 돌려주는데, 임계값도 100이라 "100 < 100 = False"로 **통과**해버린다.
+# 즉 데이터가 없을수록 오히려 쉽게 뚫리는 구조였다 — 1A는 그 우연을 쓰지 않고
+# 틱 수를 직접 확인해서 부족하면 명시적으로 탈락시킨다(아래 평가 함수 참고).
+PHASE1A_STRENGTH_MIN_TICKS = 3
 # 지수 방어 CAUTION 시 강도 임계값 배수(2026-07-31, 사용자 지정 "동적 강도
 # 임계값"의 한 축) — 옛 1A 점수시스템의 PHASE1A_SCORE_CAUTION_BONUS와 같은
 # 전제(시장 전체가 불안하면 컷라인을 높인다)를 강도 임계값에 적용한 것.
 # 판단치 — 실전 관찰 필요.
 PHASE1A_LEADING_CAUTION_MULTIPLIER = 1.2
 
-# 거래대금 최소 유동성 필터 (2026-07-31 사용자 지정) — 체결강도 100 하나만
-# 보는 게 불안하다는 우려에서 "지연 없이" 보완할 방법으로 채택한 1순위 아이디어.
-# 오늘(07-31) 실제 유니버스 35종목의 09:00~09:15 분당 거래대금 실측 분포
-# (중앙값 4.8억원, 5퍼센타일 5,350만원)에서 하위 극단치(폴라리스AI 등 일부
-# 종목이 분당 500만~2,500만원대로 나머지와 뚜렷이 분리)만 걸러내는 보수적인
-# 값으로 잡음 — 대부분의 정상 종목엔 영향 없어야 함. 실전 관찰 후 조정할 것.
-PHASE1A_MIN_TRADE_VALUE = 30_000_000  # 60초 기준 3천만원
+# ── 1A 대량체결 버스트 필터 (2026-08-01 사용자 지정, 기존 60초 누적
+# 거래대금 필터를 대체) ────────────────────────────────────────────
+# 기존 PHASE1A_MIN_TRADE_VALUE(60초 누적 3천만원)는 잔챙이 체결이 길게 쌓여도
+# 채워져서 "지금 큰 손이 때리고 있는가"를 구분하지 못했다. 3초로 창을 줄인
+# 만큼, 그 3초 안에 실제로 큰 체결이 터지고 있는지를 두 갈래(OR)로 확인한다:
+#   ① 단일 체결 PHASE1A_BURST_TRADE_VALUE 이상이 PHASE1A_BURST_TRADE_COUNT회 이상
+#   ② 단일 체결 PHASE1A_SINGLE_TRADE_VALUE 이상이 1건이라도 (한 방에 들어온 대량)
+# 둘 다 TradeFlowTracker의 같은 틱 버퍼를 재사용 — REST 호출/지연 추가 없음.
+# 주의: 사용자 지시의 "3000천만"은 3천만원(30,000,000)으로 해석했다.
+PHASE1A_BURST_TRADE_VALUE = 30_000_000    # 대량체결 1건의 최소 금액 (3천만원)
+PHASE1A_BURST_TRADE_COUNT = 3             # 3초 안에 위 체결이 몇 건 이상이어야 하는지
+PHASE1A_SINGLE_TRADE_VALUE = 100_000_000  # 단일 체결만으로 통과시키는 금액 (1억원)
+
+# ── 1A 하이브리드 주문(지정가/시장가 자동 선택) (2026-08-01 사용자 지정) ──
+# 매수 직전 매도 1~3호가에 쌓인 총 잔량 '금액'을 보고 주문 방식을 고른다:
+#   잔량금액 >= PHASE1A_ASK_DEPTH_MIN  -> 호가창이 채워져 있음 -> 시장가
+#       (받아줄 물량이 충분하니 즉시 체결이 유리, 슬리피지도 제한적)
+#   잔량금액 <  PHASE1A_ASK_DEPTH_MIN  -> 텅 빈 호가창 -> 지정가
+#       (시장가로 때리면 위쪽 호가를 훑어 올라가 크게 불리하게 체결됨)
+#   호가 스냅샷 자체가 없음(판단 불가)  -> 지정가 (보수적 기본값)
+PHASE1A_ASK_DEPTH_LEVELS = 3
+PHASE1A_ASK_DEPTH_MIN = 50_000_000  # 5천만원
 
 # 주도주상위 시가대비 급등 매수보류 (2026-07-31, 사용자 지정) — 개장 직후
 # 시가 대비 이미 5% 이상 오른 종목은 가파른 상승 뒤 눌림(되돌림) 가능성이
@@ -271,6 +302,22 @@ LEADING_MAX_SLOTS = 3
 LEADING_STRENGTH_MIN = 100.0
 LEADING_SUSTAIN = timedelta(minutes=2)
 
+# ── 1B 전면 비활성화 (2026-08-01, 사용자 지정) ─────────────────────
+# "1A와 1B 동시 적용 시 애매한 부분이 있다" — 실제로 두 전략이 같은 후보 풀
+# (조건검색 편입 종목)과 같은 데이터 소스(TradeFlowTracker)를 공유하면서
+# 정반대 방향을 본다: 1A는 '지금 매수세가 터진다'에 사고, 1B는 '60초 내
+# -2% 밀렸다'에 산다. 같은 종목이 같은 시각에 두 전략의 트리거를 번갈아
+# 만족하면 진입 타이밍이 오락가락하고, 어느 로직이 그 자리를 만들었는지
+# 사후 분석도 불가능해진다. 그래서 1B는 통째로 끄고 1A 하나만 남긴다.
+#
+# 삭제하지 않고 이 플래그 하나로 끈다 — 되살리려면 True로만 바꾸면 되고,
+# 관련 코드(_try_phase1b_buy / _check_1b_confirmations / on_trade의 하락
+# 트리거 / tick()의 확증 점검)는 전부 이 플래그로 가드되어 있다.
+# phase1b 컨트롤러 객체 자체는 계속 살아있다 — 이제 1B 전략이 아니라
+# **1A의 체결틱/호가 데이터 파이프라인**으로 쓰이기 때문(TradeFlowTracker,
+# OrderbookTracker). 이 객체를 없애면 1A가 눈이 먼다.
+PHASE1B_ENABLED = False
+
 # ── 1B 진입 트리거 재설계 (2026-07-31, 사용자 지정 "수술") ──────────
 # 기존엔 WallDetector(호가 1~2단 매도잔량 감시)의 5단계 FSM(눌림→벽등장→
 # 벽축소+강도상승→벽소실)을 거쳐야 확증게이트로 넘어갔는데, 이 FSM을 통째로
@@ -355,7 +402,15 @@ class StrategyManager:
         self._now = now_func or datetime.now
 
         self.holdings: dict[str, dict] = {}
+        # 재평가 대상 후보 (watchlist_reentry / slot_replacement가 순회)
         self.watch_list_today: set[str] = set()
+        # DB(watch_list_log)에 실제로 행을 쓴 종목 (2026-08-01 분리).
+        # 기존엔 watch_list_today 하나로 두 역할을 겸해서, 평가 지연 경로가
+        # watch_list_today에 먼저 넣어버리면 나중에 _record_watch_list가
+        # "이미 있음"으로 조기 반환해 **DB 행이 영영 안 남는** 구멍이 있었다
+        # (09:20 지연 종목/장 시작 전 편입 종목 → 일일 백테스트·틱아카이브
+        #  유니버스에서 통째로 누락).
+        self._watch_db_written: set[str] = set()
         self.pending: set[str] = set()
         self._stock_names: dict[str, str] = {}
         self._cond_names: dict[str, str] = {}  # stock_code -> 최초 편입 조건검색식 이름
@@ -497,6 +552,57 @@ class StrategyManager:
         # 전일 조회 실패 시 그냥 당일 데이터라도 반환
         return today_candles
 
+    @staticmethod
+    def _score_ratio(info: dict) -> float:
+        """전략 공통 비교용 '컷라인 대비 비율' (2026-08-01 신규).
+
+        1A는 체결강도(0~300), Pullback은 점수(0~9)로 스케일이 완전히 달라서
+        원점수를 그대로 비교하면 슬롯교체·확장슬롯 판정이 전부 1A 쪽으로
+        기울었다. 1.0 = 자기 컷라인을 정확히 충족, 1.5 = 컷라인의 1.5배.
+        점수 정보가 없는 경로(1B/1L)는 0.0 — 비교 대상에서 자연히 빠진다.
+        """
+        score = info.get("score")
+        thr = info.get("score_threshold")
+        if score is None:
+            return 0.0
+        try:
+            score = float(score)
+            thr = float(thr) if thr else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+        if thr <= 0:
+            return 0.0
+        return score / thr
+
+    def _today_open(self, candles: list) -> float:
+        """분봉 리스트에서 **당일** 첫 봉의 시가를 뽑는다 (2026-08-01 신규).
+
+        기존 호출부들은 `candles[-1]["open"]`을 '당일 시가'로 썼는데, 이
+        프로젝트의 분봉은 내림차순(최신->과거)이라 그건 '가장 오래된 봉'이고,
+        개장 직후엔 키움이 요청 개수를 채우려고 **전일 봉까지** 붙여 주므로
+        실제로는 전일 데이터였다(07-30 09:01 실측: candles[-1] = 07-29 15:09봉).
+        그 결과 1A의 "시가대비 +5% 매수보류"가 사실상 '전일종가 대비 +5%'로
+        동작해 개장 초반 주도주 대부분이 잘렸다.
+
+        time_str로 오늘 봉만 걸러 가장 이른 봉의 시가를 쓴다. 오늘 봉이
+        하나도 없으면 0.0 — 호출부는 0이면 시가 기반 필터를 건너뛴다
+        (모르는 값으로 막지 않는다).
+        """
+        if not candles:
+            return 0.0
+        today_str = self._now().strftime("%Y%m%d")
+        today_only = [
+            c for c in candles
+            if str(c.get("time_str", "")).startswith(today_str)
+        ]
+        if not today_only:
+            return 0.0
+        first = min(today_only, key=lambda c: str(c.get("time_str", "")))
+        try:
+            return float(first.get("open") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
     # ========================================
     # 순수익률 계산 (수수료 차감)
     # ========================================
@@ -541,6 +647,7 @@ class StrategyManager:
             }
         for w in WatchListRepository.find_by_date(self._now().date()):
             self.watch_list_today.add(w["stock_code"])
+            self._watch_db_written.add(w["stock_code"])
 
         blocked, cooldowns, counts = self._restore_daily_risk_state()
 
@@ -613,15 +720,45 @@ class StrategyManager:
         if cur_phase != self._last_phase:
             self._last_phase = cur_phase
 
-        if self.phase1b and now.time() >= PULLBACK_END:
-            for code in list(self.phase1b.watched):
-                if code not in self.holdings:
-                    self.phase1b.stop_watching(code)
+        # 감시 종목 정리 (2026-08-01 전면 수정 — 치명적 회귀 해소)
+        #
+        # 기존엔 "10:30(PULLBACK_END) 이후 미보유 감시종목 전부 stop_watching"
+        # 이었다. 이건 1B(10:30 종료)용 정리였는데, 1A가 같은 phase1b의
+        # TradeFlowTracker를 쓰도록 바뀌면서 **1A의 체결틱 버퍼를 10초마다
+        # 통째로 지우는** 구조가 됐다(stop_watching -> trade_flow.reset).
+        # 1A 시간창은 14:50까지인데 10:30 이후 버퍼가 계속 비워지니
+        # is_intensity_sustained가 항상 실패 -> 1A 창의 70%가 죽어 있었다
+        # (재현 검증: 동일 틱 흐름에서 3초 거래대금이 1/6로 떨어짐).
+        #
+        # 새 규칙: 1A 창(14:50)까지는 후보/보유 종목의 감시를 유지하고,
+        # '더 이상 후보도 보유도 아닌' 종목만 정리해서 메모리를 묶는다.
+        self._cleanup_watched(now)
 
         self._track_soft_cap_full(now)
-        self._check_1b_confirmations()
+        # 1B 비활성화(2026-08-01) — PHASE1B_ENABLED로 가드. 코드는 보존.
+        if PHASE1B_ENABLED:
+            self._check_1b_confirmations()
         self._update_dynamic_caps()
         self.check_timeouts()
+
+    def _cleanup_watched(self, now):
+        """phase1b 감시 목록 정리 (2026-08-01 신규).
+
+        감시 목록은 1A의 데이터 수집 대상이다(체결틱 + 호가). 따라서
+          - 보유 종목: 항상 유지 (동적 익절캡/손실반등 매도가 실시간 강도를 봄)
+          - 오늘 후보(watch_list_today): 1A 창(PHASE1A_END)까지 유지
+          - 그 외: 즉시 해제
+        1A 창이 끝나면 후보도 해제해서 메모리를 정리한다.
+        """
+        if not self.phase1b:
+            return
+        in_window = now.time() < PHASE1A_END
+        for code in list(self.phase1b.watched):
+            if code in self.holdings:
+                continue
+            if in_window and code in self.watch_list_today:
+                continue
+            self.phase1b.stop_watching(code)
 
     # ========================================
     # Phase 판별 (09:00~14:50 그룹A 활성 여부)
@@ -859,9 +996,11 @@ class StrategyManager:
         if held_sec < PHASE1A_PRIORITY_MIN_HOLD_SEC:
             return False
 
-        price = (
-            self.phase1b.trade_flow.get_latest_price(weakest_code) if self.phase1b else None
-        )
+        # 신선도 확인된 실시간 체결가만 사용 (2026-08-01). 예전엔
+        # get_latest_price를 그대로 썼는데, 보유 종목은 틱이 아예 안 쌓이던
+        # 시절이라 **매수 시점에 얼어붙은 가격**으로 매도 기록이 남았다
+        # (순손익이 항상 -0.23%로 계산돼 당일 재매수까지 차단됨).
+        price = self._fresh_tick_price(weakest_code)
         if not price:
             try:
                 c1 = self.api.get_minute_candles(weakest_code, interval=1, count=1)
@@ -935,17 +1074,15 @@ class StrategyManager:
         # [추가] 신호가 들어왔을 때 조건명(cond_name)을 포함해 로그 출력
         logger.info(f"📈 편입 신호: {stock_code} ({stock_name}) - 조건: {cond_name}")
 
-        phase = self.get_current_phase()
-        if phase is None:
-            return
         if stock_code in self.holdings or stock_code in self.pending:
             return
 
-        blocked, reason = self._is_rebuy_blocked(stock_code)
-        if blocked:
-            logger.info("[%s] %s 매수 차단: %s", stock_code, stock_name, reason)
-            return
-
+        # ⚠️ 기록(이름/조건명)은 시간 게이트보다 **먼저** 한다 (2026-08-01 수정).
+        # 기존엔 get_current_phase()가 None이면(=09:00 이전) 여기 도달하기 전에
+        # return 해서, 스케줄러를 08:59로 앞당긴 뒤로는 기동 스냅샷 종목이
+        # 이름·조건명·워치리스트 어디에도 남지 않고 통째로 사라졌다.
+        # 실시간 편입(type='02')까지 유실되고 있던 상태(kiwoom_ws 수정 전)라,
+        # 08:59 기동 + 이 게이트 = 하루 종일 조건검색 종목 0건이 될 수 있었다.
         self._stock_names[stock_code] = stock_name
         # 이미 실제 조건명이 기록돼 있으면 "기타"/"알수없음" 같은 부실한 값으로
         # 덮어쓰지 않음 (2026-07-30). 실시간 WS 편입 이벤트(_on_signal)가 cond_seq를
@@ -972,9 +1109,26 @@ class StrategyManager:
         # (2026-07-28: 조건검색에 N봉 신고가+거래량 필터를 사용자가 직접 추가해서
         # 1차 필터링이 이미 상류에서 되고 있는 것도 이관 결정의 근거)
 
+        blocked, reason = self._is_rebuy_blocked(stock_code)
+        if blocked:
+            logger.info("[%s] %s 매수 차단: %s", stock_code, stock_name, reason)
+            return
+
         try:
             now_t = self._now().time()
-            if not (GROUP_A_START <= now_t < PHASE1A_END):
+
+            # 장 시작 전(08:59 기동 등)에는 평가만 미루고 후보로는 남긴다
+            # (2026-08-01). watch_list_today에 들어가면 09:00부터
+            # task_watchlist_reentry(15초 주기)가 자동으로 재평가한다 —
+            # '버리는' 게 아니라 '미루는' 것이 핵심.
+            if now_t < GROUP_A_START:
+                self.watch_list_today.add(stock_code)
+                logger.info(
+                    "[%s] %s 장 시작 전 편입 — %s부터 평가 대기 (후보 등록)",
+                    stock_code, stock_name, GROUP_A_START.strftime("%H:%M"),
+                )
+                return
+            if now_t >= PHASE1A_END:
                 return
 
             candles = self._get_merged_candles(stock_code, interval=1, count=15)
@@ -985,12 +1139,18 @@ class StrategyManager:
                 return
 
             current_price = int(candles[0].get("close", 0))
-            open_price = int(candles[-1].get("open", 0))
+            # 당일 시가 — candles는 **내림차순**(최신->과거)이라 기존의
+            # candles[-1]["open"]은 '가장 오래된 봉의 시가'였고, 개장 직후엔
+            # API가 전일 봉까지 채워 주므로 실제로는 **전일 시가**였다
+            # (07-30 로그 실측: 09:01 시점 candles[-1] = 20260729 15:09 봉).
+            # 그 값으로 "시가대비 +5% 매수보류"를 재던 탓에 사실상
+            # '전일종가 대비 +5%'가 되어 개장 초반 주도주가 전부 잘렸다.
+            open_price = self._today_open(candles)
             if open_price > 0:
                 self._opening_prices.setdefault(stock_code, open_price)
 
             self._evaluate_1a_pullback_entry(
-                stock_code, stock_name, phase, candles, current_price, open_price, now_t
+                stock_code, stock_name, 1, candles, current_price, open_price, now_t
             )
 
         except Exception as e:
@@ -1001,6 +1161,11 @@ class StrategyManager:
     def _evaluate_1a_pullback_entry(
         self, stock_code, stock_name, phase, candles, current_price, open_price, now_t
     ) -> bool:
+        # candles=None 허용 (2026-08-01) — 새 1A는 순수 틱 계산이라 분봉이
+        # 전혀 필요 없다. 재평가 루프(watchlist_reentry, 15초 주기)가 후보마다
+        # 분봉을 긁으면 429 예산이 그대로 녹는다(후보 40종목이면 한 사이클에
+        # REST 40콜 = 자체 상한 분당 100콜의 절반 이상). Pullback 분기에
+        # 도달했을 때만 지연 로딩한다.
         """1A + Pullback 평가/매수 시도 (슬롯 없으면 watch_list에만 기록).
         on_condition_hit(최초 편입 시점)과 watchlist_reentry(슬롯 재확보 시 재평가)
         양쪽에서 공유하는 로직 — 2026-07-28 분리(슬롯 꽉 찼을 때 1A/Pullback 후보가
@@ -1027,12 +1192,16 @@ class StrategyManager:
             self.watch_list_today.add(stock_code)
             return False
 
-        # 눌림목자동은 "당일고가 대비 -3%+ 눌린 상태"를 전제하는 검색식이라
-        # 1A(거래량증가지속+급등형, 상승 모멘텀 전제)와 전제가 반대됨. 다른
-        # 조건식과 겹치지 않고 눌림목자동 단독으로만 들어온 종목은 1A 평가를
-        # 건너뛰고 바로 Pullback으로 보낸다(계산 낭비 방지 + 성격이 안 맞는
-        # 후보로 1A 슬롯이 낭비되는 것 방지). (2026-07-31)
-        pullback_only_source = cond_name == "눌림목자동"
+        # ── 전략 라우팅: 상호배타 (2026-08-01 사용자 지정) ──────────────
+        # "전략이 오락가락하지 않도록 눌림목매수는 눌림목자동 조건검색에서만".
+        # 기존엔 눌림목자동 '단독'일 때만 1A를 건너뛰었고, 다른 조건식과 겹친
+        # 종목은 1A와 Pullback 둘 다 평가받아서 같은 종목이 어느 날은 1A로,
+        # 어느 날은 눌림으로 잡히는 일관성 없는 진입이 났다. 이제 완전히 나눈다:
+        #     cond_name에 "눌림목자동" 포함 -> Pullback 전용 (1A 평가 안 함)
+        #     그 외                          -> 1A 전용    (Pullback 평가 안 함)
+        # 전제가 정반대인 두 검색식(눌림목자동=당일고가 -3% 되돌림 /
+        # 주도주상위·돌파=상승 모멘텀)을 각자 맞는 전략에만 연결하는 것이기도 하다.
+        is_pullback_source = "눌림목자동" in cond_name
 
         # ==========================================
         # 1A: 체결강도 단독 즉시진입 (09:00~14:50) — 2026-07-31 전면 단순화
@@ -1048,7 +1217,7 @@ class StrategyManager:
         # 핵심 목표는 "고가 아닌 트리거 지점에서 매수").
         # evaluate_new_intensity_strategy 자체는 삭제하지 않고 아래 정의부에
         # 그대로 남겨둠(주석으로 보류, 필요시 언제든 되돌릴 수 있게).
-        if current_price > 0 and not pullback_only_source:
+        if current_price > 0 and not is_pullback_source:
             ok, info = self.evaluate_1a_leading_strength(
                 stock_code, current_price, open_price, cond_name
             )
@@ -1069,7 +1238,17 @@ class StrategyManager:
         # ==========================================
         # Pullback: 눌림목 반등 점수 + VWAP AND (09:00~10:30, 1A와 시간대 겹침/슬롯 별도)
         # ==========================================
-        if now_t < PULLBACK_END:
+        if is_pullback_source and now_t < PULLBACK_END:
+            # 분봉 지연 로딩 (2026-08-01) — Pullback은 분봉이 반드시 필요하다.
+            if candles is None:
+                try:
+                    candles = self._get_merged_candles(stock_code, interval=1, count=15)
+                except Exception as e:
+                    logger.warning("[%s] pullback 분봉 조회 실패: %s", stock_code, e)
+                    return False
+            if not candles or len(candles) < VOLUME_LOOKBACK + 1:
+                return False
+
             # OBV(누적거래량) 모멘텀 — 점수 요소로 씀(2026-07-29). VWAP과 동일하게
             # 당일 전용 캔들로 계산(전일 데이터 섞이는 _get_merged_candles 절대
             # 안 씀), 아래 VWAP 필터에서 같은 캔들을 재사용해 REST 추가호출 없음.
@@ -1096,20 +1275,12 @@ class StrategyManager:
             )
             self._record_watch_list(stock_code, stock_name, phase, info, cond_name)
 
-            # 체결강도 FSM(1B) 감시 시작 — Pullback 시간대에 들어온 후보는 눌림
-            # 성립 여부와 무관하게 전부 감시 대상으로 넣는다.
-            # 위치는 점수판정 앞(2026-07-29 변경 유지) — 이후 재평가 사이클에서
-            # 강도 점수가 실제값을 갖도록.
-            # 단, "눌림 성립(setup_ok)"을 감시 시작 조건으로 걸었던 것은 되돌림
-            # (2026-07-30): 1B는 눌림목 패턴이 아니라 매도벽 소멸을 보는 독립
-            # 전략이라 눌림 성립을 전제할 이유가 없고, 실제로 이 조건 때문에
-            # 07-30 주도주 9종목이 전부 "눌림 미성립(되돌림 4~9%)"으로 감시조차
-            # 시작되지 않아 1B 매매가 27건(07-29) -> 7건으로 급감했음.
-            if (
-                self.phase1b
-                and self.can_buy_phase1b()
-                and not self.phase1b.is_watching(stock_code)
-            ):
+            # 체결틱 수집 시작 (2026-08-01 재정의) — 1B가 비활성화되면서
+            # start_watching은 더 이상 "1B 감시 시작"이 아니라 **체결강도/호가
+            # 데이터 수집 시작**을 뜻한다. Pullback 점수의 강도 항목이 실제
+            # 값을 가지려면 여기서 켜져 있어야 하므로, 예전의 can_buy_phase1b()
+            # 게이트(1B 슬롯/시간창에 종속)는 제거하고 무조건 켠다.
+            if self.phase1b and not self.phase1b.is_watching(stock_code):
                 self.phase1b.start_watching(stock_code)
 
             if ok:
@@ -1121,11 +1292,14 @@ class StrategyManager:
                         self._execute_buy(
                             stock_code, stock_name, phase, info, sub_strategy="1A_눌림"
                         )
-                        # Pullback 자체 점수로 이미 샀으면 1B 감시는 더 필요
-                        # 없음 — 안 끄면 나중에 이 종목을 팔고 난 뒤 phase1b가
-                        # 여전히 감시 중이다가 별도로 재매수를 시도할 수 있음.
-                        if self.phase1b and self.phase1b.is_watching(stock_code):
-                            self.phase1b.stop_watching(stock_code)
+                        # (2026-08-01) 매수 후 stop_watching 하던 것을 제거.
+                        # 예전엔 "1B가 이 종목을 또 사는 것"을 막으려는 조치였는데
+                        # 1B는 이제 비활성화(PHASE1B_ENABLED=False)라 그 위험이
+                        # 없고, 반대로 감시를 끄면 trade_flow.reset()이 호출돼
+                        # **보유 중 체결강도를 볼 수 없게 된다** — 동적 익절캡
+                        # 상향/조기확정, 손실반등 매도, 슬롯교체가 전부 이 값을
+                        # 쓰므로 보유하는 동안은 반드시 감시를 유지해야 한다.
+                        # 청산 후 정리는 tick()의 _cleanup_watched가 담당.
                         return True
                     logger.info("[%s] pullback 조건 OK but 슬롯 부족", stock_code)
             elif info.get("reason"):
@@ -1142,6 +1316,26 @@ class StrategyManager:
         code = parsed_trade.get("stock_code")
         if not code:
             return
+
+        # ⚠️ 체결틱 적재는 **가장 먼저** 한다 (2026-08-01 수정).
+        # 기존엔 보유 종목이면 on_price_update 후 곧바로 return 해서
+        # trade_flow.add_tick까지 도달하지 못했다 — 그래서 매수하는 순간부터
+        # 그 종목의 틱 버퍼가 얼어붙고, 10초만 지나면 compute_strength가
+        # 중립값(100)만 반환했다. 그 결과 동적 익절캡 상향/조기확정,
+        # 동적캡 즉시매도, 손실반등 하이브리드 매도가 전부 '판단 불가'로
+        # 빠져 사실상 작동하지 않았다(07-31에 매수 직후 66초 안에만 발동한
+        # 이유도 이것 — 매수 전에 쌓아둔 틱이 남아있던 구간뿐이었다).
+        if self.phase1b and self.phase1b.is_watching(code):
+            try:
+                self.phase1b.trade_flow.add_tick(
+                    code,
+                    parsed_trade.get("price", 0),
+                    parsed_trade.get("side", "neutral"),
+                    parsed_trade.get("volume", 0),
+                    now=now,
+                )
+            except Exception:
+                logger.exception("[%s] 체결틱 적재 실패", code)
 
         if code in self.holdings:
             price = parsed_trade.get("price")
@@ -1256,13 +1450,14 @@ class StrategyManager:
             self._maybe_report_1l_diag(now_dt)
             """
 
-        if self.phase1b and self.phase1b.is_watching(code):
-            # (2026-07-31, 사용자 지정 "1B 수술") FSM 반환값(매도벽 감지 상태)은
-            # 더 이상 진입 트리거로 안 씀 — on_trade는 여전히 호출해서
-            # trade_flow.add_tick(체결틱 기록, compute_strength 등 다른 곳에서
-            # 계속 씀)만 살려두고, 아래에서 별도로 가격 하락폭만 확인한다.
-            self.phase1b.on_trade(parsed_trade, now=now)
-
+        # ── 1B 진입 트리거 [2026-08-01 비활성화, 사용자 지정] ──────────
+        # 1A와 방향이 정반대(1A=매수세 폭발 시 진입 / 1B=60초 -2% 급락 시 진입)
+        # 라 같은 후보 풀에 동시 적용하면 진입 타이밍이 오락가락한다. 삭제하지
+        # 않고 PHASE1B_ENABLED로 가드만 걸어둔다 — True로 바꾸면 그대로 복구됨.
+        # 주의: 체결틱 적재(add_tick)는 위쪽으로 이미 옮겼으므로 여기서
+        # phase1b.on_trade()를 부르면 **같은 틱이 두 번 쌓여** 체결강도/거래대금이
+        # 2배로 부풀려진다. 그래서 복구 시에도 add_tick은 위 한 곳에서만 한다.
+        if PHASE1B_ENABLED and self.phase1b and self.phase1b.is_watching(code):
             drop_pct = self.phase1b.trade_flow.get_price_change_pct(
                 code, PHASE1B_PULLBACK_WINDOW_SEC, now
             )
@@ -1296,25 +1491,44 @@ class StrategyManager:
         )
 
     def on_orderbook(self, parsed_orderbook: dict, now: float = None):
-        # (2026-07-31, 사용자 지정 "1B 수술") 매도벽 감지(WallDetector)를 진입
-        # 판정에서 뺐다 — 근거: ①호가 잔량 이력은 어떤 데이터 공급자로도 영구
-        # 검증 불가(과거 호가창 아카이브 자체가 존재하지 않음) ②detect_multiplier/
-        # shrink_ratio/disappear_ratio 전부 "TBD: 실데이터로 튜닝" 상태로 도입
-        # 이후 한 번도 튜닝된 적 없는 placeholder였음 ③FSM 자체가 지연의 큰
-        # 축이었음(413630 실사례: 확증게이트 전에 FSM 단계에서만 19분 소요).
-        # 아래는 삭제 대신 주석으로 보류 — 되돌리려면 그대로 살리면 됨.
-        # code = parsed_orderbook.get("stock_code")
-        # if not code:
-        #     return
-        # if self.phase1b and self.phase1b.is_watching(code):
-        #     state = self.phase1b.on_orderbook(parsed_orderbook, now=now)
+        """호가창(0D) 수신 — 매도 1~3호가 잔량을 최신 상태로 유지한다.
+
+        (2026-08-01 재활성화) 07-31에 WallDetector(매도벽 FSM)를 걷어내면서
+        이 콜백이 통째로 `return`이 되어 OrderbookTracker가 **한 번도 갱신되지
+        않는** 상태였다. 이제 1A 하이브리드 주문(호가가 두툼하면 시장가, 텅
+        비었으면 지정가)이 이 데이터를 쓰므로 다시 적재한다.
+        — 적재만 한다. 진입 판정(WallDetector/FSM)은 여전히 하지 않는다:
+          호가 잔량 이력은 어떤 공급자로도 과거 검증이 불가능하고
+          (detect_multiplier 등은 도입 이후 한 번도 튜닝된 적 없는 placeholder),
+          FSM 자체가 지연의 큰 축이었기 때문(413630 사례: FSM에서만 19분).
+        """
+        code = parsed_orderbook.get("stock_code")
+        if not code:
+            return
+        if not (self.phase1b and getattr(self.phase1b, "orderbook", None)):
+            return
+        if not self.phase1b.is_watching(code):
+            return
+        try:
+            self.phase1b.orderbook.update(code, parsed_orderbook, now=now)
+        except Exception:
+            logger.exception("[%s] 호가 적재 실패", code)
+
+        # [보류] 1B 매도벽 FSM 트리거 — PHASE1B_ENABLED로 복구 가능
+        # if PHASE1B_ENABLED:
+        #     self.phase1b.wall_detector.on_orderbook(code, now=now)
+        #     state = self.phase1b.evaluator.evaluate(code, now=now)
         #     if state == ChemulState.READY_TO_BUY:
         #         self._try_phase1b_buy(code, now)
-        return
 
     def _try_phase1b_buy(self, stock_code: str, now: float = None):
         """FSM이 READY_TO_BUY 도달 → 즉시 매수하지 않고 '반등확증' 대기 등록.
-        (2026-07-30 변경, 근거는 PHASE1B_CONFIRM_WAIT 상수 주석 참고)"""
+        (2026-07-30 변경, 근거는 PHASE1B_CONFIRM_WAIT 상수 주석 참고)
+
+        [2026-08-01] 1B 비활성화 — 호출부(on_trade)가 이미 막고 있지만,
+        나중에 다른 경로가 생겨도 새는 일이 없도록 여기서도 이중 가드한다."""
+        if not PHASE1B_ENABLED:
+            return
         if stock_code in self.holdings or stock_code in self.pending:
             return
         if stock_code in self._1b_confirm:
@@ -1355,7 +1569,11 @@ class StrategyManager:
     def _check_1b_confirmations(self):
         """반등확증 대기 종목을 '완성된 1분봉 종가'로 확인 (2026-07-30).
         tick()에서 주기 호출 — FSM이 READY 상태를 벗어나도 계속 추적되어야 하므로
-        _try_phase1b_buy(틱 콜백)가 아니라 여기서 확인한다."""
+        _try_phase1b_buy(틱 콜백)가 아니라 여기서 확인한다.
+
+        [2026-08-01] 1B 비활성화 — tick()이 이미 막고 있지만 이중 가드."""
+        if not PHASE1B_ENABLED:
+            return
         if not self._1b_confirm:
             return
         now_dt = self._now()
@@ -1508,7 +1726,20 @@ class StrategyManager:
         self, stock_code: str, current_price: float,
         open_price: float = 0.0, cond_name: str = "",
     ) -> tuple[bool, dict]:
-        """1A 체결강도 단독 즉시진입 평가 (2026-07-31 신규, 사용자 지정).
+        """1A 즉시진입 평가 — 체결강도(3초) + 대량체결 버스트.
+
+        [2026-08-01 개편, 사용자 지정] 게이트 순서(위에서 걸리면 즉시 탈락):
+          0) 감시 시작(체결틱/호가 수집) — 최초 호출부터 데이터를 모은다
+          1) 주도주상위 한정, **당일 시가** 대비 +5% 이상이면 매수 보류
+          2) 지수 HALT 차단
+          3) 대량체결 버스트: 최근 3초에
+               3천만원+ 단일체결 3건 이상  OR  1억원+ 단일체결 1건 이상
+          4) 체결틱 3개 이상 (없으면 강도 '판단 불가'로 탈락 — 중립값 통과 방지)
+          5) 3초 가중 체결강도 >= 100 x 동적배수(CAUTION/COLD일 때만 상향)
+        통과 시 info에 score/score_threshold(=강도/임계값)를 실어 확장 슬롯과
+        슬롯 교체가 다른 전략과 같은 축(컷라인 대비 비율)에서 비교되게 한다.
+
+        ── 아래는 2026-07-31 도입 당시 배경(유지) ────────────────────
 
         도입 당시엔 주도주상위 소스 전용이었으나, 같은 논리(조건검색식이
         이미 강한 종목만 걸러 넘겨주므로 우리 쪽 추가 필터가 중복검증으로
@@ -1572,36 +1803,74 @@ class StrategyManager:
                 "reason": "체결강도 데이터 소스 없음(phase1b 미연결)",
             }
 
-        # 거래대금 최소 유동성 필터 (2026-07-31 사용자 지정) — 체결강도만으로는
-        # 저유동성 종목에서 몇 건의 큰 주문이 우연히 강도를 밀어올린 "가짜 강세"를
-        # 못 거른다. compute_strength와 같은 틱 버퍼(get_trade_value)에서 그대로
-        # 계산하므로 REST 호출도 대기시간도 추가되지 않는다. 임계값은 오늘 실제
-        # 유니버스 35종목의 09:00~09:15 분당 거래대금 분포로 보정(1분봉 근사,
-        # 아직 틱 아카이브가 없어 정확한 60초 롤링은 아님) — 중앙값 4.8억원 대비
-        # 하위 1~2%(폴라리스AI 등 일부 종목이 분당 500만~2500만원대로 나머지와
-        # 뚜렷이 분리)만 걸러내는 보수적인 값으로 잡음. 실전 관찰 후 조정 예정.
+        # ── 대량체결 버스트 필터 (2026-08-01 사용자 지정) ──────────────
+        # 기존 "60초 누적 거래대금 3천만원"을 대체. 누적은 잔챙이 체결이 길게
+        # 쌓여도 채워져서 "지금 큰 손이 때리는가"를 구분 못 했다. 3초 창에서
+        # 아래 둘 중 하나(OR)를 요구한다:
+        #   ① 3천만원 이상 단일 체결이 3건 이상
+        #   ② 1억원 이상 단일 체결이 1건이라도
+        # 예외가 나도 매수로 새지 않도록 실패 시 0으로 두고 그대로 탈락시킨다.
+        tf = self.phase1b.trade_flow
         try:
-            trade_value = self.phase1b.trade_flow.get_trade_value(
+            burst_count = tf.count_large_trades(
+                stock_code,
+                window_sec=PHASE1A_LEADING_SUSTAIN_SEC,
+                min_value=PHASE1A_BURST_TRADE_VALUE,
+            )
+            max_single = tf.max_single_trade_value(
+                stock_code, window_sec=PHASE1A_LEADING_SUSTAIN_SEC
+            )
+            trade_value = tf.get_trade_value(
                 stock_code, window_sec=PHASE1A_LEADING_SUSTAIN_SEC
             )
         except Exception:
-            trade_value = 0.0
-        if trade_value < PHASE1A_MIN_TRADE_VALUE:
+            logger.exception("[%s] 1A 대량체결 계산 실패 — 매수 보류", stock_code)
+            burst_count, max_single, trade_value = 0, 0.0, 0.0
+
+        burst_ok = burst_count >= PHASE1A_BURST_TRADE_COUNT
+        single_ok = max_single >= PHASE1A_SINGLE_TRADE_VALUE
+        if not (burst_ok or single_ok):
             return False, {
                 "current_price": current_price,
                 "trade_value": trade_value,
+                "burst_count": burst_count,
+                "max_single_trade": max_single,
                 "reason": (
-                    f"최근 {PHASE1A_LEADING_SUSTAIN_SEC:.0f}초 거래대금 "
-                    f"{trade_value:,.0f}원 < 최소 {PHASE1A_MIN_TRADE_VALUE:,.0f}원 "
-                    f"— 저유동성 매수 보류"
+                    f"대량체결 부족 (최근 {PHASE1A_LEADING_SUSTAIN_SEC}초: "
+                    f"{PHASE1A_BURST_TRADE_VALUE/10000:,.0f}만원+ 체결 {burst_count}건"
+                    f"/{PHASE1A_BURST_TRADE_COUNT}건, 최대단일 {max_single/10000:,.0f}만원"
+                    f"/{PHASE1A_SINGLE_TRADE_VALUE/10000:,.0f}만원)"
+                ),
+            }
+
+        # ── 체결강도 (3초 윈도우) ──────────────────────────────────
+        # 틱 수를 직접 확인한 뒤 강도를 본다. compute_strength는 틱이 부족하면
+        # 중립값(100.0)을 반환하는데 임계값도 100이라 "100 < 100 = False"로
+        # **통과**해버린다 — 데이터가 없을수록 쉽게 뚫리는 구조라, 여기서는
+        # 그 우연에 기대지 않고 틱 부족을 명시적으로 탈락시킨다.
+        try:
+            tick_n = tf.tick_count(stock_code, window_sec=PHASE1A_LEADING_SUSTAIN_SEC)
+        except Exception:
+            tick_n = 0
+        if tick_n < PHASE1A_STRENGTH_MIN_TICKS:
+            return False, {
+                "current_price": current_price,
+                "burst_count": burst_count,
+                "max_single_trade": max_single,
+                "reason": (
+                    f"체결틱 부족 (최근 {PHASE1A_LEADING_SUSTAIN_SEC}초 {tick_n}틱 "
+                    f"< 최소 {PHASE1A_STRENGTH_MIN_TICKS}틱) — 강도 판단 불가"
                 ),
             }
 
         try:
-            current_strength = self.phase1b.trade_flow.compute_strength(
-                stock_code, window_sec=10
+            current_strength = tf.compute_strength(
+                stock_code,
+                window_sec=PHASE1A_LEADING_SUSTAIN_SEC,
+                min_ticks=PHASE1A_STRENGTH_MIN_TICKS,
             )
         except Exception:
+            logger.exception("[%s] 1A 체결강도 계산 실패 — 매수 보류", stock_code)
             current_strength = 0.0
 
         # 동적 강도 임계값 (2026-07-31 사용자 지정) — 고정 100은 "수치 호환성이
@@ -1621,31 +1890,50 @@ class StrategyManager:
         strength_mult = max(1.0, perf_mult, caution_mult)
         effective_strength_min = PHASE1A_LEADING_STRENGTH_MIN * strength_mult
 
-        sustained = self.phase1b.trade_flow.is_intensity_sustained(
-            stock_code, effective_strength_min, PHASE1A_LEADING_SUSTAIN_SEC
-        )
-        if not sustained:
+        # 3초 창 전체를 하나의 시간가중 윈도우로 평가한다 (2026-08-01).
+        # 기존 is_intensity_sustained(60초 구간을 10초 간격 샘플링)는 창이
+        # 3초로 줄면 샘플이 1개뿐이라 의미가 없고, 무엇보다 틱이 없는 구간에
+        # 중립값(100)을 채워 임계값 100을 그냥 통과시키는 성질이 있었다.
+        # 여기서는 위에서 틱 수를 이미 확인했으므로 강도 비교만 하면 된다 —
+        # 3초 가중 윈도우라 순간 스파이크 1틱으로는 통과할 수 없다.
+        if current_strength < effective_strength_min:
             return False, {
                 "current_price": current_price,
                 "current_strength": current_strength,
                 "strength_threshold": effective_strength_min,
+                "score": current_strength,
+                "score_threshold": effective_strength_min,
+                "burst_count": burst_count,
+                "max_single_trade": max_single,
                 "reason": (
-                    f"체결강도 {effective_strength_min:.0f} 이상(기본 "
-                    f"{PHASE1A_LEADING_STRENGTH_MIN:.0f} x{strength_mult:.2f}) "
-                    f"{PHASE1A_LEADING_SUSTAIN_SEC:.0f}초 유지 미달 "
-                    f"(현재 {current_strength:.0f})"
+                    f"체결강도 미달 ({current_strength:.0f} < {effective_strength_min:.0f}"
+                    f" = 기본 {PHASE1A_LEADING_STRENGTH_MIN:.0f} x{strength_mult:.2f}, "
+                    f"{PHASE1A_LEADING_SUSTAIN_SEC}초 {tick_n}틱)"
                 ),
             }
 
+        trigger = (
+            f"대량체결 {burst_count}건" if burst_ok
+            else f"단일체결 {max_single/100_000_000:.2f}억"
+        )
         return True, {
             "current_price": current_price,
             "current_strength": current_strength,
             "strength_threshold": effective_strength_min,
+            # score/score_threshold는 확장슬롯(_can_use_expansion_slot)·슬롯교체가
+            # 전략 공통으로 읽는 필드다 (2026-08-01 추가). 이게 없어서 1A는
+            # 확장 슬롯을 영구히 못 쓰고 슬롯교체 대체후보 자격도 없었다.
+            # 1A엔 점수 개념이 없으므로 체결강도/임계값을 그대로 싣는다 —
+            # 스케일이 전략마다 달라도 '컷라인 대비 비율'로 비교하므로 형평이 맞는다.
+            "score": current_strength,
+            "score_threshold": effective_strength_min,
+            "burst_count": burst_count,
+            "max_single_trade": max_single,
+            "trade_value": trade_value,
             "entry_mode": "1a_leading_strength",
             "reason": (
-                f"1A 체결강도 즉시진입 (체결강도 {current_strength:.0f} >= "
-                f"{effective_strength_min:.0f}, "
-                f"{PHASE1A_LEADING_SUSTAIN_SEC:.0f}초 유지)"
+                f"1A 즉시진입 (강도 {current_strength:.0f}>={effective_strength_min:.0f} "
+                f"/{PHASE1A_LEADING_SUSTAIN_SEC}초 {tick_n}틱, {trigger})"
             ),
         }
 
@@ -1923,8 +2211,85 @@ class StrategyManager:
             logger.warning("[%s] 전일종가 조회 실패, 등락률 상한 체크 스킵: %s", stock_code, e)
         return None
 
+    def _resolve_order_style(self, stock_code: str, current_price: float) -> tuple[str, int, str]:
+        """호가창 두께로 지정가/시장가를 고른다 (2026-08-01 사용자 지정).
+
+        매도 1~PHASE1A_ASK_DEPTH_LEVELS 호가의 잔량 '금액'을 보고:
+          >= PHASE1A_ASK_DEPTH_MIN : 받아줄 물량이 충분 -> 시장가 (즉시체결)
+          <  PHASE1A_ASK_DEPTH_MIN : 텅 빈 호가창 -> 지정가 (훑고 올라가는 것 방지)
+          호가 스냅샷 없음/예외    : 지정가 (보수적 기본값)
+
+        반환: (style, ref_price, 사유문자열)
+          ref_price = 시장가일 때 '예상 체결가'로 쓸 매도1호가(없으면 0 -> 호출부가
+          현재가로 대체). 지정가 경로에선 쓰이지 않는다.
+
+        절대 예외를 밖으로 던지지 않는다 — 호가 판정 실패가 매수 자체를
+        막거나 크래시로 번지면 안 되므로, 어떤 실패든 '지정가'로 안전하게 수렴한다.
+        """
+        try:
+            ob = getattr(self.phase1b, "orderbook", None) if self.phase1b else None
+            if ob is None:
+                return "limit", 0, "호가 트래커 없음 -> 지정가"
+            depth_value = ob.get_ask_depth_value(
+                stock_code, levels=PHASE1A_ASK_DEPTH_LEVELS
+            )
+            if depth_value is None:
+                return "limit", 0, "호가 스냅샷 없음 -> 지정가"
+            ask1, _ = ob.get_top_ask(stock_code)
+            ref = int(ask1) if ask1 else 0
+            if depth_value >= PHASE1A_ASK_DEPTH_MIN:
+                return "market", ref, (
+                    f"매도1~{PHASE1A_ASK_DEPTH_LEVELS}호가 잔량 "
+                    f"{depth_value/10000:,.0f}만원 >= {PHASE1A_ASK_DEPTH_MIN/10000:,.0f}만원 "
+                    f"-> 시장가"
+                )
+            return "limit", ref, (
+                f"매도1~{PHASE1A_ASK_DEPTH_LEVELS}호가 잔량 "
+                f"{depth_value/10000:,.0f}만원 < {PHASE1A_ASK_DEPTH_MIN/10000:,.0f}만원 "
+                f"(빈 호가창) -> 지정가"
+            )
+        except Exception:
+            logger.exception("[%s] 호가 두께 판정 실패 -> 지정가로 진행", stock_code)
+            return "limit", 0, "호가 판정 예외 -> 지정가"
+
+    def _fresh_tick_price(self, stock_code: str, max_age_sec: float = 10.0):
+        """최근 max_age_sec 안에 체결이 있었을 때만 최신 체결가를 반환.
+
+        (2026-08-01) 매수 단가 기준을 분봉 종가(최대 1분 지연) 대신 실시간
+        체결가로 올리기 위한 헬퍼. 오래된 틱을 '현재가'로 잘못 쓰지 않도록
+        반드시 신선도를 함께 확인한다 — 그냥 get_latest_price만 쓰면 몇 분 전
+        가격이 그대로 나올 수 있다(감시만 켜두고 체결이 끊긴 종목).
+        """
+        if not (self.phase1b and getattr(self.phase1b, "trade_flow", None)):
+            return None
+        try:
+            if self.phase1b.trade_flow.tick_count(stock_code, max_age_sec) <= 0:
+                return None
+            px = self.phase1b.trade_flow.get_latest_price(stock_code)
+            return px if px and px > 0 else None
+        except Exception:
+            return None
+
     def _execute_buy(self, stock_code, stock_name, phase, info, sub_strategy):
         current_price = info["current_price"]
+        # 실시간 체결가가 있으면 그걸 기준가로 쓴다 (2026-08-01) — info의
+        # current_price는 1분봉 종가라 최대 1분 지연이고, 그 값으로 수량/
+        # 등락률상한/매수단가를 계산하면 빠르게 움직이는 종목에서 손익 판정이
+        # 처음부터 어긋난다("매수가가 한참 위에서 된다"의 한 축).
+        fresh_px = self._fresh_tick_price(stock_code)
+        if fresh_px:
+            if current_price and abs(fresh_px - current_price) / current_price > 0.10:
+                # 10% 넘게 벌어지면 둘 중 하나가 이상한 값 — 보수적으로 분봉값 유지
+                logger.warning(
+                    "[%s] 실시간가(%s)와 분봉가(%s) 괴리 10%% 초과 — 분봉값 사용",
+                    stock_code, f"{fresh_px:,}", f"{current_price:,}",
+                )
+            else:
+                current_price = fresh_px
+
+        if not current_price or current_price <= 0:
+            logger.warning("[%s] %s 기준가 없음 -> 매수 취소", stock_code, stock_name)
+            return
 
         if self._now().time() >= ENTRY_HARD_CUTOFF:
             logger.info(
@@ -2026,7 +2391,38 @@ class StrategyManager:
             display_reason = entry_reason  # 텔레그램용 — cond_name 프리픽스 전 원문
             entry_reason = f"[{cond_name}] {entry_reason}"
 
-            result = self.order_manager.buy(stock_code, quantity, price=0)
+            # ── 하이브리드 주문 (2026-08-01 사용자 지정) ────────────────
+            # 호가창이 두툼하면 시장가(즉시체결), 텅 비었으면 지정가.
+            # 판정이 실패하면 무조건 지정가로 수렴하므로 여기서 예외로
+            # 매수가 통째로 깨지는 일은 없다(_resolve_order_style 참고).
+            order_style, ask1, style_reason = self._resolve_order_style(
+                stock_code, current_price
+            )
+            logger.info("[%s] 주문방식 판정: %s", stock_code, style_reason)
+            result = self.order_manager.buy(
+                stock_code,
+                quantity,
+                price=0,
+                order_style=order_style,
+                ref_price=ask1 or int(current_price),
+            )
+
+            # 시장가 실패 시 지정가 1회 폴백 (2026-08-01).
+            # 이 계정은 모의투자이고, 지금까지 실제로 낸 주문은 전부
+            # trde_tp="0"(지정가)뿐이라 모의 서버가 trde_tp="3"(시장가)을
+            # 받아주는지 실거래로 확인된 적이 없다. 새 주문 방식 때문에
+            # 매수 자체를 놓치는 일이 없도록, 시장가가 거부되면 즉시
+            # 검증된 지정가 경로로 한 번 더 시도한다.
+            if order_style == "market" and (not result or not result.get("success")):
+                logger.warning(
+                    "[%s] 시장가 주문 실패(%s) -> 지정가로 1회 폴백",
+                    stock_code, (result or {}).get("error", "unknown"),
+                )
+                order_style = "limit"
+                result = self.order_manager.buy(
+                    stock_code, quantity, price=0, order_style="limit",
+                )
+
             if not result or not result.get("success"):
                 err = (result or {}).get("error", "unknown")
                 logger.error("[%s] 매수 실패: %s", stock_code, err)
@@ -2038,13 +2434,25 @@ class StrategyManager:
                 )
                 return
 
+            # 체결 기준가 — 지정가면 주문가, 시장가면 매도1호가(예상 체결가).
+            # order_manager가 실제로 쓴 값을 그대로 받아야 손절/익절 판정이
+            # 실제 체결가와 최소한으로 어긋난다 (2026-08-01).
+            fill_price = int(result.get("price") or current_price)
+            if fill_price <= 0:
+                fill_price = int(current_price)
+            entry_reason += f" | {order_style}"
+            # trades.entry_reason은 VARCHAR(255) — 넘치면 insert가 통째로 실패해
+            # trade_id가 없어지고 매도 DB 갱신까지 끊긴다(2026-07-27 실제 사고).
+            # 길이를 안전하게 잘라서 그 클래스의 사고를 원천 차단한다.
+            entry_reason = entry_reason[:250]
+
             # 매수 주문은 이미 체결됨 — DB 기록이 실패해도 포지션 추적(self.holdings)은
             # 반드시 이어져야 하므로 insert_buy 예외가 위로 전파되지 않게 막는다.
             try:
                 trade_id = TradeRepository.insert_buy(
                     stock_code=stock_code,
                     stock_name=stock_name,
-                    buy_price=current_price,
+                    buy_price=fill_price,
                     buy_quantity=quantity,
                     strategy_phase=phase,
                     sub_strategy=sub_strategy,
@@ -2061,21 +2469,26 @@ class StrategyManager:
 
             self.holdings[stock_code] = {
                 "trade_id": trade_id,
-                "buy_price": current_price,
+                "buy_price": fill_price,
                 "buy_quantity": quantity,
                 "buy_time": self._now(),
                 "stock_name": stock_name,
                 "strategy_phase": phase,
                 "sub_strategy": sub_strategy,
-                "highest_price": current_price,
+                "highest_price": fill_price,
+                "lowest_price": fill_price,
                 "ma20": None,
                 "ma20_updated": None,
                 "trigger": info.get("trigger"),
                 "opening_price": info.get("opening_price", 0.0),
                 "position_weight": (opt_info or {}).get("final_weight", 1.0),
                 "warmup_until": self._now() + BUY_WARMUP,
-                "entry_score": sc or 0.0,
+                # entry_score도 _watch_scores와 같은 '컷라인 대비 비율' 스케일로
+                # 통일 (2026-08-01) — 슬롯교체가 이 값과 후보 점수를 직접
+                # 비교하는데, 한쪽만 원점수면 전략 간 비교가 무의미해진다.
+                "entry_score": self._score_ratio(info),
                 "entry_strength": strength_val,
+                "order_style": order_style,
             }
 
             self.sold_at.pop(stock_code, None)
@@ -2127,9 +2540,20 @@ class StrategyManager:
     # 워치리스트
     # ========================================
     def _record_watch_list(self, stock_code, stock_name, phase, info, cond_name=""):
+        # 후보 점수는 **컷라인 대비 비율**로 저장한다 (2026-08-01 변경).
+        # 슬롯교체(core/slot_replacement.py)는 "후보점수 >= 정체종목점수 x1.2"로
+        # 비교하는데, 전략마다 점수 스케일이 완전히 달라서(1A는 체결강도 0~300,
+        # Pullback은 0~9점) 원점수를 그대로 비교하면 항상 1A가 이긴다.
+        # 비율(1.0 = 자기 컷라인 정확히 충족)로 통일하면 전략이 달라도
+        # "자기 기준을 얼마나 넘겼나"라는 같은 축에서 비교된다.
         if info.get("score") is not None:
-            self._watch_scores[stock_code] = info["score"]
-        if stock_code in self.watch_list_today:
+            self._watch_scores[stock_code] = self._score_ratio(info)
+        # 재평가 후보 등록은 DB 기록과 분리 — DB에 이미 썼는지는
+        # _watch_db_written으로 판단한다(2026-08-01). 예전엔 둘 다
+        # watch_list_today로 판단해서, 지연평가 경로가 먼저 넣어둔 종목은
+        # DB 행이 영영 안 남았다(백테스트/틱아카이브 유니버스에서 누락).
+        self.watch_list_today.add(stock_code)
+        if stock_code in self._watch_db_written:
             return
         try:
             extra = {}
@@ -2151,9 +2575,9 @@ class StrategyManager:
             WatchListRepository.add(
                 stock_code=stock_code, stock_name=stock_name, phase=phase, **extra
             )
-            self.watch_list_today.add(stock_code)
+            self._watch_db_written.add(stock_code)
         except Exception as e:
-            logger.warning("[%s] 워치리스트 실패: %s", stock_code, e)
+            logger.warning("[%s] 워치리스트 DB 기록 실패(후보 등록은 유지): %s", stock_code, e)
 
     def _mark_watch_bought(self, stock_code: str):
         try:

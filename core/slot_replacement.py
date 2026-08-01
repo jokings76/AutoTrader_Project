@@ -4,6 +4,7 @@
 심플하게 처리한다. (2026-07-26 신규)
 """
 
+from core.strategy.trade_flow import STRENGTH_NEUTRAL
 from utils.logger import logger
 
 STAGNANT_MIN_HOLD_MINUTES = 10        # 최소 보유 시간 (이전엔 교체 후보 자격 없음)
@@ -49,6 +50,13 @@ def find_stagnant_holding(strat, now) -> tuple[str, dict] | None:
             logger.warning("[%s] 슬롯교체 강도조회 실패: %s", code, e)
             continue
 
+        # 중립값(STRENGTH_NEUTRAL=100.0)은 '틱 부족으로 판단 불가'라는 뜻이지
+        # '강도 하락'이 아니다 (2026-08-01 추가). 07-31에 이 구분이 빠진
+        # _update_dynamic_caps가 매수 66초 만에 멀쩡한 포지션을 잘라낸 사고가
+        # 있었고 거기엔 가드를 넣었는데 여기만 빠져 있었다 — 진입강도가 100을
+        # 넘는 대부분의 포지션에서 '데이터 없음'이 곧바로 '하락'으로 오인된다.
+        if current_strength <= 0 or current_strength == STRENGTH_NEUTRAL:
+            continue  # 판단 불가 -> 보수적으로 유지
         if current_strength >= entry_strength * STRENGTH_DECLINE_RATIO:
             continue  # 강도 하락 아님
 
@@ -97,9 +105,18 @@ def find_stagnant_holding(strat, now) -> tuple[str, dict] | None:
 
 def find_replacement_candidate(strat, stagnant_score: float) -> tuple[str, float] | None:
     """watch_list_today 중 미보유·미대기 종목 중 점수가 stagnant_score*margin
-    이상인 최고점 후보를 찾아 반환 (없으면 None)."""
+    이상인 최고점 후보를 찾아 반환 (없으면 None).
+
+    (2026-08-01) 여기서 다루는 '점수'는 전부 **컷라인 대비 비율**이다
+    (1.0 = 자기 전략 컷라인 정확히 충족). 1A는 체결강도(0~300),
+    Pullback은 점수(0~9)로 스케일이 달라 원점수 비교가 무의미했다.
+    """
     best_code, best_score = None, 0.0
-    threshold = stagnant_score * CANDIDATE_SCORE_MARGIN
+    # 정체 종목의 점수를 모르면(0) 문턱이 0이 되어 아무 후보나 통과했다.
+    # 비율 스케일에서 '보통 수준'인 1.0을 기준으로 삼아, 최소한 자기
+    # 컷라인의 1.2배는 되는 후보만 교체 자격을 갖게 한다. (2026-08-01)
+    base = stagnant_score if stagnant_score and stagnant_score > 0 else 1.0
+    threshold = base * CANDIDATE_SCORE_MARGIN
     for code in strat.watch_list_today:
         if code in strat.holdings or code in strat.pending:
             continue
