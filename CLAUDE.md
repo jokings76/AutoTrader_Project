@@ -962,6 +962,38 @@ claude --remote-control
   통합 테스트는 앞으로도 전략을 바꿀 때마다 돌릴 것 —
   **유닛이 다 통과해도 배선이 끊어져 있을 수 있다는 게 이번의 교훈**이다.
 
+- 2026-08-02 (계속) — **프로젝트 파일 정리**: 추적 파일 139개 -> 99개,
+  저장소 27.6MB -> 1.1MB. 용량이 목적이 아니라 **옛 덤프에 삭제된 전략 코드가
+  통째로 남아 grep·검색·AI 컨텍스트를 오염시키는 것**이 문제였다(이 세션에서만
+  두 번 걸렸다 — 스테일 `phase_settings.py`의 `evaluate_new_intensity_strategy`
+  호출을 라이브로 착각할 뻔했다).
+  - 판단 근거: `main.py`에서 시작한 **import 도달성 분석**(상대 임포트 포함).
+    라이브 모듈은 34개뿐이다. 초안에서 상대 임포트를 빼먹어 `core/theme_manager.py`가
+    고아로 잘못 잡혔던 걸 발견·수정했다 — **이 분석을 다시 할 일이 있으면
+    반드시 상대 임포트를 처리할 것.**
+  - **삭제**: 루트 `phase_settings.py`(진짜는 `config/phase_settings.py`, 이름이
+    같아 가장 위험했음) / 코드 덤프 txt 9개(`combined_strategy_code.txt` 25.4MB
+    포함, `merge_code.py`로 재생성 가능) / 일회성 패치 `fix_*.py` 3개 /
+    0바이트 파일 15개 / **스테일 테스트 8개**(삭제된 Phase2·Phase3·WallDetector
+    FSM을 검증하고 있었음) / 구문오류로 실행 불가한 `backtest_simulation.py`·
+    `db_all.py` / `utilslogger.py`(ThemeManager 중복 정의 + `utils/logger.py`와
+    이름 혼동).
+  - **보존 + `[삭제 예정 / DEPRECATED]` 배너**(15개): `*_legacy.py` 12개 +
+    `phase3_controller.py`/`order_queue.py`/`api/kiwoom_api.py`.
+    CLAUDE.md 규칙 2("파일 삭제 금지")와 충돌해서 지우지 않되, 읽는 사람이
+    현재 코드로 착각하지 않도록 최상단에 명시했다. 정리하려면
+    `git rm $(git ls-files "*_legacy.py")`.
+  - **절대 삭제 금지로 확인된 것**: `notify_scheduler_start.py`(start_trader.bat이
+    매일 08:59 호출), `__init__.py` 3개(패키지 마커), 수동 도구 8개
+    (`analyze_program_flow.py`/`probe_tick_chart_api.py`/`fetch_themes.py`/
+    `create_tables.py` 등).
+  - 이전 세션이 남긴 `.claude/worktrees/` 2개도 정리(3.3MB, git 미추적인데
+    grep에는 계속 걸렸음). `git worktree remove`가 OneDrive 잠금으로 실패해
+    등록 해제 후 PowerShell로 폴더를 지웠다.
+  - **유효한 테스트는 이제 3개뿐**: `test_patch_20260801.py`(250) /
+    `test_patch_20260802.py`(83) / `test_live_dryrun_20260803.py`(71).
+    정리 후 재검증 404건 전원 통과 + `import main` 정상.
+
 \## 세션 이관 체크리스트 (2026-08-01 신설)
 
 새 세션(PC 터미널 / 모바일 원격 / 새 대화창 어디서든)이 이 프로젝트를
