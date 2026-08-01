@@ -617,6 +617,59 @@ try:
 except Exception as e:
     ok_diag = False; diag = str(e)
 check("진입 진단 알림이 정상 생성됨", ok_diag, str(diag)[:80])
+check("진단에 틱 단계별 통과 수가 표시됨 (어디서 끊기는지 한 줄로)",
+      ok_diag and "무장" in diag and "버스트" in diag and "매수" in diag,
+      next((l for l in str(diag).split("\n") if "무장" in l), ""))
+
+# ═════════════════════════════════════════════════════════
+print("\n[17] FID 228 수신 감시 — 이번 개편 유일한 미검증 가정")
+# ═════════════════════════════════════════════════════════
+# 무장이 228 하나에 걸려 있어, 이게 안 오면 조용히 하루 종일 매수 0건이 된다.
+s16, clk16 = build(datetime(2026, 8, 3, 9, 30, 0))
+s16.on_condition_hit("F1", "정상", cond_name="주도주상위")
+tick(s16, "F1", 130.0, T0 + 700)
+check("228이 실려오면 수신 종목으로 기록됨", "F1" in s16._fid228_seen)
+check("체결틱 총수도 집계됨", s16._trade_tick_total >= 1, str(s16._trade_tick_total))
+d16 = s16.build_entry_diagnostics()
+check("정상일 때는 228 경고가 뜨지 않음", "228" not in d16 or "🚨" not in d16)
+
+# 0B는 오는데 228만 비어있는 경우 (가장 위험한 시나리오)
+s17, clk17 = build(datetime(2026, 8, 3, 9, 30, 0))
+s17.on_condition_hit("F2", "228없음", cond_name="주도주상위")
+for i in range(50):
+    s17.on_trade({"stock_code": "F2", "price": 10_000, "side": "buy",
+                  "volume": 10}, now=T0 + 710 + i)      # strength 키 자체가 없음
+check("228 없는 틱은 수신 집합에 안 들어감", "F2" not in s17._fid228_seen)
+check("그래도 체결틱 수는 늘어남(0B는 정상)", s17._trade_tick_total == 50,
+      str(s17._trade_tick_total))
+d17 = s17.build_entry_diagnostics()
+check("'0B는 오는데 228만 없음'을 정확히 경고",
+      "228" in d17 and "🚨" in d17,
+      next((l for l in d17.split("\n") if "228" in l), ""))
+check("이 상태에서는 무장이 성립하지 않음", "F2" not in s17._armed_at)
+
+# 0B 자체가 안 오는 경우 (WS 구독 이상) — 위와 대응이 달라 구분해야 한다
+s18, clk18 = build(datetime(2026, 8, 3, 9, 30, 0))
+s18.on_condition_hit("F3", "무수신", cond_name="주도주상위")
+d18 = s18.build_entry_diagnostics()
+check("체결틱 0건이면 WS 구독 이상으로 안내(228 문제와 구분)",
+      "0B" in d18 and "228" not in d18.split("0B")[1][:60],
+      next((l for l in d18.split("\n") if "0B" in l), ""))
+
+# ═════════════════════════════════════════════════════════
+print("\n[18] 정합성 — 주석/규칙이 코드와 일치하는지")
+# ═════════════════════════════════════════════════════════
+import inspect
+src_cbp = inspect.getsource(SM.StrategyManager.can_buy_pullback)
+check("can_buy_pullback 주석이 실제 시간창(09:25~14:50)과 일치",
+      "09:25" in src_cbp and "14:50" in src_cbp and "15:10" not in src_cbp,
+      next((l.strip() for l in src_cbp.split("\n") if "눌림목:" in l), ""))
+check("제거된 09:20 지연 게이트 분류가 규칙에서 빠짐",
+      not any("조건식 지연" in str(k) for k, _ in SM.StrategyManager._REJECT_RULES))
+check("Pullback 시간창 상수가 09:25~14:50",
+      SM.PULLBACK_START == SM.time(9, 25) and SM.PULLBACK_END == SM.time(14, 50))
+check("Phase1BController docstring이 '데이터 파이프라인'임을 명시",
+      "파이프라인" in (Phase1BController.__doc__ or ""))
 
 # ═════════════════════════════════════════════════════════
 print("\n" + "=" * 60)

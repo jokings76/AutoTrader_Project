@@ -81,7 +81,8 @@ from config.phase_settings import EXIT_POLICY
 # 분봉이 아직 안 쌓였으면 자연히 게이트에서 보류될 뿐 에러는 없음 — 1분을
 # 그냥 버릴 이유가 없어 앞당김.
 GROUP_A_START = time(9, 0)
-# Pullback 시간창 (2026-08-01 사용자 지정으로 09:00~10:30 -> 09:20~15:10 변경).
+# Pullback 시간창 (2026-08-01 사용자 지정, 최종 09:25~14:50).
+#   변경 경위: 09:00~10:30 -> (중간안 09:20~15:10) -> **09:25~14:50 확정**.
 #   시작 09:25: 눌림목은 정의상 "당일 고가 대비 되돌림"인데 개장 직후엔 당일
 #     고가 자체가 아직 형성되지 않아 눌림 판정이 성립하기 어렵다. 개장 25분은
 #     1A(체결강도 버스트)에 맡기고, 눌림목은 고가가 잡힌 뒤부터 본다.
@@ -330,6 +331,9 @@ COND_PERF_PREFIX = "cond:"
 
 # Pullback 반등 확인용 OBV(누적거래량) 확인 구간 — 몇 봉 전과 비교할지.
 # (2026-07-29 신규: 거래량 없는 가짜 반등을 VWAP과 함께 걸러내는 용도)
+# ⚠️ [미사용, 2026-08-02] Pullback이 틱 구동으로 바뀌면서 분봉·OBV·VWAP 경로가
+# 전부 폐지돼 이 값을 읽는 곳이 없다. score_pullback/evaluate_pullback을
+# 되살릴 때를 대비해 상수만 남겨둔다.
 OBV_LOOKBACK = 5
 
 # 지수 방어 로직 임시 비활성화 스위치 (2026-07-28: 지수 급락 중 테스트 진행을 위해 OFF.
@@ -455,7 +459,7 @@ SLOT_EXPANSION_WAIT_SEC = 90        # 슬롯 만석이 이 시간 이상 지속�
                                     #  넘겨도 교체가 안 됐다 = 교체 대상 없음)
 # 전략별 슬롯 상한 (2026-08-01 재조정, 각 3 -> 4).
 # 직전 버전에선 "10:30 이후 Pullback 슬롯이 노니까 1A 캡을 5로 올린다"였는데,
-# Pullback 창이 15:10까지 늘어나면서 그 전제(노는 슬롯)가 사라졌다. 대신
+# Pullback 창이 14:50까지 늘어나면서 그 전제(노는 슬롯)가 사라졌다. 대신
 # **두 전략의 캡 합(8)이 공유 상한(MAX_HOLDINGS=6)을 넘도록** 잡는다:
 #   - 3/3이면 합이 정확히 6이라 한쪽이 하루 종일 후보를 못 찾아도 다른 쪽이
 #     그 자리를 못 쓰고 슬롯이 논다(실측 슬롯 사용률 9.9%인 상황에서 특히 손해).
@@ -468,6 +472,9 @@ PHASE1A_MAX_SLOTS = 4
 PULLBACK_MAX_SLOTS = 4
 PHASE1B_MAX_SLOTS = PHASE_1B["max_slots"]
 
+# ⚠️ [미사용, 2026-08-02] 옛 watch_candidates 큐(1N 눌림목) 시절의 잔재.
+# 그 전략은 2026-07-27에 삭제됐고 지금 감시 목록은 watch_list_today +
+# phase1b.watched로 관리되며 별도 상한/타임아웃을 두지 않는다.
 MAX_WATCH_SLOTS = 10
 WATCH_TIMEOUT = timedelta(minutes=10)
 
@@ -665,6 +672,16 @@ class StrategyManager:
         self._tick_entry_stats = {
             "ticks": 0, "armed": 0, "burst_ok": 0, "bought": 0,
         }
+        # ── FID 228(키움 공식 체결강도) 수신 감시 (2026-08-02) ──────────
+        # 무장 -> 발사 전체가 이 필드 하나에 걸려 있는데, **실거래에서 값이
+        # 들어오는 걸 확인한 적이 없다**(파싱 코드는 예전부터 있었지만 1L을
+        # 주석처리한 뒤로 아무도 쓰지 않았다). 228이 안 오면 무장이 영원히
+        # 0건이고 -> 하루 종일 매수 0건인데, 로그를 직접 뒤지기 전엔 원인을
+        # 알 수 없다. 그래서 "체결틱은 오는데 228만 없는" 상태를 명시적으로
+        # 구분해 진단 알림이 바로 짚어주게 한다.
+        self._trade_tick_total = 0          # 수신한 체결틱 총수(0B 자체가 오는가)
+        self._fid228_seen: set[str] = set()  # 228이 실제로 실려온 종목
+        self._fid228_alerted = False         # 긴급 경고 1회만
         # 당일 시가는 기존 _opening_prices 캐시를 그대로 쓴다(중복 캐시 금지).
         # 틱 경로는 분봉을 아예 안 받으므로 캐시가 비어 있으면 "시가대비 +5%
         # 매수보류" 필터를 건너뛴다 — 모르는 값으로 매수를 막지 않는다.
@@ -1257,7 +1274,7 @@ class StrategyManager:
         )
 
     def can_buy_pullback(self, info: dict | None = None) -> bool:
-        # 눌림목: 09:20~15:10 (2026-08-01 확대). 1A와 시간대는 겹치지만
+        # 눌림목: 09:25~14:50 (PULLBACK_START/END 참고). 1A와 시간대는 겹치지만
         # 슬롯은 별도(sub_strategy="1A_눌림"), 조건검색식 소스도 완전히 분리.
         return (
             self.can_buy_more(info, "1A_눌림")
@@ -1287,7 +1304,9 @@ class StrategyManager:
         ("점수 미달", ("점수 부족", "점수 미달")),
         ("슬롯 부족", ("슬롯 부족",)),
         ("재매수 차단", ("재매수", "쿨다운", "매도 차단", "손절 종목")),
-        ("조건식 지연(09:20)", ("조건식 지연",)),
+        # [제거됨] ("조건식 지연(09:20)", ("조건식 지연",)) —
+        # 조건검색식별 09:20 지연 게이트는 2026-08-01에 폐지됐다(OTHER_COND_START
+        # 상수째 삭제). 이 사유 문자열은 더 이상 생성되지 않으므로 규칙도 뺀다.
         ("장시작 전 대기", ("장 시작 전",)),
         ("매수 컷오프", ("컷오프", "상한",)),
     )
@@ -1356,6 +1375,16 @@ class StrategyManager:
         else:
             lines.append("🟢 1A 슬롯 여유 있음 — 트리거 대기 중")
 
+        # 1-2) 틱 구동 단계별 통과 수 (2026-08-02 신규)
+        # 진입이 [체결틱 -> 무장(강도3초) -> 버스트 -> 매수] 4단이므로,
+        # 어느 단계에서 끊기는지 숫자 하나로 보이게 한다. 이게 없으면
+        # "왜 안 사지"를 로그를 뒤져가며 추측해야 한다.
+        st = self._tick_entry_stats
+        lines.append(
+            f"⚡ 틱 {self._trade_tick_total:,} → 무장 {st['armed']} "
+            f"→ 버스트 {st['burst_ok']} → 매수 {st['bought']}"
+        )
+
         # 2) 사유별 집계 (최근 10분 내 기록만 — 오래된 건 이미 상황이 바뀜)
         recent, counts = 0, {}
         for code in cands:
@@ -1377,6 +1406,24 @@ class StrategyManager:
 
         # 3) 인프라 이상 신호
         warns = []
+
+        # 3-0) FID 228 미수신 — 이번 개편에서 **유일하게 실거래 미검증인 가정**.
+        # 무장이 228 하나에 걸려 있어서, 이게 안 오면 매수가 구조적으로 0건이
+        # 된다. "0B 자체가 안 옴"과 "0B는 오는데 228만 빔"을 구분해서 알린다 —
+        # 전자는 WS 구독 문제, 후자는 FID 파싱/필드 문제로 대응이 완전히 다르다.
+        if self._trade_tick_total == 0:
+            if now.time() >= time(9, 3):
+                warns.append(
+                    "체결틱(0B) 자체가 0건 — WS 실시간 구독 확인 필요"
+                )
+        elif not self._fid228_seen:
+            warns.append(
+                f"🚨 체결틱 {self._trade_tick_total:,}건은 오는데 "
+                f"**체결강도(FID 228)가 한 번도 안 옴** — 무장이 영구 불가라 "
+                f"매수 0건이 됩니다. api/kiwoom_ws.py의 '228' 파싱과 "
+                f"'🔑 0B 체결 raw 키' 로그를 확인하세요."
+            )
+
         infra_n = sum(n for c, n in counts.items() if c in self._REJECT_INFRA)
         if infra_n:
             warns.append(f"체결 데이터 없음 {infra_n}종목 (0B 구독/WS 확인)")
@@ -1845,6 +1892,18 @@ class StrategyManager:
         code = parsed_trade.get("stock_code")
         if not code:
             return
+
+        # FID 228 수신 감시 (2026-08-02) — 진입 로직 전체가 이 값에 걸려 있어서
+        # "0B는 오는데 228만 비어있다"를 즉시 구분할 수 있어야 한다.
+        # set.add는 amortized O(1)이라 핫패스 비용이 사실상 없다.
+        self._trade_tick_total += 1
+        _s = parsed_trade.get("strength")
+        if _s:
+            try:
+                if float(_s) > 0:
+                    self._fid228_seen.add(code)
+            except (TypeError, ValueError):
+                pass
 
         # ⚠️ 체결틱 적재는 **가장 먼저** 한다 (2026-08-01 수정).
         # 기존엔 보유 종목이면 on_price_update 후 곧바로 return 해서

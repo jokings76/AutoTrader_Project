@@ -1015,6 +1015,69 @@ class TradingBot:
                 except Exception:
                     logger.exception("조건식 재등록 실패")
 
+    async def task_fid228_watchdog(self):
+        """FID 228(키움 공식 체결강도) 수신 감시 — 09:05 1회 (2026-08-02 신규).
+
+        이번 개편에서 **유일하게 실거래로 검증되지 않은 가정**이 "체결 틱에
+        FID 228이 실려 온다"는 것이다. 파싱 코드는 예전부터 있었지만 1L을
+        주석처리한 뒤로 아무도 쓰지 않아 값이 실제로 오는지 확인된 적이 없다.
+
+        228이 안 오면 무장(강도 100 이상 3초 연속)이 영원히 성립하지 않고,
+        그 결과 **하루 종일 매수 0건**이 된다. 그런데 겉으로는 아무 에러도
+        나지 않아서(조용히 탈락할 뿐) 로그를 직접 뒤지기 전엔 알 수 없다.
+
+        진단 알림(30분 주기)에도 같은 경고가 들어가지만, 이건 **개장 직후
+        한 번 즉시** 알려서 장 초반에 손쓸 수 있게 하려는 별도 장치다.
+        정상이면 조용히 통과 로그만 남기고 끝난다.
+        """
+        notified = False
+        while not self._stop:
+            await asyncio.sleep(30)
+            try:
+                now = datetime.now()
+                if notified or not time_in(now, 9, 5):
+                    continue
+                if time_after(now, 14, 50):
+                    continue
+                strat = self.strategy_mgr
+                if not strat:
+                    continue
+                notified = True
+
+                total = getattr(strat, "_trade_tick_total", 0)
+                seen = len(getattr(strat, "_fid228_seen", ()))
+                watched = len(getattr(strat.phase1b, "watched", ())) if strat.phase1b else 0
+
+                if total == 0:
+                    msg = (
+                        "🚨 [긴급] 09:05 기준 체결틱(0B) 수신 0건\n"
+                        f"감시 종목 {watched}개\n"
+                        "실시간 구독이 안 됐을 가능성 — 로그의 '실시간 등록:' 확인 필요.\n"
+                        "이 상태면 오늘 매수가 한 건도 나가지 않습니다."
+                    )
+                elif seen == 0:
+                    msg = (
+                        "🚨 [긴급] 체결강도(FID 228)가 한 번도 안 옴\n"
+                        f"체결틱은 {total:,}건 정상 수신 / 감시 {watched}종목\n"
+                        "진입 무장이 228에만 걸려 있어 **오늘 매수 0건**이 됩니다.\n"
+                        "확인: 로그의 '🔑 0B 체결 raw 키'에 '228'이 있는지.\n"
+                        "없으면 kiwoom_ws.py의 FID 매핑을 고쳐야 합니다."
+                    )
+                else:
+                    logger.info(
+                        "✅ FID 228 수신 정상 — 체결틱 %s건 / 228 수신 %d종목 / 감시 %d종목",
+                        f"{total:,}", seen, watched,
+                    )
+                    continue
+
+                logger.error(msg.replace("\n", " | "))
+                try:
+                    send_telegram(msg, target="signal")
+                except Exception:
+                    logger.exception("FID228 경고 발송 실패")
+            except Exception:
+                logger.exception("FID228 감시 예외")
+
     async def task_entry_diagnostics(self):
         """장중 진입 진단 알림 (2026-08-01 신규).
 
@@ -1112,6 +1175,7 @@ class TradingBot:
                 self.task_program_flow(),
                 self.task_tick_archive(),
                 self.task_entry_diagnostics(),
+                self.task_fid228_watchdog(),
                 # self.task_condition_snapshot_poll(),
             )
         except asyncio.CancelledError:

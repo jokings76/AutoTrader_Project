@@ -1,8 +1,25 @@
-"""Phase 1B 컨트롤러 — 체결강도 전략 데이터 파이프라인.
+"""⚠️ 이름은 'Phase1B 컨트롤러'지만 **지금은 1A/Pullback의 데이터 파이프라인**이다.
 
-KiwoomWS의 on_trade / on_orderbook 콜백에서 호출.
-내부 트래커들을 업데이트하고 ChemulEvaluator로 FSM 평가.
-StrategyManager가 결과(ChemulState)를 받아 매수 실행 여부 결정.
+[2026-08-02 현황 정리 — 이름에 속지 말 것]
+1B 전략은 비활성(PHASE1B_ENABLED=False)이고 1L도 주석 처리됐다. 그래서 이
+클래스의 역할은 "1B 매수 판정"이 아니라 **살아있는 두 전략(1A/Pullback)에
+체결틱·호가 데이터를 공급하는 것**이다. 이 객체를 없애면 두 전략이 눈이 먼다.
+
+  실제로 쓰이는 것 (StrategyManager가 **직접** 참조):
+    - self.trade_flow  : 체결강도(FID228 아님, 자체 계산)/거래대금/대량체결/가격
+    - self.orderbook   : 매도 1~3호가 잔량 -> 하이브리드 주문(시장가/지정가) 판정
+    - self.watched / start_watching / stop_watching / is_watching
+
+  정의만 있고 **라이브에서 한 번도 호출되지 않는 것**:
+    - on_trade() / on_orderbook() / get_state()
+      -> StrategyManager가 이 래퍼를 거치지 않고 트래커를 직접 갱신한다.
+    - self.wall_detector (WallDetector) : 매도벽 FSM. 2026-07-31에 진입 판정에서
+      완전히 제거됨(파라미터가 도입 이후 한 번도 튜닝된 적 없는 placeholder였고,
+      호가 잔량 이력은 원리상 과거 검증이 불가능하다).
+    - self.evaluator (ChemulEvaluator)  : 5단계 FSM. 위와 같은 이유로 미가동.
+    -> 둘은 생성만 되고 아무 판단에도 관여하지 않는다(핫패스 비용 없음 —
+       StrategyManager.on_orderbook에서 wall_detector 호출부가 주석 처리됨).
+       PHASE1B_ENABLED를 되살릴 때를 위해 배선만 남겨둔 상태다.
 """
 from typing import Optional
 
