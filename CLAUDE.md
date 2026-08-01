@@ -43,6 +43,36 @@
   `npm approve-scripts`는 전역 설치에 안 먹히므로(EGLOBAL) 무시하면 된다.
 - 설치 직후 PATH는 **새 터미널을 열어야** 반영된다.
 
+\### 08:59 자동 기동 시 원격제어 세션 동시 실행 (2026-08-02 신규)
+작업 스케줄러가 봇을 띄울 때 **별도 창으로 `claude --remote-control` 세션도
+같이 시작**한다. 장중에 PC 앞에 없어도 폰에서 상태를 물어볼 수 있게 하는 용도.
+
+- `start_trader.bat`이 `main.py`보다 **먼저** `start`로
+  `start_remote_control.ps1`을 띄운다. `start`는 즉시 반환하므로 봇 기동을
+  막지 않고, 봇이 죽어도 원격제어는 살아있어 원인 진단이 가능하다.
+- 세션 이름을 `autotrader`로 고정했다 — 자동 생성 이름(`remote-control-keen-thimble`
+  같은 것)은 매번 바뀌어 폰 앱 목록에서 찾기 번거롭다.
+
+**이 조합에서 실제로 밟은 함정 4가지 (다시 건드릴 때 반드시 확인):**
+1. `.ps1`을 **BOM 없는 UTF-8로 저장하면 안 된다.** PowerShell 5.1이 cp949로
+   읽어 한글이 깨지고 `string is missing the terminator` 구문 오류가 난다.
+   UTF-8 **BOM 필수**. (편집 도구가 BOM을 떼는 경우가 있으니 저장 후 재확인)
+2. `.bat`에는 **주석이라도 한글을 넣지 말 것** — 2026-07-28에 겪은 것과 같은
+   원인으로 깨진다. 비ASCII 0바이트인지 확인하고 커밋할 것.
+   한글 경로 처리는 전부 `.ps1` 안으로 몰아넣었다.
+3. claude의 **폴더 신뢰 승인은 '실제 경로' 기준**으로 저장돼 있다. junction
+   경로(`C:\AutoTrader_Bot\ProjectRoot`)로 시작하면 다른 폴더로 보고 신뢰
+   프롬프트를 다시 띄울 수 있는데, 무인 기동에서 프롬프트가 뜨면 거기서 멈춘다.
+   -> `.bat`은 ASCII junction만 참조하고, `.ps1`이 **실제 경로로 Set-Location**.
+4. `scheduler_debug.log`는 cmd.exe가 ASCII로 쓰는 파일이라 한글(UTF-8)을 섞으면
+   한 파일에 두 인코딩이 공존해 전부 깨져 보인다.
+   -> 파일에 남기는 로그는 ASCII, 화면 출력만 한글로 분리했다.
+
+수동으로 원격제어만 띄우고 싶을 때:
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\AutoTrader_Bot\ProjectRoot\start_remote_control.ps1"
+```
+
 \### 모바일 원격 제어 (PC 세션을 폰에서 조작)
 ```
 cd "C:\Users\rober\OneDrive\문서\vscode\AutoTrader_Project"
