@@ -16,6 +16,53 @@
 
 
 
+\## 개발/운영 환경 (2026-08-01 구축)
+
+\### 실행 환경
+- 프로젝트 경로: `C:\Users\rober\OneDrive\문서\vscode\AutoTrader_Project`
+- 스케줄러용 junction 경로: `C:\AutoTrader_Bot\ProjectRoot`
+  (**비대화형/S4U 컨텍스트에서 실행되는 배치파일은 반드시 이 경로를 쓸 것** —
+   실제 경로의 "문서"(한글) 폴더명이 cmd.exe 파싱을 깨뜨린다. 2026-07-28 참고)
+- 자동 기동: Windows 작업 스케줄러 `AutoTrader_Start`, 매일 **08:59**
+- DB: Docker `analytics_pg` 컨테이너 (PostgreSQL, 자동재시작)
+
+\### Claude Code CLI (2026-08-01 신규 설치)
+| 항목 | 버전/경로 |
+|---|---|
+| Node.js | v24.18.1 (winget `OpenJS.NodeJS.LTS`, `--scope user`) |
+| npm | 11.16.0 |
+| claude CLI | 2.1.220 (`npm install -g @anthropic-ai/claude-code`) |
+| claude 실행파일 | `...\WinGet\Packages\OpenJS.NodeJS.LTS_...\node-v24.18.1-win-x64\claude.ps1` |
+| 로그인 방식 | Claude account with subscription (Claude Pro) |
+
+설치 중 실제로 걸렸던 것 (다시 설치할 일 있으면 참고):
+- `winget search`가 msstore 원본 약관 동의 프롬프트에서 멈춘다 →
+  `--accept-source-agreements` 플래그 필수.
+- npm이 `allow-scripts` 정책으로 postinstall(`node install.cjs`)을 건너뛴다는
+  경고를 낸다. **core 기능에는 영향 없음**(`claude --version`/`--help` 정상 확인).
+  `npm approve-scripts`는 전역 설치에 안 먹히므로(EGLOBAL) 무시하면 된다.
+- 설치 직후 PATH는 **새 터미널을 열어야** 반영된다.
+
+\### 모바일 원격 제어 (PC 세션을 폰에서 조작)
+```
+cd "C:\Users\rober\OneDrive\문서\vscode\AutoTrader_Project"
+claude --remote-control
+```
+- ⚠️ **`claude remote-control`(하위명령)이 아니라 `--remote-control`(플래그)이다.**
+  공식 문서 표기와 다르니 주의. 세션 중이면 `/rc`로도 가능.
+- 실행하면 `https://claude.ai/code/session_XXXXXXXX` 형태의 URL이 뜬다.
+  폰 Claude 앱 또는 폰 브라우저로 그 URL을 열면 연결된다.
+- 폰 앱에서는 **[코드] 탭 → 세션 카드(예: `remote-control-keen-thimble`,
+  `🖥 연결됨 · jokings76/AutoTrader_Project`)를 탭**해야 채팅창으로 들어간다.
+  목록 화면만 보고 "연결이 안 됐다"고 오해하기 쉬움.
+- **코드 실행·파일 접근은 전부 PC에서** 일어난다(클라우드 실행 아님).
+  따라서 PC가 켜져 있고 **그 터미널 창이 열려 있어야** 하며, 창을 닫으면 끊긴다.
+- 모바일에서는 **새 MCP 서버를 추가할 수 없다** — 필요한 건 PC에서 미리 세팅.
+- 원격 세션은 기본 Sonnet 5로 시작한다. 전략 로직처럼 복잡한 작업은
+  세션에서 `/model` 입력해 **Opus 5로 바꾸고 진행할 것**.
+- ⚠️ **실거래 봇이 돌고 있는 장중에 모바일에서 매매 로직 파일을 고치지 말 것.**
+  고칠 거면 이 문서 "작업 방식"의 surgical 패치 + import 검증 규칙을 그대로 지킨다.
+
 \## 작업 방식 (반드시 지킬 것)
 
 1\. \*\*surgical 패치 우선\*\*: 파일 전체 재작성보다 "찾기 → 교체" 블록 단위로 제시. 
@@ -759,6 +806,82 @@
     `6e54404`(Pullback 09:25~14:50 + 중복종목 10:30 전환 + 강제청산 15:10).
 
 
+
+  [모바일 원격 제어 구축 — 2026-08-01 세션 마지막]
+  - 이 PC에 Claude Code CLI가 아예 없던 상태에서 처음부터 구축했다:
+    Node.js LTS(winget) -> claude CLI(npm 전역) -> Claude Pro 계정 로그인 ->
+    프로젝트 폴더 신뢰 승인 -> `claude --remote-control`로 원격 세션 개설.
+    상세 버전/경로/함정은 위 "개발/운영 환경" 섹션 참고.
+  - 목적: PC에서 작업하던 것을 **폰에서 이어서** 확인·조작하기 위함.
+    특히 장중(09:00~15:10)에 PC 앞에 없을 때 로그/진단 알림을 보고
+    바로 상태를 물어볼 수 있게 하는 용도.
+  - 원격 세션은 **이 대화의 맥락을 그대로 갖고 있지 않다.** 대신 프로젝트
+    폴더에서 시작하므로 이 CLAUDE.md를 읽어 맥락을 복원한다 —
+    **그래서 이 문서의 정확도가 곧 이관 품질**이다.
+
+\## 세션 이관 체크리스트 (2026-08-01 신설)
+
+새 세션(PC 터미널 / 모바일 원격 / 새 대화창 어디서든)이 이 프로젝트를
+이어받을 때 쓰는 절차. **읽는 순서가 중요하다.**
+
+\### 이관받는 쪽이 읽을 순서
+1. `\## 기본 정보` + `\## 개발/운영 환경` — 무엇을 어디서 어떻게 돌리는지
+2. `\## 작업 방식` — 지켜야 할 규칙 7가지 (surgical 패치, 파일 삭제 금지 등)
+3. `\## 현재 전략 요약` — **지금 코드가 실제로 하는 일**(과거 히스토리보다 이걸 먼저)
+4. `\## 다음 할 일` — 08-03 확인 항목과 이월 과제
+5. `\## 히스토리`는 필요할 때만 역순으로. **분량이 많으니 통독하지 말 것** —
+   "왜 이렇게 됐는지"가 궁금할 때 해당 날짜만 찾아본다.
+
+\### PC 검증 항목 (코드가 성한지 — 이관 직후 반드시 실행)
+프로젝트 폴더에서 순서대로 실행하고, 하나라도 실패하면 그 지점부터 원인 추적.
+
+| # | 명령 | 기대 결과 |
+|---|---|---|
+| 1 | `python -c "import main; print('OK')"` | `OK` (임포트 체인 전체 정상) |
+| 2 | `python test_patch_20260801.py` | **245건 전원 통과 / 실패 0건** |
+| 3 | `git log --oneline -5` | 최신 커밋이 `c54a7eb` 이후인지 |
+| 4 | `git status --short` | 비어 있어야 정상(작업 중이면 예외) |
+
+- ⚠️ 2번은 Windows 콘솔 기본 코드페이지(cp949)에서 유니코드 출력이 깨져
+  `UnicodeEncodeError`가 난다. **`PYTHONIOENCODING=utf-8`을 앞에 붙여 실행**할 것
+  (Git Bash: `PYTHONIOENCODING=utf-8 python test_patch_20260801.py`).
+- 기존 `test_phase1b_controller.py` / `test_microstructure.py`는 **실패하는 게
+  정상**이다(5월 작성 스테일 테스트). 회귀로 오해하지 말 것 —
+  확인하려면 `git stash` 후 재실행해서 HEAD에서도 같은 실패가 나는지 보면 된다.
+
+설정값이 의도대로인지 한 번에 보는 명령:
+```
+python -c "import core.strategy_manager as s; from core.order_manager import FORCE_CLOSE_TIME; print('1A', s.GROUP_A_START, '~', s.PHASE1A_END); print('PB', s.PULLBACK_START, '~', s.PULLBACK_END); print('중복전환', s.DUAL_SOURCE_PULLBACK_FROM); print('청산', FORCE_CLOSE_TIME); print('슬롯', s.PHASE1A_MAX_SLOTS, s.PULLBACK_MAX_SLOTS, s.MAX_HOLDINGS, s.MAX_HOLDINGS_HARD); print('1B', s.PHASE1B_ENABLED)"
+```
+기대값: `1A 09:00~14:50` / `PB 09:25~14:50` / `중복전환 10:30` / `청산 15:10` /
+`슬롯 4 4 6 8` / `1B False`
+
+\### 모바일 확인 항목 (원격 세션이 제대로 붙었는지)
+폰에서 세션에 들어간 뒤 아래를 확인한다. **PC 검증과 목적이 다르다** —
+여긴 "연결과 맥락"을, PC 검증은 "코드 건강"을 본다.
+
+1. **세션 카드에 `🖥 연결됨 · jokings76/AutoTrader_Project`가 보이는지**
+   (안 보이면 PC 터미널 창이 닫혔거나 네트워크가 끊긴 것)
+2. **작업 폴더가 맞는지** — 세션에 이렇게 물어본다:
+   ```
+   지금 작업 폴더가 어디야? 파일 목록 보여줘
+   ```
+   `main.py`, `core/`, `CLAUDE.md`가 나오면 정상.
+3. **맥락을 이어받았는지** — 이렇게 물어본다:
+   ```
+   CLAUDE.md 읽고 현재 전략 구성이랑 08-03 확인 항목 요약해줘
+   ```
+   1A/Pullback 2전략 체제, 1B 비활성화, 09:25 Pullback 시작, 10:30 중복 전환,
+   15:10 청산이 나오면 이관 성공. 안 나오면 이 문서를 다시 손봐야 한다.
+4. **모델 확인** — 원격 세션은 Sonnet 5로 시작한다. 전략/로직 작업이면
+   `/model`로 **Opus 5**로 올리고 시작할 것.
+5. **장중 주의** — 봇이 돌고 있는 09:00~15:10에는 매매 로직 파일 수정 금지.
+   로그 조회·상태 확인·진단 알림 해석 정도만 하고, 코드 수정은 장 마감 후.
+
+\### 이관이 끝났다고 판단하는 기준
+- PC 검증 4항목 전부 통과 + 설정값 출력이 기대값과 일치
+- 모바일 확인 1~3번 통과(특히 3번 — 맥락 복원이 이관의 본질)
+- 위 둘 중 하나라도 실패하면 **아직 이관 안 된 것**이다.
 
 \## 현재 전략 요약 (2026-08-01 기준, 08-03 실거래 반영 예정)
 
