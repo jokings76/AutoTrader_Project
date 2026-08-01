@@ -35,6 +35,16 @@ SNAPSHOT_STAGGER_SEC = 0.5  # 스냅샷 종목 처리 간격
 POLL_INTERVAL_SEC = 20      # 조건검색 주기 폴링 간격(초)
 
 
+def time_in(now: datetime, h: int, m: int) -> bool:
+    """now가 h:m 이후인지 (같은 날 기준)."""
+    return (now.hour, now.minute) >= (h, m)
+
+
+def time_after(now: datetime, h: int, m: int) -> bool:
+    """now가 h:m을 지났는지."""
+    return (now.hour, now.minute) > (h, m)
+
+
 def _extract_stock_name(raw: dict, stock_code: str) -> str:
     if not isinstance(raw, dict):
         return stock_code
@@ -921,6 +931,55 @@ class TradingBot:
                 except Exception:
                     logger.exception("조건식 재등록 실패")
 
+    async def task_entry_diagnostics(self):
+        """장중 진입 진단 알림 (2026-08-01 신규).
+
+        "조건검색엔 계속 포착되는데 매수가 안 된다"를 로그를 뒤지지 않고
+        장중에 바로 판단할 수 있게, 원인별 요약을 텔레그램(주식 따릉이)으로
+        보낸다. 핵심은 두 가지를 구분해서 보여주는 것:
+          - 진입 필터가 '정상적으로' 거르는 중인가 (사유별 종목 수)
+          - 데이터가 안 들어와 판단 자체를 못 하는가 (= 코드/구독 이상 의심)
+
+        조건검색 수신 통계(편입/스냅샷 건수, 마지막 수신 후 경과)는 main만
+        알고 있으므로 여기서 헤더로 붙이고, 전략 내부 상태는 StrategyManager가
+        만든다. 09:05~14:50 사이에 DIAG_INTERVAL 주기로만 발송.
+        """
+        # 알림 피로 방지: 평상시엔 30분 주기, 경고(⚠️)가 잡히면 10분 주기.
+        # 매 10분 무조건 보내면 하루 35건이라 정작 중요한 경고가 묻힌다.
+        DIAG_INTERVAL_QUIET = 1800   # 30분
+        DIAG_INTERVAL_ALERT = 600    # 10분
+        last_sent = 0.0
+        while not self._stop:
+            await asyncio.sleep(30)
+            try:
+                now = datetime.now()
+                if not (time_in(now, 9, 5) and not time_after(now, 14, 50)):
+                    continue
+
+                strat = self.strategy_mgr
+                if not strat:
+                    continue
+
+                body = await asyncio.to_thread(strat.build_entry_diagnostics)
+                has_warn = "⚠️" in body or "⛔" in body
+                interval = DIAG_INTERVAL_ALERT if has_warn else DIAG_INTERVAL_QUIET
+                if time.time() - last_sent < interval:
+                    continue
+                last_sent = time.time()
+
+                idle = int((time.time() - self._last_signal_time) / 60)
+                header = (
+                    f"조건검색 수신: 편입 {self._signal_stats['insert']}건 / "
+                    f"스냅샷 {self._signal_stats['snapshot']}건 / "
+                    f"폴링 {self._signal_stats['poll']}건 (마지막 신호 {idle}분 전)"
+                )
+                if self._signal_stats["insert"] == 0 and time_in(now, 9, 30):
+                    header += "\n⚠️ 실시간 편입 수신 0건 — WS 조건검색 구독 확인 필요"
+
+                send_telegram(f"{body}\n{header}", target="signal")
+            except Exception:
+                logger.exception("진입 진단 알림 중 에러")
+
     async def task_program_flow(self):
         """프로그램 매매 유입 기록 — 60초마다 완성된 분을 CSV로 flush,
         10분마다 '꾸준히 들어오는 종목' 요약 로그. (2026-07-31 신규)
@@ -968,6 +1027,7 @@ class TradingBot:
                 self.task_daily_backtest(),
                 self.task_program_flow(),
                 self.task_tick_archive(),
+                self.task_entry_diagnostics(),
                 # self.task_condition_snapshot_poll(),
             )
         except asyncio.CancelledError:

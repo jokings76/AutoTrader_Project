@@ -829,6 +829,177 @@ s = build_strat()
 check("30분 초과는 기존 시간정리로 청산", not dead_pos(s, "D5", 31, 1.0))
 
 # ═════════════════════════════════════════════════════════
+print("\n[24] 제안 A — 신호 세기 계층화 (단일 대량체결 우대)")
+# ═════════════════════════════════════════════════════════
+def tier_with(single_value, n=12):
+    st = build_strat()
+    st.phase1b.start_watching("S")
+    tfl = st.phase1b.trade_flow
+    t = time.time()
+    for i in range(n):                       # 과거 90초 잔챙이
+        tfl.add_tick("S", 10_000, "buy", 10, now=t - 30 - i * 7)
+    for i in range(n):                       # 최근 30초
+        vol = int(single_value // 10_000) if i == 0 else 100
+        tfl.add_tick("S", 10_000, "buy", vol, now=t - i * 2)
+    tfx2 = st.phase1b.trade_flow
+    accel = tfx2.value_acceleration("S", 30, 120)
+    stg = tfx2.compute_strength("S", 30, min_ticks=10)
+    return st.candidate_tier("S"), accel * stg / 100.0
+
+tier_plain, base_plain = tier_with(1_000_000)      # 최대 단일 100만
+tier_burst, base_burst = tier_with(30_000_000)     # 최대 단일 3천만
+tier_big, base_big = tier_with(100_000_000)        # 최대 단일 1억
+check("단일체결 작으면 가중 없음 (x1.0)",
+      abs(tier_plain - base_plain) < 1e-6, f"{tier_plain:.3f} vs {base_plain:.3f}")
+check("3천만+ 단일체결 -> x1.2 가중",
+      abs(tier_burst - base_burst * SM.PHASE1A_TIER_BURST_MULT) < 1e-6,
+      f"{tier_burst:.3f} vs {base_burst * 1.2:.3f}")
+check("1억+ 단일체결 -> x1.5 가중",
+      abs(tier_big - base_big * SM.PHASE1A_TIER_SINGLE_MULT) < 1e-6,
+      f"{tier_big:.3f} vs {base_big * 1.5:.3f}")
+check("가중 배수는 상한 고정 (tier 폭주 없음)",
+      SM.PHASE1A_TIER_SINGLE_MULT <= 1.5 and SM.PHASE1A_TIER_BURST_MULT <= 1.5)
+
+# ═════════════════════════════════════════════════════════
+print("\n[25] 제안 B — 조건검색식별 성과 자동 보정")
+# ═════════════════════════════════════════════════════════
+check("병합 조건명도 대표 키 하나로 접힘",
+      SM.StrategyManager.cond_perf_key("주도주상위+돌파자동매매용") == "cond:주도주상위")
+check("돌파자동매매용 단독 키", SM.StrategyManager.cond_perf_key("돌파자동매매용") == "cond:돌파자동매매용")
+check("알 수 없는 조건명은 기타로", SM.StrategyManager.cond_perf_key("기타") == "cond:기타")
+
+def thr_for(cond, losses=None):
+    st = build_strat(datetime(2026, 8, 3, 10, 0, 0))   # ACTIVE_FROM(09:20) 이후
+    if losses:
+        for v in losses:
+            st.perf.record(SM.StrategyManager.cond_perf_key(cond), v)
+    st.phase1b.start_watching("T")
+    feed(st.phase1b.trade_flow, "T", 3, 30_000_000)
+    ok, info = st.evaluate_1a_leading_strength("T", 10_000, 0.0, cond)
+    return info.get("strength_threshold", 0)
+
+base_thr = thr_for("주도주상위")
+cold_thr = thr_for("주도주상위", [-0.02, -0.025, -0.02, -0.03])
+check("조건식 성과가 나쁘면 그 검색식 종목의 강도 문턱이 올라감",
+      cold_thr > base_thr, f"{base_thr:.1f} -> {cold_thr:.1f}")
+check("조정폭은 상한(±15%) 내로 제한",
+      cold_thr <= base_thr * 1.16, f"{cold_thr:.1f}")
+hot_thr = thr_for("주도주상위", [0.02, 0.025, 0.02, 0.03])
+check("성과가 좋아도 100 밑으로는 절대 안 내려감(바닥 고정)",
+      hot_thr >= SM.PHASE1A_LEADING_STRENGTH_MIN, f"{hot_thr:.1f}")
+check("표본 부족(2건)이면 조정 안 함",
+      thr_for("주도주상위", [-0.03, -0.03]) == base_thr)
+
+s = build_strat()
+s.phase1b.start_watching("CK")
+s.phase1b.orderbook.update("CK", {"ask_prices": [10_000], "ask_volumes": [10]}, now=now)
+feed(s.phase1b.trade_flow, "CK", 5, 1_000_000)
+s._cond_names["CK"] = "돌파자동매매용"
+s._execute_buy("CK", "CK", 1, {"current_price": 10_000}, "1A")
+check("매수 시 조건식 성과 키가 포지션에 기록",
+      s.holdings["CK"].get("cond_key") == "cond:돌파자동매매용")
+s._execute_sell("CK", 10_500, "익절 테스트")
+check("청산 시 조건식 축에도 성과가 쌓임",
+      s.perf.sample_count("cond:돌파자동매매용") == 1)
+
+# ═════════════════════════════════════════════════════════
+print("\n[26] 제안 C — tier 기반 매수금액 가중 (상방 한정)")
+# ═════════════════════════════════════════════════════════
+M = SM.StrategyManager.tier_size_multiplier
+check("tier 1.0 -> 1.0배 (기존과 동일)", M(1.0) == 1.0)
+check("tier 0.3 -> 1.0배 (아래로는 안 줄임)", M(0.3) == 1.0)
+check("tier 1.25 -> 1.25배 (선형)", abs(M(1.25) - 1.25) < 1e-9, str(M(1.25)))
+check("tier 1.5 -> 1.5배 (상한 도달)", abs(M(1.5) - 1.5) < 1e-9)
+check("tier 50 -> 1.5배 (상한 고정, 폭주 없음)", abs(M(50.0) - 1.5) < 1e-9)
+check("tier None/이상값 -> 1.0배 (안전)", M(None) == 1.0 and M("x") == 1.0)
+
+s = build_strat()
+amt_plain, _ = s._resolve_position_amount("A", "1A", tier=1.0)
+amt_boost, _ = s._resolve_position_amount("A", "1A", tier=1.5)
+check("금액이 tier에 따라 확대됨",
+      amt_boost == int(amt_plain * 1.5), f"{amt_plain:,} -> {amt_boost:,}")
+check("확대 상한이 기본금액의 1.5배를 넘지 않음",
+      amt_boost <= SM.POSITION_AMOUNT * 1.5)
+
+s = build_strat()
+s.phase1b.start_watching("SZ")
+tfz = s.phase1b.trade_flow
+t = time.time()
+for i in range(12):
+    tfz.add_tick("SZ", 10_000, "buy", 10, now=t - 30 - i * 7)
+for i in range(12):
+    tfz.add_tick("SZ", 10_000, "buy", 10_000 if i == 0 else 100, now=t - i * 2)
+s.phase1b.orderbook.update("SZ", {"ask_prices": [10_000], "ask_volumes": [10]}, now=now)
+s._execute_buy("SZ", "SZ", 1, {"current_price": 10_000}, "1A")
+qty = s.holdings["SZ"]["buy_quantity"]
+check("강한 신호 종목은 실제 매수 수량도 늘어남",
+      qty > SM.POSITION_AMOUNT // 10_000, f"{qty}주 (기본 {SM.POSITION_AMOUNT // 10_000}주)")
+check("entry_tier가 포지션에 기록(사후 검증용)", s.holdings["SZ"].get("entry_tier", 0) > 0)
+
+# ═════════════════════════════════════════════════════════
+print("\n[27] 진단 알림 — '포착은 되는데 왜 안 사는가'")
+# ═════════════════════════════════════════════════════════
+C = SM.StrategyManager._reject_category
+check("사유 분류: 대량체결", C("대량체결 부족 (최근 3초: ...)") == "대량체결 부족")
+check("사유 분류: 체결틱", C("체결틱 부족 (최근 3초 1틱 < 최소 3틱)") == "체결틱 부족(강도판단불가)")
+check("사유 분류: 강도", C("체결강도 미달 (80 < 100)") == "체결강도 미달")
+check("사유 분류: 슬롯", C("슬롯 부족 (1A 3/3, 전체 6/6)") == "슬롯 부족")
+check("사유 분류: 재매수", C("손절 종목 당일 재매수 금지") == "재매수 차단")
+check("사유 분류: 미지정은 기타", C("알 수 없는 무언가") == "기타")
+
+s = build_strat(datetime(2026, 8, 3, 10, 0, 0))
+for i in range(4):
+    code = f"R{i}"
+    s.watch_list_today.add(code)
+    s.phase1b.start_watching(code)
+    feed(s.phase1b.trade_flow, code, 5, 1_000_000)
+    s._note_reject(code, "대량체결 부족 (최근 3초: 3,000만원+ 체결 0건/3건)")
+s._note_reject("R0", "체결틱 부족 (최근 3초 1틱 < 최소 3틱)")
+msg = s.build_entry_diagnostics()
+check("진단문에 후보 수/보유 현황 포함", "후보 4종목" in msg and "보유 0/6" in msg, msg[:60])
+check("사유별 집계가 표시됨", "대량체결 부족" in msg and "미체결 사유" in msg)
+check("인프라 의심 사유는 경고로 승격", "체결 데이터 없음" in msg, msg)
+check("슬롯 여유 상태가 표시됨", "1A 슬롯 여유" in msg)
+check("오늘 매수 0건 경고", "매수 0건" in msg, msg)
+
+s2 = build_strat(datetime(2026, 8, 3, 10, 0, 0))
+s2.watch_list_today.add("SILENT")
+s2.phase1b.start_watching("SILENT")      # 감시중인데 틱 0
+s2._note_reject("SILENT", "체결강도 미달 (0 < 100)")
+msg2 = s2.build_entry_diagnostics()
+check("감시중인데 체결틱 0인 종목을 지목", "체결틱 0인 종목 1개" in msg2, msg2)
+
+s3 = build_strat(datetime(2026, 8, 3, 10, 0, 0))
+s3.watch_list_today.add("NOWATCH")       # 후보인데 감시조차 미시작
+s3._note_reject("NOWATCH", "조건식 지연 — 돌파자동매매용는 09:20부터 평가")
+msg3 = s3.build_entry_diagnostics()
+check("후보인데 감시 미시작인 종목을 지목(1A 평가 미도달)",
+      "감시 미시작 1개" in msg3, msg3)
+
+s4 = build_strat(datetime(2026, 8, 3, 10, 0, 0))
+for i in range(6):
+    s4.holdings[f"F{i}"] = {"buy_price": 1, "buy_quantity": 1, "buy_time": s4._now(),
+                            "stock_name": "F", "highest_price": 1, "sub_strategy": "1A"}
+s4.watch_list_today.add("WAIT")
+s4._note_reject("WAIT", "슬롯 부족 (1A 3/3, 전체 6/6)")
+msg4 = s4.build_entry_diagnostics()
+check("슬롯 만석이면 '슬롯 없음'으로 안내(오작동 아님을 구분)",
+      "슬롯 없음" in msg4, msg4)
+
+s5 = build_strat(datetime(2026, 8, 3, 10, 0, 0))
+s5.quarantine_until = s5._now() + timedelta(minutes=5)
+check("WS 재연결 격리 중이면 전면 차단 사유로 표시",
+      "WS 재연결 격리" in s5.build_entry_diagnostics())
+
+s6 = build_strat(datetime(2026, 8, 3, 10, 0, 0))
+s6.watch_list_today.add("OLD")
+s6._last_reject["OLD"] = ("대량체결 부족", "x", s6._now() - timedelta(minutes=30))
+check("오래된(10분 초과) 평가 기록은 집계에서 제외 -> 재평가 정지 경고",
+      "재평가 루프 정지 의심" in s6.build_entry_diagnostics())
+check("진단 생성 중 예외 없음(어떤 상태에서도 문자열 반환)",
+      isinstance(build_strat().build_entry_diagnostics(), str))
+
+# ═════════════════════════════════════════════════════════
 print("\n" + "=" * 60)
 print(f"통과 {len(PASS)}건 / 실패 {len(FAIL)}건")
 if FAIL:

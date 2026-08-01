@@ -201,6 +201,26 @@ PHASE1A_TIER_MIN_TICKS = 10
 PHASE1A_TIER_SHORT_SEC = 30
 PHASE1A_TIER_LONG_SEC = 120
 
+# [제안 A] 신호 세기 계층화 (2026-08-01) — 진입 트리거는 "3천만x3건 OR 단일
+# 1억"을 동등하게 취급하지만, 단일 1억은 훨씬 압도적인 신호다. 슬롯이 꽉 찼을
+# 때 어느 후보가 자리를 가져갈지 겨루는 tier에서는 이 차이를 반영한다.
+# 배수는 상한이 고정된 이산값 — tier가 폭주하지 않도록 곱셈 항을 유한하게 묶는다.
+PHASE1A_TIER_SINGLE_MULT = 1.5   # 최근 30초에 단일 1억+ 체결이 있었다
+PHASE1A_TIER_BURST_MULT = 1.2    # 최근 30초에 단일 3천만+ 체결이 있었다
+
+# [제안 C] tier 기반 매수금액 가중 (2026-08-01) — 같은 슬롯 하나를 쓰더라도
+# 신호가 강한 자리에 더 태운다. **위쪽으로만** 움직인다(기존 대비 줄어드는
+# 종목은 없음) — 축소 방향까지 열면 평범한 후보의 체결 수량이 0이 되는 등
+# 부작용이 생기고, 지금은 자본의 2.4%만 쓰는 단계라 줄일 이유도 없다.
+PHASE1A_SIZE_TIER_FULL = 1.5     # tier가 이 값 이상이면 최대 배수 적용
+PHASE1A_SIZE_MAX_MULT = 1.5      # 최대 1.5배 (200만 -> 300만)
+
+# [제안 B] 조건검색식별 성과 자동 보정 (2026-08-01) — strategy_performance의
+# 축소추정 로직을 전략 축뿐 아니라 **조건검색식 축**으로도 돌린다.
+# "오늘 주도주상위는 잘 되는데 돌파자동매매용은 안 된다"가 자동 반영된다.
+# 우선순위(줄 세우기)가 아니라 '문턱 조정'이므로 진입 지연이 전혀 없다.
+COND_PERF_PREFIX = "cond:"
+
 # Pullback 반등 확인용 OBV(누적거래량) 확인 구간 — 몇 봉 전과 비교할지.
 # (2026-07-29 신규: 거래량 없는 가짜 반등을 VWAP과 함께 걸러내는 용도)
 OBV_LOOKBACK = 5
@@ -497,6 +517,15 @@ class StrategyManager:
         # 1B 반등확증 대기 {code: {ref_high, since, last_check}} (2026-07-30)
         self._1b_confirm: dict[str, dict] = {}
 
+        # ── 진입 진단 (2026-08-01 신규) ────────────────────────────
+        # "조건검색엔 계속 포착되는데 매수가 안 된다"를 장중에 원인별로
+        # 판단할 수 있게 하는 관측 인프라. 종목별 마지막 탈락 사유와
+        # 사유별 종목 수를 들고 있다가 주기적으로 텔레그램으로 요약한다.
+        # 로그를 뒤지지 않고도 "필터가 막는 중"인지 "코드가 고장난 것"인지
+        # 구분하는 게 목적이라, 카테고리를 그 두 축으로 나눠 집계한다.
+        self._last_reject: dict[str, tuple[str, str, datetime]] = {}  # code -> (분류, 원문, 시각)
+        self._last_buy_at: Optional[datetime] = None
+
         # 매수 진행중(pending) 종목의 전략 — 슬롯 오버부킹 방지용 (2026-08-01).
         # _execute_buy가 주문 직전에 넣고 finally에서 지운다.
         self._pending_strategy: dict[str, str] = {}
@@ -592,6 +621,21 @@ class StrategyManager:
 
         # 전일 조회 실패 시 그냥 당일 데이터라도 반환
         return today_candles
+
+    @staticmethod
+    def cond_perf_key(cond_name: str) -> str:
+        """조건검색식 성과 추적용 정규화 키 (2026-08-01, 제안 B).
+
+        cond_name은 "주도주상위+돌파자동매매용"처럼 병합돼 들어올 수 있는데,
+        그대로 키로 쓰면 조합마다 표본이 쪼개져 최소표본(3건)에 영원히 도달하지
+        못한다. 우선순위가 아니라 **표본을 모으기 위한** 대표값 하나로 접는다.
+        (주도주상위가 1A의 주 소스이므로 먼저 확인)
+        """
+        cn = cond_name or ""
+        for name in ("주도주상위", "돌파자동매매용", "눌림목자동"):
+            if name in cn:
+                return COND_PERF_PREFIX + name
+        return COND_PERF_PREFIX + "기타"
 
     @staticmethod
     def _score_ratio(info: dict) -> float:
@@ -1031,6 +1075,162 @@ class StrategyManager:
             and GROUP_A_START <= self._now().time() < PULLBACK_END
         )
 
+    # ========================================
+    # 진입 진단 (2026-08-01 신규)
+    # ========================================
+    # 사유 원문 -> 분류. 앞에서부터 먼저 걸리는 것을 쓴다.
+    # (분류, 원문에 포함된 문자열들)
+    _REJECT_RULES = (
+        ("대량체결 부족", ("대량체결 부족",)),
+        ("체결틱 부족(강도판단불가)", ("체결틱 부족",)),
+        ("체결강도 미달", ("체결강도 미달", "체결강도 지속 미달")),
+        ("시가급등 보류", ("시가대비",)),
+        ("저유동성 보류", ("저유동성",)),
+        ("지수 방어(HALT)", ("전면 매매 중단",)),
+        ("데이터소스 없음", ("데이터 소스 없음",)),
+        ("눌림 미충족", ("눌림 미성립", "반등 미확인")),
+        ("VWAP 탈락", ("VWAP",)),
+        ("점수 미달", ("점수 부족", "점수 미달")),
+        ("슬롯 부족", ("슬롯 부족",)),
+        ("재매수 차단", ("재매수", "쿨다운", "매도 차단", "손절 종목")),
+        ("조건식 지연(09:20)", ("조건식 지연",)),
+        ("장시작 전 대기", ("장 시작 전",)),
+        ("매수 컷오프", ("컷오프", "상한",)),
+    )
+    # '코드/인프라 이상'을 의심해야 하는 분류 — 정상 필터링과 구분해서 경고한다.
+    _REJECT_INFRA = ("체결틱 부족(강도판단불가)", "데이터소스 없음")
+
+    @classmethod
+    def _reject_category(cls, reason: str) -> str:
+        r = reason or ""
+        for label, keys in cls._REJECT_RULES:
+            if any(k in r for k in keys):
+                return label
+        return "기타"
+
+    def _note_reject(self, stock_code: str, reason: str):
+        """후보가 이번 평가에서 매수되지 않은 사유를 기록 (진단 전용).
+
+        핫패스에서 불리므로 문자열 분류 외에 아무 것도 하지 않는다. 락도 걸지
+        않는다 — 여러 워커 스레드가 동시에 써도 dict 대입은 원자적이고,
+        진단용 근사치라 정확도보다 오버헤드 0이 중요하다.
+        """
+        if not stock_code or not reason:
+            return
+        try:
+            self._last_reject[stock_code] = (
+                self._reject_category(reason), str(reason)[:120], self._now()
+            )
+        except Exception:
+            pass
+
+    def build_entry_diagnostics(self) -> str:
+        """장중 진입 진단 요약 (텔레그램용). main.task_entry_diagnostics가 호출.
+
+        "조건검색엔 계속 잡히는데 왜 안 사는가"를 세 가지로 나눠 보여준다:
+          1) 슬롯/시간 같은 구조적 이유인가
+          2) 진입 필터가 정상적으로 거르는 중인가 (사유별 종목 수)
+          3) 데이터가 안 들어와서 판단 자체를 못 하는가 (=코드/구독 이상 의심)
+        """
+        now = self._now()
+        held = len(self.holdings)
+        n_1a = self.count_holdings_by_strategy("1A")
+        n_pb = self.count_holdings_by_strategy("1A_눌림")
+        cands = [c for c in self.watch_list_today
+                 if c not in self.holdings and c not in self.pending]
+
+        lines = [
+            f"📊 [진입 진단] {now.strftime('%H:%M')}",
+            f"후보 {len(cands)}종목 | 보유 {held}/{MAX_HOLDINGS} "
+            f"(1A {n_1a}/{self.phase1a_max_slots()}, 눌림 {n_pb}/{PULLBACK_MAX_SLOTS})",
+        ]
+
+        # 1) 매수 가능 여부 자체
+        gates = []
+        if not self.risk_can_trade():
+            gates.append("MDD 일손실 차단")
+        if self._get_market_defense_mode() == "HALT":
+            gates.append("지수 HALT")
+        if now < self.quarantine_until:
+            gates.append("WS 재연결 격리")
+        if now.time() >= ENTRY_HARD_CUTOFF:
+            gates.append("15:10 하드컷오프")
+        if gates:
+            lines.append(f"⛔ 전면 차단: {', '.join(gates)}")
+        elif not self.can_buy_phase1a():
+            lines.append("🔒 1A 슬롯 없음 (슬롯이 비면 자동 재평가)")
+        else:
+            lines.append("🟢 1A 슬롯 여유 있음 — 트리거 대기 중")
+
+        # 2) 사유별 집계 (최근 10분 내 기록만 — 오래된 건 이미 상황이 바뀜)
+        recent, counts = 0, {}
+        for code in cands:
+            rec = self._last_reject.get(code)
+            if not rec:
+                continue
+            cat, _, ts = rec
+            if (now - ts).total_seconds() > 600:
+                continue
+            recent += 1
+            counts[cat] = counts.get(cat, 0) + 1
+        if counts:
+            lines.append("미체결 사유(최근 10분):")
+            for cat, n in sorted(counts.items(), key=lambda kv: -kv[1])[:6]:
+                lines.append(f"  {n:>3}종목  {cat}")
+        elif cands:
+            lines.append("⚠️ 후보는 있는데 최근 10분간 평가 기록이 없음 "
+                         "— 재평가 루프 정지 의심")
+
+        # 3) 인프라 이상 신호
+        warns = []
+        infra_n = sum(n for c, n in counts.items() if c in self._REJECT_INFRA)
+        if infra_n:
+            warns.append(f"체결 데이터 없음 {infra_n}종목 (0B 구독/WS 확인)")
+
+        if self.phase1b and getattr(self.phase1b, "trade_flow", None):
+            silent = [c for c in cands
+                      if self.phase1b.is_watching(c)
+                      and self.phase1b.trade_flow.tick_count(c, 120) == 0]
+            if silent:
+                warns.append(
+                    f"감시중인데 체결틱 0인 종목 {len(silent)}개: "
+                    f"{', '.join(silent[:5])}{'...' if len(silent) > 5 else ''}"
+                )
+            unwatched = [c for c in cands if not self.phase1b.is_watching(c)]
+            if unwatched:
+                warns.append(
+                    f"후보인데 감시 미시작 {len(unwatched)}개 "
+                    f"(1A 평가에 도달 못 함): {', '.join(unwatched[:5])}"
+                    f"{'...' if len(unwatched) > 5 else ''}"
+                )
+
+        # 슬롯이 비어있는데 오래 매수가 없으면 파이프라인 이상 의심
+        if not gates and self.can_buy_phase1a() and cands:
+            since = self._last_buy_at
+            idle_min = (now - since).total_seconds() / 60 if since else None
+            if since is None and now.time() >= time(9, 30):
+                warns.append("오늘 매수 0건 — 진입 경로 전체 점검 필요")
+            elif idle_min is not None and idle_min >= 60:
+                warns.append(f"슬롯 여유 상태로 {idle_min:.0f}분째 매수 없음")
+
+        for w in warns:
+            lines.append(f"⚠️ {w}")
+
+        # 4) 성과 기반 문턱 조정 현황 (제안 B 효과 가시화)
+        tiers = []
+        for key in ("1A", "1A_눌림"):
+            t = self.perf.tier(key)
+            if t != "NEUTRAL":
+                tiers.append(f"{key}={t}")
+        for name in ("주도주상위", "돌파자동매매용", "눌림목자동"):
+            t = self.perf.tier(COND_PERF_PREFIX + name)
+            if t != "NEUTRAL":
+                tiers.append(f"{name}={t}")
+        if tiers:
+            lines.append(f"성과 등급: {', '.join(tiers)}")
+
+        return "\n".join(lines)
+
     def candidate_tier(self, stock_code: str) -> float:
         """종목 우선순위 지표 (2026-08-01 신규). 클수록 좋은 자리.
 
@@ -1068,7 +1268,15 @@ class StrategyManager:
             )
             if strength <= 0:
                 return 0.0
-            return accel * (strength / 100.0)
+            # [제안 A] 신호 세기 가중 — 단일 대량체결이 터진 자리를 우대한다.
+            max_single = tf.max_single_trade_value(stock_code, PHASE1A_TIER_SHORT_SEC)
+            if max_single >= PHASE1A_SINGLE_TRADE_VALUE:
+                signal_mult = PHASE1A_TIER_SINGLE_MULT
+            elif max_single >= PHASE1A_BURST_TRADE_VALUE:
+                signal_mult = PHASE1A_TIER_BURST_MULT
+            else:
+                signal_mult = 1.0
+            return accel * (strength / 100.0) * signal_mult
         except Exception:
             logger.exception("[%s] tier 계산 실패 -> 판단 불가(0)", stock_code)
             return 0.0
@@ -1244,6 +1452,10 @@ class StrategyManager:
             # '버리는' 게 아니라 '미루는' 것이 핵심.
             if now_t < GROUP_A_START:
                 self.watch_list_today.add(stock_code)
+                self._note_reject(
+                    stock_code,
+                    f"장 시작 전 편입 — {GROUP_A_START.strftime('%H:%M')}부터 평가",
+                )
                 logger.info(
                     "[%s] %s 장 시작 전 편입 — %s부터 평가 대기 (후보 등록)",
                     stock_code, stock_name, GROUP_A_START.strftime("%H:%M"),
@@ -1298,6 +1510,7 @@ class StrategyManager:
         blocked, reason = self._is_rebuy_blocked(stock_code)
         if blocked:
             logger.info("[%s] %s 매수 차단: %s", stock_code, stock_name, reason)
+            self._note_reject(stock_code, reason)
             return False
 
         # 주도주상위/눌림목자동(IMMEDIATE_COND_NAMES)은 GROUP_A_START(09:00)부터
@@ -1311,6 +1524,11 @@ class StrategyManager:
         cond_name = self._cond_names.get(stock_code, "")
         if not any(n in cond_name for n in IMMEDIATE_COND_NAMES) and now_t < OTHER_COND_START:
             self.watch_list_today.add(stock_code)
+            self._note_reject(
+                stock_code,
+                f"조건식 지연 — {cond_name or '기타'}는 "
+                f"{OTHER_COND_START.strftime('%H:%M')}부터 평가",
+            )
             return False
 
         # ── 전략 라우팅: 상호배타 (2026-08-01 사용자 지정) ──────────────
@@ -1362,6 +1580,13 @@ class StrategyManager:
                 if self.can_buy_phase1a(info):
                     self._execute_buy(stock_code, stock_name, phase, info, sub_strategy="1A")
                     return True
+                self._note_reject(
+                    stock_code,
+                    f"슬롯 부족 (1A {self.count_holdings_by_strategy('1A')}"
+                    f"/{self.phase1a_max_slots()}, 전체 {self.occupied_slots()}/{MAX_HOLDINGS})",
+                )
+            else:
+                self._note_reject(stock_code, info.get("reason", ""))
 
         # ==========================================
         # Pullback: 눌림목 반등 점수 + VWAP AND (09:00~10:30, 1A와 시간대 겹침/슬롯 별도)
@@ -1430,10 +1655,18 @@ class StrategyManager:
                         # 청산 후 정리는 tick()의 _cleanup_watched가 담당.
                         return True
                     logger.info("[%s] pullback 조건 OK but 슬롯 부족", stock_code)
+                    self._note_reject(
+                        stock_code,
+                        f"슬롯 부족 (눌림 {self.count_holdings_by_strategy('1A_눌림')}"
+                        f"/{PULLBACK_MAX_SLOTS}, 전체 {self.occupied_slots()}/{MAX_HOLDINGS})",
+                    )
+                else:
+                    self._note_reject(stock_code, "VWAP 필터 탈락")
             elif info.get("reason"):
                 logger.info(
                     "[%s] %s pullback 미충족: %s", stock_code, stock_name, info.get("reason")
                 )
+                self._note_reject(stock_code, info.get("reason", ""))
 
         return False
 
@@ -2013,9 +2246,15 @@ class StrategyManager:
         #      점수 컷라인용으로 만들어둔 축소추정 기반 HOT/COLD 조정을 재사용.
         #      COLD(오늘 1A 성과 나쁨)면 배수>1이 나와 임계값이 오르고, HOT이면
         #      <1이 나오지만 max(1.0, ...)로 묶어서 100 밑으로는 안 내려간다.
+        #   ③ [제안 B, 2026-08-01] 같은 축소추정을 **조건검색식별로도** 적용.
+        #      오늘 그 검색식이 물어다 준 종목들의 성과가 나쁘면(COLD) 배수가
+        #      1을 넘어 임계값이 올라가고, 좋으면 1 미만이 나오지만 아래 max()가
+        #      100을 바닥으로 잡아 진입이 원래보다 쉬워지지는 않는다.
+        #      우선순위(줄 세우기)가 아니라 문턱 조정이라 진입 지연이 0이다.
         perf_mult = self.perf.cutline_multiplier("1A")
+        cond_mult = self.perf.cutline_multiplier(self.cond_perf_key(cond_name))
         caution_mult = PHASE1A_LEADING_CAUTION_MULTIPLIER if market_mode == "CAUTION" else 1.0
-        strength_mult = max(1.0, perf_mult, caution_mult)
+        strength_mult = max(1.0, perf_mult, cond_mult, caution_mult)
         effective_strength_min = PHASE1A_LEADING_STRENGTH_MIN * strength_mult
 
         # 3초 창 전체를 하나의 시간가중 윈도우로 평가한다 (2026-08-01).
@@ -2277,22 +2516,56 @@ class StrategyManager:
 
     # 매수 실행
     # ========================================
-    def _resolve_position_amount(
-        self, stock_code: str, sub_strategy: str
-    ) -> tuple[int, Optional[dict]]:
-        if self.optimizer is None:
-            return POSITION_AMOUNT, None
+    @staticmethod
+    def tier_size_multiplier(tier: float) -> float:
+        """tier -> 매수금액 배수 (2026-08-01, 제안 C).
+
+        tier 1.0 이하 = 1.0배(기존과 동일), tier PHASE1A_SIZE_TIER_FULL 이상 =
+        PHASE1A_SIZE_MAX_MULT배. 그 사이는 선형.
+
+        **위로만 움직인다.** 아래로도 열면 평범한 후보의 매수 수량이 0주가 되어
+        조용히 매매를 잃는 부작용이 생기고, 지금은 자본의 2.4%만 쓰는 단계라
+        줄일 이유가 없다. 상한이 고정이라 tier가 아무리 커도(가속도가 폭발해도)
+        금액이 폭주하지 않는다 — 이 함수가 유일한 확대 경로다.
+        """
         try:
-            opt_info = self.optimizer.calculate_position_amount(
-                stock_code, sub_strategy
+            t = float(tier)
+        except (TypeError, ValueError):
+            return 1.0
+        if t <= 1.0:
+            return 1.0
+        span = max(PHASE1A_SIZE_TIER_FULL - 1.0, 1e-9)
+        ratio = min((t - 1.0) / span, 1.0)
+        return 1.0 + ratio * (PHASE1A_SIZE_MAX_MULT - 1.0)
+
+    def _resolve_position_amount(
+        self, stock_code: str, sub_strategy: str, tier: float = 0.0
+    ) -> tuple[int, Optional[dict]]:
+        base = POSITION_AMOUNT
+        opt_info = None
+        if self.optimizer is not None:
+            try:
+                info = self.optimizer.calculate_position_amount(stock_code, sub_strategy)
+                amount = int(info.get("amount", 0))
+                if amount > 0:
+                    base, opt_info = amount, info
+            except Exception:
+                logger.exception(f"[{stock_code}] 비중 계산 실패, fallback")
+
+        # [제안 C] tier 가중 — 같은 슬롯 하나라도 신호가 강한 자리에 더 태운다.
+        tier_mult = self.tier_size_multiplier(tier)
+        if tier_mult > 1.0:
+            boosted = int(base * tier_mult)
+            logger.info(
+                "[%s] tier 가중 매수금액: %s원 x%.2f -> %s원 (tier %.2f)",
+                stock_code, f"{base:,}", tier_mult, f"{boosted:,}", tier,
             )
-            amount = int(opt_info.get("amount", 0))
-            if amount <= 0:
-                return POSITION_AMOUNT, None
-            return amount, opt_info
-        except Exception:
-            logger.exception(f"[{stock_code}] 비중 계산 실패, fallback")
-            return POSITION_AMOUNT, None
+            base = boosted
+            if opt_info is not None:
+                # 알림/로그에 최종 비중이 그대로 드러나도록 합성 배수를 실어준다.
+                opt_info = dict(opt_info)
+                opt_info["final_weight"] = opt_info.get("final_weight", 1.0) * tier_mult
+        return base, opt_info
 
     def _get_opening_price(self, stock_code: str) -> Optional[float]:
         """당일 시가 조회 — on_condition_hit에서 이미 캐시했으면 재사용,
@@ -2454,8 +2727,12 @@ class StrategyManager:
                 info.get("score_breakdown", ""),
             )
 
+        # tier는 매수금액 가중(제안 C)과 포지션 기록(사후 검증)에 둘 다 쓰이므로
+        # 여기서 한 번만 계산해 재사용한다 — 메모리 연산이라 비용은 없지만
+        # 두 번 부르면 값이 미세하게 달라져 로그와 기록이 어긋난다.
+        entry_tier = self.candidate_tier(stock_code)
         position_amount, opt_info = self._resolve_position_amount(
-            stock_code, sub_strategy
+            stock_code, sub_strategy, tier=entry_tier
         )
         quantity = int(position_amount // current_price)
         if quantity < 1:
@@ -2620,12 +2897,17 @@ class StrategyManager:
                 # 진입 시점 종목 tier — 사후 분석용(이 tier가 실제 성과를
                 # 예측했는지 며칠 쌓아 검증할 것). 교체 판정은 '진입 tier'가
                 # 아니라 항상 '현재 tier'로 한다.
-                "entry_tier": self.candidate_tier(stock_code),
+                "entry_tier": entry_tier,
+                # 조건검색식 성과 축 키 (제안 B) — 청산 시 이 키로 성과를 기록해야
+                # "어느 검색식이 오늘 잘 물어다 주는가"가 축적된다.
+                "cond_key": self.cond_perf_key(cond_name),
                 "order_style": order_style,
             }
 
             self.sold_at.pop(stock_code, None)
             self._buy_success_count += 1
+            self._last_buy_at = self._now()      # 진단용(매수 공백 감지)
+            self._last_reject.pop(stock_code, None)
             # 당일 매수 횟수 누적 (익절 후 재매수 상한 판정용, 2026-07-30)
             self._buy_count_today[stock_code] = (
                 self._buy_count_today.get(stock_code, 0) + 1
@@ -3132,6 +3414,12 @@ class StrategyManager:
             try:
                 self.perf.record(sub, net_rate / 100.0)
                 self.perf.log_tier_change(sub)
+                # [제안 B] 조건검색식 축에도 같은 성과를 기록 (2026-08-01).
+                # 전략 축과 독립된 키라 서로 간섭하지 않는다.
+                cond_key = pos.get("cond_key")
+                if cond_key:
+                    self.perf.record(cond_key, net_rate / 100.0)
+                    self.perf.log_tier_change(cond_key)
             except Exception as e:
                 logger.warning("[%s] 전략성과 기록 실패: %s", stock_code, e)
 
