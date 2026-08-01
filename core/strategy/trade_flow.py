@@ -208,6 +208,39 @@ class TradeFlowTracker:
         cutoff = now - window_sec
         return sum(1 for ts, _, _, _ in d if ts >= cutoff)
 
+    def value_acceleration(
+        self,
+        stock_code: str,
+        short_sec: float = 30,
+        long_sec: float = 120,
+        now: float = None,
+    ) -> float:
+        """거래대금 '가속도' — 최근 short_sec 거래대금이 long_sec 평균 대비 몇 배인가.
+
+        (2026-08-01 신규, 종목 우선순위용) 1.0 = 균일하게 들어옴, 3.0 = 최근
+        구간에 3배로 몰림. **자기 자신 대비 비율**이라 대형주/소형주가 같은
+        잣대로 비교된다 — 절대 거래대금으로 줄을 세우면 삼성전자가 항상 이기고
+        조건검색이 굳이 찾아준 소형 급등주가 영영 슬롯을 못 잡는다.
+
+        같은 틱 버퍼만 읽으므로 REST 0콜, 대기 0초 — 트리거 시점에 호출해도
+        진입이 늦어지지 않는다(우선순위 때문에 급등 포착이 느려지면 안 되므로
+        이 성질이 설계의 핵심이다).
+
+        데이터가 부족하면 0.0 — 호출부는 이걸 '순위 판단 불가'로 보고
+        **교체(남의 슬롯 빼앗기)만 포기**하고, 빈 슬롯 매수는 그대로 진행한다.
+        """
+        now = now if now is not None else time.time()
+        if long_sec <= short_sec or short_sec <= 0:
+            return 0.0
+        long_val = self.get_trade_value(stock_code, long_sec, now=now)
+        if long_val <= 0:
+            return 0.0
+        short_val = self.get_trade_value(stock_code, short_sec, now=now)
+        expected = long_val * (short_sec / long_sec)   # 균일하게 들어왔다면 이만큼
+        if expected <= 0:
+            return 0.0
+        return short_val / expected
+
     def count_large_trades(
         self,
         stock_code: str,

@@ -178,8 +178,28 @@ PHASE1A_LEADING_OPEN_SURGE_CAP = 5.0
 # 마진(1.2배)과 최소보유시간(30초) 가드는 슬롯을 사자마자 되파는 무의미한
 # 왕복수수료 낭비를 막기 위함 — slot_replacement.py의 CANDIDATE_SCORE_MARGIN
 # 관례를 그대로 재사용.
-PHASE1A_PRIORITY_MARGIN = 1.2       # 후보 강도 >= 최약 보유종목 강도 * 이 배수여야 교체
+# [2026-08-01 전면 재설계 — "조건검색식 우선순위가 아니라 종목 우선순위"]
+# 설계 원칙: **비교는 미리 해두고, 트리거는 즉시 실행한다.**
+#   ① 슬롯에 여유가 있으면 순위를 아예 보지 않고 즉시 매수 (딜레이 0).
+#      실측상 슬롯 사용률이 10%라 대부분의 시간은 이 경로다 —
+#      급등 포착 속도는 예전과 완전히 동일하다.
+#   ② 슬롯이 꽉 찬 순간에만 순위를 본다. 이때도 후보를 모아 기다리지 않고,
+#      이미 틱 버퍼에서 계산돼 있는 값(_candidate_tier, REST 0콜/대기 0초)을
+#      조회만 하므로 여전히 즉시 실행된다.
+#   ③ 순위 지표는 **자기 자신 대비 비율**(거래대금 가속도 x 체결강도)이라
+#      조건검색식(주도주상위=소형 급등 / 돌파자동매매용=대형주)이 달라도
+#      공평하게 비교된다 — 조건식별 우선순위 자체가 필요 없어진다.
+#   ④ 순위를 모르는 종목(틱 데이터 부족)은 남의 슬롯을 빼앗지만 못할 뿐,
+#      빈 슬롯 매수는 그대로 한다. '모름'이 매수를 막지 않게 하는 게 중요.
+PHASE1A_PRIORITY_MARGIN = 1.3       # 후보 tier >= 최약 보유종목 tier * 이 배수여야 교체
 PHASE1A_PRIORITY_MIN_HOLD_SEC = 30  # 이 시간 안 된 포지션은 교체 대상에서 제외
+# 교체 대상은 "아직 결과가 안 난 자리"로 제한한다 — 이미 오르고 있는 포지션을
+# 순간 tier 스파이크로 빼앗으면 잘 벌고 있는 자리를 스스로 걷어차게 된다.
+PHASE1A_PRIORITY_FLAT_BAND = 0.005  # 순손익 ±0.5% 이내인 포지션만 교체 대상
+# tier 계산에 필요한 최소 틱 수. 미달이면 tier=0(판단 불가) -> 교체 자격 없음.
+PHASE1A_TIER_MIN_TICKS = 10
+PHASE1A_TIER_SHORT_SEC = 30
+PHASE1A_TIER_LONG_SEC = 120
 
 # Pullback 반등 확인용 OBV(누적거래량) 확인 구간 — 몇 봉 전과 비교할지.
 # (2026-07-29 신규: 거래량 없는 가짜 반등을 VWAP과 함께 걸러내는 용도)
@@ -270,6 +290,15 @@ TP_VOL_CHECK_SEC = 30               # 거래량 확인(REST) 종목당 최소 �
 LOSS_REBOUND_MIN = 0.01          # 저점 대비 이만큼(+1%) 이상 올라와야 '반등' 인정
 LOSS_REBOUND_MIN_HOLD_MIN = 5    # 매수 후 최소 보유(분) — 직후 노이즈로 잘리는 것 방지
 
+# ── 정체 포지션 조기 정리 (2026-08-01) ──────────────────────────
+# 실측(07-28~31, 73건): 슬롯·분의 25%를 '시간정리 30분'이 먹었는데 평균
+# -0.78%였고, 손익 ±0.5% 이내로 끝난 '무의미 청산' 14건이 185분(22%)을
+# 점유했다. 돈을 번 청산(익절+트레일링)은 슬롯·분의 19%만 썼다.
+# 30분을 다 기다리지 않고, 15분이 지나도록 아무 방향도 못 잡은 자리는
+# 기회비용으로 보고 비운다. 30분 컷(HOLDING_TIMEOUT)은 최후 방어로 유지.
+DEAD_POSITION_MIN = 15           # 이 시간 경과 후 판정
+DEAD_POSITION_BAND = 0.005       # 순손익이 ±이 범위 안이면 '정체'로 간주
+
 # 익절 후 재매수 상한 (2026-07-30 사용자 지정) — 손절 종목은 이미 당일 전면
 # 차단이므로 사실상 익절 종목에만 적용된다. 최초 1회 + 재매수 2회 = 총 3회.
 MAX_BUYS_PER_STOCK = 3
@@ -291,6 +320,14 @@ SLOT_EXPANSION_WAIT_SEC = 90        # 슬롯 만석이 이 시간 이상 지속�
                                     # (슬롯교체 태스크가 60초 주기 -> 한 사이클을
                                     #  넘겨도 교체가 안 됐다 = 교체 대상 없음)
 PHASE1A_MAX_SLOTS = PHASE_1A["max_slots"]
+# 10:30(PULLBACK_END) 이후 1A 상한 (2026-08-01 신규).
+# Pullback 창은 09:00~10:30, 하루의 26%뿐인데 슬롯 3칸을 상시 예약하고 있어서
+# 10:30 이후엔 그 3칸이 영구히 논다. 반면 1A는 14:50까지 도는데 캡 3에 묶여
+# 있었다. 실측(07-28~31): 슬롯 용량 8,400 슬롯·분 중 실사용 834분 = 9.9%.
+# 부수 효과로 **확장 슬롯(7~8)의 도달 불가 상태도 해소**된다 — 1B/1L을 끄면서
+# 1A(3)+Pullback(3)=6=MAX_HOLDINGS가 되어, 보유 6 = 두 전략 모두 자기 캡이
+# 꽉 찬 상태 ⟹ 7번째를 요청할 주체가 아무도 없는 구조적 데드코드였다.
+PHASE1A_MAX_SLOTS_LATE = 5
 PULLBACK_MAX_SLOTS = 3
 PHASE1B_MAX_SLOTS = PHASE_1B["max_slots"]
 
@@ -459,6 +496,10 @@ class StrategyManager:
 
         # 1B 반등확증 대기 {code: {ref_high, since, last_check}} (2026-07-30)
         self._1b_confirm: dict[str, dict] = {}
+
+        # 매수 진행중(pending) 종목의 전략 — 슬롯 오버부킹 방지용 (2026-08-01).
+        # _execute_buy가 주문 직전에 넣고 finally에서 지운다.
+        self._pending_strategy: dict[str, str] = {}
 
         # 종목별 당일 매수 횟수(익절 후 재매수 상한용) + 동적캡 거래량확인 throttle
         self._buy_count_today: dict[str, int] = {}
@@ -856,7 +897,7 @@ class StrategyManager:
             return False
         if self._now() < self.quarantine_until:
             return False
-        held = len(self.holdings)
+        held = self.occupied_slots()
         # 오늘 성과가 나쁜(COLD) 전략은 공유 슬롯 마지막 칸을 다른 전략에
         # 양보한다 — 잘 안 되는 전략이 마지막 자리를 선점해 버리는 것을 막는
         # 우선순위 장치. (2026-07-31)
@@ -922,7 +963,7 @@ class StrategyManager:
         watchlist_reentry처럼 '슬롯 여유 없으면 REST 호출도 안 함'으로 조기
         반환하는 경로가, 확장 가능한 상황까지 싸잡아 막아버리지 않도록 하는 용도.
         실제 허용 여부는 후보별 점수를 보는 _can_use_expansion_slot이 결정한다."""
-        held = len(self.holdings)
+        held = self.occupied_slots()
         if held < MAX_HOLDINGS or held >= MAX_HOLDINGS_HARD:
             return False
         since = self._soft_cap_full_since
@@ -940,14 +981,45 @@ class StrategyManager:
         else:
             self._soft_cap_full_since = None
 
+    def occupied_slots(self) -> int:
+        """보유 + 매수 진행중(pending) 합계 — 오버부킹 방지 (2026-08-01).
+
+        기존엔 len(self.holdings)만 셌다. 그런데 _execute_buy는 주문 REST가
+        끝나야 holdings에 넣는데, 그 사이(429 재시도 시 2초 blocking sleep까지
+        포함) 종목은 pending에만 있다. on_condition_hit과 watchlist_reentry는
+        각각 별도의 asyncio.to_thread에서 도므로, 급등이 동시에 여러 종목에서
+        터지면 두 스레드가 같은 '마지막 한 칸'을 동시에 통과해 상한을 넘겨
+        매수할 수 있다 — 여러 종목이 한꺼번에 터지는 상황이 바로 우선순위가
+        필요한 상황이라, 순위 로직을 넣기 전에 이것부터 막아야 한다.
+        """
+        return len(set(self.holdings) | self.pending)
+
     def count_holdings_by_strategy(self, sub: str) -> int:
-        return sum(1 for h in self.holdings.values() if h.get("sub_strategy") == sub)
+        """해당 전략의 점유 슬롯 수 (보유 + 매수 진행중).
+
+        (2026-08-01) pending 매수분도 센다 — 위 occupied_slots와 같은 이유.
+        _pending_strategy는 _execute_buy가 주문 직전에 기록하고 finally에서 지운다.
+        """
+        n = sum(1 for h in self.holdings.values() if h.get("sub_strategy") == sub)
+        n += sum(
+            1 for code, s in self._pending_strategy.items()
+            if s == sub and code not in self.holdings
+        )
+        return n
+
+    def phase1a_max_slots(self) -> int:
+        """1A 상한 — 10:30 이후에는 노는 Pullback 슬롯을 흡수 (2026-08-01).
+        근거는 PHASE1A_MAX_SLOTS_LATE 정의부 주석 참고."""
+        return (
+            PHASE1A_MAX_SLOTS if self._now().time() < PULLBACK_END
+            else PHASE1A_MAX_SLOTS_LATE
+        )
 
     def can_buy_phase1a(self, info: dict | None = None) -> bool:
         # 1A: 09:00~14:50 (evaluate_1a_leading_strength, 체결강도 단독)
         return (
             self.can_buy_more(info, "1A")
-            and self.count_holdings_by_strategy("1A") < PHASE1A_MAX_SLOTS
+            and self.count_holdings_by_strategy("1A") < self.phase1a_max_slots()
             and GROUP_A_START <= self._now().time() < PHASE1A_END
         )
 
@@ -959,67 +1031,116 @@ class StrategyManager:
             and GROUP_A_START <= self._now().time() < PULLBACK_END
         )
 
-    def _try_1a_priority_upgrade(self, candidate_code: str, candidate_strength: float) -> bool:
-        """1A 슬롯(3개)이 꽉 찼을 때, 새 후보가 가장 약한 보유종목보다 확실히
-        강하면 즉시 교체 (2026-07-31 사용자 지정) — "장 시작하자마자 먼저 틱이
-        온 놈이 아니라 가장 강한 놈이 슬롯을 차지"하도록. 상세 근거는
-        PHASE1A_PRIORITY_MARGIN 정의부 주석 참고. 교체 성공 시 True(호출부가
-        곧바로 can_buy_phase1a를 재확인해서 새로 빈 슬롯에 매수)."""
-        now_t = self._now().time()
-        if not (GROUP_A_START <= now_t < EARLY_WINDOW_END):
+    def candidate_tier(self, stock_code: str) -> float:
+        """종목 우선순위 지표 (2026-08-01 신규). 클수록 좋은 자리.
+
+        tier = 거래대금 가속도 x 체결강도배수
+          - 거래대금 가속도: 최근 30초 거래대금 / (최근 120초 평균 30초분).
+            1.0 = 균일, 3.0 = 지금 3배로 몰리는 중.
+          - 체결강도배수: 최근 30초 강도 / 100. 매수 우세면 1 초과.
+
+        **두 항 모두 그 종목 자신의 최근 이력 대비 비율**이라는 게 핵심이다.
+        절대 거래대금으로 줄을 세우면 대형주(돌파자동매매용)가 항상 이기고,
+        조건검색이 굳이 찾아준 소형 급등주(주도주상위)는 영영 슬롯을 못 잡는다.
+        자기 대비로 재면 두 조건검색식의 종목이 같은 잣대에서 비교되므로
+        **조건검색식별 우선순위라는 개념 자체가 필요 없어진다.**
+
+        비용: 이미 메모리에 있는 틱 버퍼만 읽는다 — REST 0콜, 대기 0초.
+        그래서 매수 트리거 시점에 호출해도 진입이 단 1ms도 늦지 않는다.
+
+        반환 0.0 = 판단 불가(틱 부족). 호출부는 이 경우 **남의 슬롯을 빼앗는
+        것만 포기**하고, 빈 슬롯 매수는 정상 진행한다 — '모름'이 매수를
+        막아버리면 우선순위를 도입한 대가로 매매를 잃는 셈이 된다.
+        """
+        if not (self.phase1b and getattr(self.phase1b, "trade_flow", None)):
+            return 0.0
+        tf = self.phase1b.trade_flow
+        try:
+            if tf.tick_count(stock_code, PHASE1A_TIER_LONG_SEC) < PHASE1A_TIER_MIN_TICKS:
+                return 0.0
+            accel = tf.value_acceleration(
+                stock_code, PHASE1A_TIER_SHORT_SEC, PHASE1A_TIER_LONG_SEC
+            )
+            if accel <= 0:
+                return 0.0
+            strength = tf.compute_strength(
+                stock_code, PHASE1A_TIER_SHORT_SEC, min_ticks=PHASE1A_TIER_MIN_TICKS
+            )
+            if strength <= 0:
+                return 0.0
+            return accel * (strength / 100.0)
+        except Exception:
+            logger.exception("[%s] tier 계산 실패 -> 판단 불가(0)", stock_code)
+            return 0.0
+
+    def _try_1a_priority_upgrade(self, candidate_code: str, candidate_tier: float) -> bool:
+        """슬롯이 꽉 찬 순간에만 도는 '종목 우선순위' 교체 (2026-08-01 전면 재설계).
+
+        설계 의도 — 조건검색식 우선순위가 아니라 **종목 우선순위**를, 그것도
+        **진입 지연 0으로** 구현한다. 핵심은 세 가지다:
+
+        ① 이 함수는 슬롯이 꽉 찼을 때만 호출된다. 실측상 슬롯 사용률이 10%라
+           대부분의 트리거는 여기 오지도 않고 곧장 매수된다 — 급등 포착 속도가
+           우선순위 도입 때문에 느려지는 일은 구조적으로 없다.
+        ② 후보를 모아 정렬하지 않는다. tier는 이미 틱 버퍼에 계산 재료가 다
+           들어있어 조회만 하면 되므로(REST 0콜), 호출돼도 즉시 끝난다.
+        ③ 비교 기준이 **자기 대비 비율**(candidate_tier)이라 소형 급등주와
+           대형주가 공평하게 겨룬다.
+
+        안전장치:
+          - 교체 대상은 "아직 결과가 안 난 자리"(순손익 ±PHASE1A_PRIORITY_FLAT_BAND)
+            로 제한 — 오르고 있는 포지션을 순간 스파이크로 빼앗지 않는다.
+          - tier를 모르는(0.0) 후보는 교체를 시도하지 않는다.
+          - 최소보유 시간 미달 포지션은 제외(사자마자 되파는 수수료 낭비 방지).
+        기존 09:00~09:10 제한은 해제했다 — 슬롯 만석 자체가 이미 강한 게이트라
+        시간으로 또 막을 이유가 없고, 오히려 10:30 이후 좋은 자리를 놓쳤다.
+
+        반환 True = 자리를 하나 비웠음(호출부가 can_buy_phase1a를 재확인해 매수).
+        """
+        if candidate_tier <= 0:
             return False
-        if candidate_strength <= 0:
+        now_dt = self._now()
+        if not (GROUP_A_START <= now_dt.time() < PHASE1A_END):
             return False
 
-        holdings_1a = {
-            code: pos for code, pos in self.holdings.items()
-            if pos.get("sub_strategy") == "1A" and code not in self.pending
-            and code not in self.sell_blocked
-        }
-        if not holdings_1a:
-            return False
+        best_code, best_tier, best_price = None, None, None
+        for code, pos in self.holdings.items():
+            if pos.get("sub_strategy") != "1A":
+                continue
+            if code in self.pending or code in self.sell_blocked:
+                continue
+            buy_time = pos.get("buy_time")
+            if buy_time is None:
+                continue
+            if (now_dt - buy_time).total_seconds() < PHASE1A_PRIORITY_MIN_HOLD_SEC:
+                continue
 
-        weakest_code, weakest_pos = min(
-            holdings_1a.items(), key=lambda kv: kv[1].get("entry_strength") or 0
-        )
-        weakest_strength = weakest_pos.get("entry_strength") or 0
-        if weakest_strength <= 0:
-            return False  # 비교 기준 없으면 손대지 않음(보수적)
+            # 결과가 이미 난 자리(오르거나 밀린 자리)는 건드리지 않는다.
+            price = self._fresh_tick_price(code)
+            if not price:
+                continue  # 실시간가를 모르면 판단 보류 (REST까지 쓰진 않는다)
+            if abs(self._net_rate(pos.get("buy_price") or 0, price)) > PHASE1A_PRIORITY_FLAT_BAND:
+                continue
 
-        if candidate_strength < weakest_strength * PHASE1A_PRIORITY_MARGIN:
-            return False
+            tier = self.candidate_tier(code)
+            if best_tier is None or tier < best_tier:
+                best_code, best_tier, best_price = code, tier, price
 
-        buy_time = weakest_pos.get("buy_time")
-        if buy_time is None:
+        if best_code is None:
             return False
-        held_sec = (self._now() - buy_time).total_seconds()
-        if held_sec < PHASE1A_PRIORITY_MIN_HOLD_SEC:
-            return False
-
-        # 신선도 확인된 실시간 체결가만 사용 (2026-08-01). 예전엔
-        # get_latest_price를 그대로 썼는데, 보유 종목은 틱이 아예 안 쌓이던
-        # 시절이라 **매수 시점에 얼어붙은 가격**으로 매도 기록이 남았다
-        # (순손익이 항상 -0.23%로 계산돼 당일 재매수까지 차단됨).
-        price = self._fresh_tick_price(weakest_code)
-        if not price:
-            try:
-                c1 = self.api.get_minute_candles(weakest_code, interval=1, count=1)
-                price = float(c1[0]["close"]) if c1 else None
-            except Exception:
-                price = None
-        if not price:
+        if candidate_tier < max(best_tier, 0.0) * PHASE1A_PRIORITY_MARGIN:
             return False
 
         logger.info(
-            "[%s] 1A 우선순위 교체 — 신규후보 %s(강도 %.0f) vs 최약보유 %s(강도 %.0f, "
-            "%.0f초 보유) -> 매도 후 신규매수 시도",
-            candidate_code, candidate_code, candidate_strength,
-            weakest_code, weakest_strength, held_sec,
+            "[%s] 1A 종목 우선순위 교체 — 후보 tier %.2f >= 최약보유 %s tier %.2f x%.1f "
+            "(정체 구간이라 교체 가능) -> 매도 후 신규매수 시도",
+            candidate_code, candidate_tier, best_code, best_tier,
+            PHASE1A_PRIORITY_MARGIN,
         )
         self._execute_sell(
-            weakest_code, price,
-            f"1A 우선순위 교체 (신규후보 {candidate_code} 강도 {candidate_strength:.0f} "
-            f">= 최약보유 강도 {weakest_strength:.0f} x{PHASE1A_PRIORITY_MARGIN:.1f})",
+            best_code, best_price,
+            f"1A 우선순위 교체 (후보 {candidate_code} tier {candidate_tier:.2f} "
+            f">= 보유 tier {best_tier:.2f} x{PHASE1A_PRIORITY_MARGIN:.1f})",
         )
         return True
 
@@ -1223,14 +1344,21 @@ class StrategyManager:
             )
             self._record_watch_list(stock_code, stock_name, phase, info, cond_name)
             if ok:
-                # 개장초반 슬롯 우선순위 교체 (2026-07-31 사용자 지정) — 1A
-                # 슬롯(3개)이 이미 꽉 찼으면, 처음 틱이 온 종목이 아니라
-                # "더 강한 종목"이 자리를 차지하도록 아래에서 가장 약한
-                # 보유종목과 비교해 즉시 교체를 시도한다. 슬롯 여유가 있을 땐
-                # 그냥 바로 사면 되므로(첫 3자리는 여전히 즉시매수, 지연 없음)
-                # 호출 자체가 조건검색 편입 처리 속도에 영향 없음.
-                if self.count_holdings_by_strategy("1A") >= PHASE1A_MAX_SLOTS:
-                    self._try_1a_priority_upgrade(stock_code, info.get("current_strength", 0))
+                # ── 종목 우선순위 (2026-08-01 재설계) ──────────────────
+                # **슬롯에 여유가 있으면 순위를 아예 보지 않는다** — 곧장
+                # 아래 can_buy_phase1a로 내려가 즉시 매수한다(딜레이 0).
+                # 슬롯이 꽉 찬 순간에만 tier를 조회해(메모리 연산, REST 0콜)
+                # 가장 약하면서 아직 결과가 안 난 자리와 겨룬다.
+                # 이렇게 나눠야 "우선순위 때문에 급등 포착이 늦어지는" 문제가
+                # 원천적으로 생기지 않는다.
+                slots_full = (
+                    self.count_holdings_by_strategy("1A") >= self.phase1a_max_slots()
+                    or self.occupied_slots() >= MAX_HOLDINGS
+                )
+                if slots_full:
+                    self._try_1a_priority_upgrade(
+                        stock_code, self.candidate_tier(stock_code)
+                    )
                 if self.can_buy_phase1a(info):
                     self._execute_buy(stock_code, stock_name, phase, info, sub_strategy="1A")
                     return True
@@ -2343,6 +2471,7 @@ class StrategyManager:
             )
 
         self.pending.add(stock_code)
+        self._pending_strategy[stock_code] = sub_strategy
         try:
             ma_val = info.get("ma5") or 0
             if sub_strategy == "1B":
@@ -2488,6 +2617,10 @@ class StrategyManager:
                 # 비교하는데, 한쪽만 원점수면 전략 간 비교가 무의미해진다.
                 "entry_score": self._score_ratio(info),
                 "entry_strength": strength_val,
+                # 진입 시점 종목 tier — 사후 분석용(이 tier가 실제 성과를
+                # 예측했는지 며칠 쌓아 검증할 것). 교체 판정은 '진입 tier'가
+                # 아니라 항상 '현재 tier'로 한다.
+                "entry_tier": self.candidate_tier(stock_code),
                 "order_style": order_style,
             }
 
@@ -2535,6 +2668,7 @@ class StrategyManager:
             self._mark_watch_bought(stock_code)
         finally:
             self.pending.discard(stock_code)
+            self._pending_strategy.pop(stock_code, None)
 
     # ========================================
     # 워치리스트
@@ -2697,10 +2831,24 @@ class StrategyManager:
                         f"(가격 +{gross_rate*100:.2f}%)"
                     )
 
-        # 3) 시간정리 30분
+        # 3) 정체 정리 — 30분을 다 기다리지 않고 15분에 한 번 끊는다 (2026-08-01).
+        # 실측(07-28~31, 73건): '시간정리 30분' 7건이 슬롯·분의 25%를 먹고 평균
+        # -0.78%였고, ±0.5% 이내로 끝난 무의미 청산 14건이 185분(22%)을 점유했다.
+        # 반면 돈을 번 청산(익절+트레일링)은 슬롯·분의 19%만 썼다 — 슬롯의
+        # 기회비용을 생각하면 '아무 방향도 못 잡은 자리'를 오래 들고 있을 이유가
+        # 없다. 30분 컷은 최후 방어선으로 그대로 유지한다.
         if exit_reason is None:
-            if self._now() - pos["buy_time"] >= HOLDING_TIMEOUT:
+            held = self._now() - pos["buy_time"]
+            if held >= HOLDING_TIMEOUT:
                 exit_reason = f"시간정리 30분 (순 {net_rate*100:+.2f}%)"
+            elif (
+                held >= timedelta(minutes=DEAD_POSITION_MIN)
+                and abs(net_rate) <= DEAD_POSITION_BAND
+            ):
+                exit_reason = (
+                    f"정체 정리 {DEAD_POSITION_MIN}분 (순 {net_rate*100:+.2f}%, "
+                    f"±{DEAD_POSITION_BAND*100:.1f}% 밴드 — 슬롯 기회비용)"
+                )
 
         if exit_reason:
             self._execute_sell(stock_code, current_price, exit_reason)

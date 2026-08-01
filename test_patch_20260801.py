@@ -27,6 +27,7 @@ def check(name, cond, detail=""):
 # ─────────────────────────────────────────────────────────
 class _Repo:
     rows = []
+    sells = []
     @classmethod
     def find_holdings(cls): return []
     @classmethod
@@ -34,7 +35,7 @@ class _Repo:
     @classmethod
     def insert_buy(cls, **kw): cls.rows.append(kw); return len(cls.rows)
     @classmethod
-    def update_sell(cls, **kw): return True
+    def update_sell(cls, **kw): cls.sells.append(kw); return True
     @classmethod
     def add(cls, **kw): cls.rows.append(kw); return len(cls.rows)
     @classmethod
@@ -101,6 +102,7 @@ def build_strat(now_dt=datetime(2026, 8, 3, 9, 5, 0)):
     SM.ThemeManager = _Theme
     SM.send_telegram = None
     _Repo.rows = []
+    _Repo.sells = []
     ctrl = Phase1BController()
     strat = SM.StrategyManager(
         kiwoom_rest=_Rest(), order_manager=_OrderMgr(),
@@ -658,6 +660,173 @@ n = try_watchlist_reentry(s4, s4._now())
 check("REST 0콜 경로로도 1A 매수 성립", n == 1 and "FAST" in s4.holdings, f"n={n}")
 check("고속 경로 매수 시에도 분봉 조회 없음",
       len([c for c in s4.api.calls if c[0] == "candles"]) == 0, str(s4.api.calls))
+
+# ═════════════════════════════════════════════════════════
+print("\n[19] 시간대별 1A 캡 + 확장 슬롯 도달 가능성")
+# ═════════════════════════════════════════════════════════
+early = build_strat(datetime(2026, 8, 3, 9, 30, 0))
+late = build_strat(datetime(2026, 8, 3, 11, 0, 0))
+check("10:30 이전 1A 캡 = 3", early.phase1a_max_slots() == 3)
+check("10:30 이후 1A 캡 = 5 (노는 눌림 슬롯 흡수)", late.phase1a_max_slots() == 5)
+check("구조상 확장 슬롯 도달 가능해짐 (1A 5 + 눌림 3 = 8 > MAX_HOLDINGS 6)",
+      late.phase1a_max_slots() + SM.PULLBACK_MAX_SLOTS > SM.MAX_HOLDINGS)
+
+# ═════════════════════════════════════════════════════════
+print("\n[20] pending 오버부킹 방지")
+# ═════════════════════════════════════════════════════════
+s = build_strat()
+for i in range(5):
+    s.holdings[f"H{i}"] = {"buy_price": 1, "buy_quantity": 1, "buy_time": s._now(),
+                           "stock_name": "H", "highest_price": 1, "sub_strategy": "1A"}
+check("보유 5 -> 6번째 매수 가능", s.can_buy_more(None, "1A"))
+s.pending.add("PEND1")
+s._pending_strategy["PEND1"] = "1A"
+check("보유 5 + 매수진행중 1 = 6 -> 더 못 삼 (구버전은 통과)",
+      not s.can_buy_more(None, "1A"))
+check("occupied_slots가 보유+pending 합산", s.occupied_slots() == 6)
+check("전략별 카운트도 pending 포함", s.count_holdings_by_strategy("1A") == 6)
+s.pending.discard("PEND1"); s._pending_strategy.pop("PEND1")
+check("주문 종료 후 카운트 원복", s.occupied_slots() == 5)
+
+s2 = build_strat()
+s2.holdings["X1"] = {"buy_price": 1, "buy_quantity": 1, "buy_time": s2._now(),
+                     "stock_name": "X", "highest_price": 1, "sub_strategy": "1A"}
+s2.pending.add("X1")   # 매도 진행중
+check("매도 진행중(보유∩pending)은 중복 계산 안 함", s2.occupied_slots() == 1)
+
+# ═════════════════════════════════════════════════════════
+print("\n[21] candidate_tier — 자기 대비 정규화 (대형/소형 공평)")
+# ═════════════════════════════════════════════════════════
+s = build_strat()
+tfx = s.phase1b.trade_flow
+t0 = time.time()
+s.phase1b.start_watching("BIG")
+s.phase1b.start_watching("SMALL")
+# BIG: 절대 거래대금은 압도적이지만 120초 내내 균일 + 매수/매도 반반
+for i in range(40):
+    tfx.add_tick("BIG", 100_000, "buy" if i % 2 else "sell", 1_000, now=t0 - i * 3)
+# SMALL: 절대 규모는 1/10이지만 최근 30초에 몰리고 전부 매수
+for i in range(20):
+    tfx.add_tick("SMALL", 10_000, "sell", 100, now=t0 - 30 - i * 4.5)   # 과거 90초 잔챙이
+for i in range(10):
+    tfx.add_tick("SMALL", 10_000, "buy", 1_000, now=t0 - i * 3)         # 최근 30초 집중
+tier_big = s.candidate_tier("BIG")
+tier_small = s.candidate_tier("SMALL")
+check("절대 거래대금은 BIG이 훨씬 큼",
+      tfx.get_trade_value("BIG", 120) > tfx.get_trade_value("SMALL", 120) * 5)
+check("그래도 tier는 SMALL이 이김 (소형 급등주가 대형주에 안 밀림)",
+      tier_small > tier_big, f"BIG={tier_big:.2f} SMALL={tier_small:.2f}")
+check("균일·중립 종목의 tier는 1.0 근처", 0.7 < tier_big < 1.5, f"{tier_big:.2f}")
+s.phase1b.start_watching("THIN")
+tfx.add_tick("THIN", 10_000, "buy", 10_000, now=t0)
+check("틱 부족 종목은 tier=0 (판단 불가)", s.candidate_tier("THIN") == 0.0)
+check("감시 안 하는 종목도 tier=0", s.candidate_tier("NEVER") == 0.0)
+check("가속도: 균일하면 1.0 근처",
+      0.8 < tfx.value_acceleration("BIG", 30, 120) < 1.2,
+      f"{tfx.value_acceleration('BIG', 30, 120):.2f}")
+
+# ═════════════════════════════════════════════════════════
+print("\n[22] 종목 우선순위 — 슬롯 여유 시 '딜레이 0' 보장")
+# ═════════════════════════════════════════════════════════
+def make_1a_holding(st, code, buy_px, cur_px, age_sec=120, tier_ticks=True):
+    st.holdings[code] = {
+        "buy_price": buy_px, "buy_quantity": 1, "stock_name": code,
+        "buy_time": st._now() - timedelta(seconds=age_sec), "sub_strategy": "1A",
+        "highest_price": cur_px, "lowest_price": cur_px, "entry_strength": 150,
+        "warmup_until": st._now() - timedelta(seconds=1),
+    }
+    st.phase1b.start_watching(code)
+    if tier_ticks:   # 균일·약한 흐름 -> 낮은 tier
+        for i in range(40):
+            st.phase1b.trade_flow.add_tick(code, cur_px, "buy" if i % 2 else "sell",
+                                           10, now=time.time() - i * 3)
+
+# (a) 슬롯 여유 있음 -> tier 조회 자체를 안 한다
+s = build_strat(datetime(2026, 8, 3, 9, 30, 0))
+tier_calls = []
+orig_tier = s.candidate_tier
+s.candidate_tier = lambda c: (tier_calls.append(c), orig_tier(c))[1]
+s.phase1b.start_watching("FREE")
+s.phase1b.orderbook.update("FREE", {"ask_prices": [10_000, 10_010, 10_020],
+                                    "ask_volumes": [3_000, 3_000, 3_000]}, now=now)
+feed(s.phase1b.trade_flow, "FREE", 3, 30_000_000)
+s._cond_names["FREE"] = "주도주상위"
+s._evaluate_1a_pullback_entry("FREE", "FREE", 1, None, 10_000, 9_800,
+                              datetime(2026, 8, 3, 9, 30, 0).time())
+check("슬롯 여유 시 매수 성립", "FREE" in s.holdings)
+check("슬롯 여유 시 우선순위(tier) 계산을 아예 하지 않음 = 진입 지연 0",
+      tier_calls == ["FREE"], f"tier 호출: {tier_calls}")
+# ↑ entry_tier 기록용 1회만 (매수 확정 후), 판정용 호출은 0회
+
+# (b) 슬롯 만석 + 보유가 정체 상태 -> 교체
+s = build_strat(datetime(2026, 8, 3, 9, 30, 0))
+for i in range(3):
+    make_1a_holding(s, f"W{i}", 10_000, 10_000)     # 전부 flat(정체)
+s.phase1b.start_watching("HOT")
+for i in range(20):
+    s.phase1b.trade_flow.add_tick("HOT", 10_000, "sell", 10, now=time.time() - 30 - i * 4.5)
+for i in range(10):
+    s.phase1b.trade_flow.add_tick("HOT", 10_000, "buy", 3_000, now=time.time() - i * 3)
+before = len(s.holdings)
+swapped = s._try_1a_priority_upgrade("HOT", s.candidate_tier("HOT"))
+check("만석 + 정체 보유 -> 더 강한 후보로 교체 성립", swapped and len(s.holdings) == before - 1,
+      f"swapped={swapped}, 보유 {before}->{len(s.holdings)}")
+
+# (c) 보유가 이미 오르고 있으면 안 건드림
+s = build_strat(datetime(2026, 8, 3, 9, 30, 0))
+for i in range(3):
+    make_1a_holding(s, f"U{i}", 10_000, 10_300)     # +3% 상승 중
+    for j in range(6):   # 최신 체결가 = 10,300
+        s.phase1b.trade_flow.add_tick(f"U{i}", 10_300, "buy", 10, now=time.time() - j)
+s.phase1b.start_watching("HOT2")
+for i in range(20):
+    s.phase1b.trade_flow.add_tick("HOT2", 10_000, "sell", 10, now=time.time() - 30 - i * 4.5)
+for i in range(10):
+    s.phase1b.trade_flow.add_tick("HOT2", 10_000, "buy", 3_000, now=time.time() - i * 3)
+swapped = s._try_1a_priority_upgrade("HOT2", s.candidate_tier("HOT2"))
+check("수익 중인 포지션은 tier가 낮아도 절대 교체 대상 아님", not swapped)
+
+# (d) tier 판단 불가 후보는 남의 슬롯을 빼앗지 못함
+s = build_strat(datetime(2026, 8, 3, 9, 30, 0))
+for i in range(3):
+    make_1a_holding(s, f"V{i}", 10_000, 10_000)
+check("tier=0(판단 불가) 후보는 교체 시도 안 함",
+      not s._try_1a_priority_upgrade("UNKNOWN", 0.0))
+
+# (e) 최소 보유시간 미달 포지션 보호
+s = build_strat(datetime(2026, 8, 3, 9, 30, 0))
+make_1a_holding(s, "NEW", 10_000, 10_000, age_sec=5)
+check("매수 5초 지난 포지션은 교체 대상에서 제외(수수료 낭비 방지)",
+      not s._try_1a_priority_upgrade("HOT3", 99.0))
+
+# ═════════════════════════════════════════════════════════
+print("\n[23] 정체 포지션 15분 조기 정리")
+# ═════════════════════════════════════════════════════════
+def dead_pos(st, code, held_min, net_pct):
+    px = 10_000
+    cur = int(px * (1 + net_pct / 100 + SM.ROUND_TRIP_COST))
+    st.holdings[code] = {
+        "trade_id": 1, "buy_price": px, "buy_quantity": 1, "stock_name": code,
+        "buy_time": st._now() - timedelta(minutes=held_min), "sub_strategy": "1A",
+        "highest_price": cur, "lowest_price": cur,
+        "warmup_until": st._now() - timedelta(seconds=1), "entry_strength": 0,
+    }
+    st.on_price_update(code, cur)
+    return code in st.holdings
+
+s = build_strat()
+check("15분 경과 & ±0.5% 이내 -> 정체 정리로 청산", not dead_pos(s, "D1", 16, 0.1))
+check("청산 사유가 '정체 정리'로 DB에 기록",
+      any("정체 정리" in str(r.get("exit_reason", "")) for r in _Repo.sells),
+      str([r.get("exit_reason") for r in _Repo.sells]))
+s = build_strat()
+check("15분 경과했지만 +1.2% -> 유지(익절 캡이 담당)", dead_pos(s, "D2", 16, 1.2))
+s = build_strat()
+check("15분 경과했지만 -1.5% -> 유지(손절이 담당)", dead_pos(s, "D3", 16, -1.5))
+s = build_strat()
+check("10분밖에 안 됐으면 정체여도 유지", dead_pos(s, "D4", 10, 0.1))
+s = build_strat()
+check("30분 초과는 기존 시간정리로 청산", not dead_pos(s, "D5", 31, 1.0))
 
 # ═════════════════════════════════════════════════════════
 print("\n" + "=" * 60)
