@@ -77,12 +77,44 @@ class TradingBot:
         self._orphan_notified: set[str] = set()  # 유령 포지션 알림 중복 방지 (2026-08-01)
         self._last_signal_time = time.time()  # task_signal_watchdog와 WS 재연결 핸들러가 공유
 
+        # ── 종가베팅 전용 조건검색식 (2026-08-02 신규) ───────────────
+        # 장중 3개 검색식(주도주상위/눌림목자동/돌파자동매매용)은 '급등·눌림'을
+        # 고르는 스크린이라 오버나이트 보유에는 성질이 반대다(실측: 07-28~31
+        # 후보 6종목 중 5개가 코스닥 중소형, 그중 폴라리스AI는 장중 유동성
+        # 필터로 걸러내던 종목이었다). 그래서 종가베팅은 자체 검색식을 쓴다.
+        #
+        # ⚠️ 이 seq는 **매매 라우팅에 절대 넣지 않는다**. CONDITION_NAMES에
+        # 그냥 추가하면 resolve_strategy가 "둘 다 아님 -> 1A" 폴백으로 처리해
+        # 장중 1A 매수 후보가 되어버린다(strategy_manager.resolve_strategy 참고).
+        # _on_signal에서 이 seq를 먼저 걸러내고 on_condition_hit을 아예 안 부른다.
+        self._closing_bet_seq: str = ""
+        self._closing_bet_codes: set[str] = set()
+
     async def setup(self):
         logger.info("=" * 60)
         logger.info("자동매매 봇 시작")
         logger.info(f"   모드: {'모의투자' if settings.IS_MOCK else '실전'}")
         logger.info(f"   조건식: {settings.CONDITION_NAMES}")
         logger.info("=" * 60)
+
+        # 낡은 STOP_SIGNAL 정리 (2026-08-02 신규).
+        # 이 파일은 '지금 돌고 있는 봇을 세우라'는 일회성 트리거인데,
+        # 봇이 이미 죽은 뒤에 만들어지면 아무도 소비하지 않고 그대로 남는다.
+        # 그 상태로 다음날 08:59 스케줄러가 봇을 띄우면
+        # task_stop_signal_watcher가 5초 안에 감지해서 **기동 즉시 종료**시킨다
+        # (무인 기동이라 아무도 모른 채 하루 매매가 통째로 사라진다).
+        # 실제로 2026-08-02에 13:59 정상종료 후 14:14에 만들어진 고아 파일이
+        # 남아 있는 것을 발견했다. 기동 시점의 신호는 정의상 '이전 세션의
+        # 잔재'이므로 여기서 지우고 시작한다.
+        _stale_stop = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "STOP_SIGNAL"
+        )
+        if os.path.exists(_stale_stop):
+            try:
+                os.remove(_stale_stop)
+                logger.warning("⚠️ 낡은 STOP_SIGNAL 발견 — 이전 세션 잔재로 보고 삭제 후 기동")
+            except Exception:
+                logger.exception("낡은 STOP_SIGNAL 삭제 실패 — 기동 직후 종료될 수 있음")
 
         self.token = get_access_token()
         if not self.token:
@@ -156,6 +188,21 @@ class TradingBot:
                 logger.info(f"   '{name}' -> seq={seq}")
             else:
                 logger.warning(f"   '{name}' 조건식 없음")
+
+        # 종가베팅 전용 검색식 — 구독은 하되 매매 라우팅에는 넣지 않는다.
+        # 이름이 비어있거나 HTS에 없으면 seq가 안 잡히고, 그러면 스캐너가
+        # 기존 _cond_names 폴백으로 조용히 되돌아간다(기능 무력화 없음).
+        cb_name = getattr(settings, "CLOSING_BET_CONDITION_NAME", "") or ""
+        if cb_name:
+            cb_seq = name_to_seq.get(cb_name)
+            if cb_seq:
+                await self.ws.subscribe_condition(cb_seq)
+                self._closing_bet_seq = str(cb_seq)
+                logger.info(f"   '{cb_name}' -> seq={cb_seq} (종가베팅 전용, 매매 라우팅 제외)")
+            else:
+                logger.warning(
+                    f"   '{cb_name}' 종가베팅 조건식 없음 — 기존 장중 검색식 유니버스로 폴백"
+                )
 
         if not settings.CONDITION_NAMES and settings.CONDITION_NOS:
             for seq in settings.CONDITION_NOS:
@@ -324,6 +371,26 @@ class TradingBot:
     async def _on_signal(
         self, stock_code: str, signal_type: str, raw: dict = None, cond_seq: str = None
     ):
+        # ── 종가베팅 전용 검색식은 매매 경로에 절대 들어가지 않는다 ──────
+        # (2026-08-02) 여기서 **가장 먼저** 갈라낸다. 아래 기존 흐름은 한 줄도
+        # 건드리지 않으므로 장중 1A/Pullback 진입 로직에 영향이 없다.
+        # CONDITION_NAMES에 그냥 넣으면 resolve_strategy의 "둘 다 아님 -> 1A"
+        # 폴백에 걸려 장중 매수 후보가 되어버린다.
+        if self._closing_bet_seq and str(cond_seq or "") == self._closing_bet_seq:
+            if signal_type == "I":
+                self._closing_bet_codes.add(stock_code)
+            else:
+                # 이탈 — 14:50 시점 멤버십이 정확해야 하므로 빼준다.
+                # (조건식의 등락률/고가대비/볼밴은 장중 계속 변하므로
+                #  '하루 동안 한 번이라도 걸린 종목'을 누적하면 안 된다.)
+                self._closing_bet_codes.discard(stock_code)
+            logger.info(
+                "🔔 종가베팅 검색식 %s: %s (현재 %d종목, 매매 라우팅 제외)",
+                "편입" if signal_type == "I" else "이탈",
+                stock_code, len(self._closing_bet_codes),
+            )
+            return
+
         if signal_type == "I":
             self._signal_stats["insert"] += 1
             self._signal_stats["buy_attempted"] += 1
@@ -780,10 +847,26 @@ class TradingBot:
 
                 strat = self.strategy_mgr
                 candidates = {}
-                # 오늘 조건검색에 한 번이라도 걸렸던 종목 전체 대상 (2026-07-28:
-                # 거래대금 폭발 이력 준비를 on_condition_hit에서 여기로 이관 —
-                # 하루종일 매번 계산하지 않고 실제 필요한 이 시점에 1회만 계산)
-                target_codes = list(strat._cond_names.keys())
+                # 대상 유니버스 (2026-08-02 변경):
+                #   1순위 — 종가베팅 전용 검색식의 **현재** 멤버십
+                #   폴백  — 기존처럼 오늘 장중 검색식에 걸렸던 종목 전체
+                #
+                # 전용 검색식으로 바꾼 이유(실측): 기존 유니버스는 장중 급등/눌림
+                # 스크린의 출력이라 오버나이트 보유와 성질이 반대다. 07-28~31
+                # 실제 후보 6종목 중 5개가 코스닥 중소형이었고, 그중 폴라리스AI는
+                # 장중엔 저유동성으로 걸러내던 종목이다. 특히 '눌림목자동'은
+                # 정의상 고가 대비 되돌린 종목이라, 종가베팅이 원하는 '고가 근처
+                # 마감'과 정면으로 어긋난다.
+                # 폴백을 남기는 이유: HTS에 검색식을 아직 안 만들었거나 이름이
+                # 바뀌면 seq가 안 잡히는데, 그때 조용히 0종목이 되면 안 된다.
+                universe_src = "종가베팅 전용 검색식"
+                target_codes = sorted(self._closing_bet_codes)
+                if not target_codes:
+                    universe_src = "폴백(장중 검색식 전체)"
+                    target_codes = list(strat._cond_names.keys())
+                logger.info(
+                    "🔔 [종가베팅] 유니버스 %d종목 — %s", len(target_codes), universe_src
+                )
 
                 def _evaluate_one(code: str):
                     # 영속 캐시 경유 (2026-07-31) — 어제까지의 분봉은 변하지 않으므로
@@ -821,8 +904,9 @@ class TradingBot:
 
                 st = cache_stats()
                 logger.info(
-                    "🔔 [종가베팅] 평가 완료 %d종목 (히스토리 캐시 %d파일 %.1fMB)",
-                    len(target_codes), st["files"], st["bytes"] / 1024 / 1024,
+                    "🔔 [종가베팅] 평가 완료 %d종목 / 적격 %d종목 (%s, 캐시 %d파일 %.1fMB)",
+                    len(target_codes), len(candidates), universe_src,
+                    st["files"], st["bytes"] / 1024 / 1024,
                 )
 
                 ranked = sorted(
@@ -833,9 +917,15 @@ class TradingBot:
                     logger.info("🔔 [종가베팅] 후보 없음")
                     continue
 
-                lines = ["🔔 종가베팅 후보 TOP 10", ""]
+                # 헤더에 실제 건수를 쓴다 — "TOP 10"으로 고정돼 있었는데 실측
+                # 산출은 하루 1~2건이라(07-28 1 / 07-29 1 / 07-30 2 / 07-31 2)
+                # 제목만 보고 10종목이 나온 줄 오해하기 쉬웠다.
+                lines = [f"🔔 종가베팅 후보 {len(ranked)}종목 (유니버스 {len(target_codes)})", ""]
                 for i, (code, r) in enumerate(ranked, 1):
-                    name = strat._stock_names.get(code, code)
+                    # 종가베팅 전용 검색식 종목은 on_condition_hit을 안 거치므로
+                    # strat._stock_names에 이름이 없다. 여기서 1회 조회한다
+                    # (하루 1회, 최대 10종목이라 REST 부담 없음).
+                    name = strat._stock_names.get(code) or self._fetch_stock_name(code)
                     lines.append(
                         f"{i}. {name}({code}) | 점수 {r['closing_score']:.1f} | "
                         f"surge {r['surge_ratio']:.2f}배 | 양봉비율 {r['bullish_ratio']*100:.0f}%"
