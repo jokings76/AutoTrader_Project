@@ -671,6 +671,26 @@ check("Pullback 시간창 상수가 09:25~14:50",
 check("Phase1BController docstring이 '데이터 파이프라인'임을 명시",
       "파이프라인" in (Phase1BController.__doc__ or ""))
 
+# (2026-08-02) 코드가 실제로 생성하는 탈락 사유가 전부 분류되는지 —
+# 새 사유 문자열을 만들고 _REJECT_RULES를 안 고치면 "기타"로 뭉개져
+# 장중 진단이 무력해진다. 라이브 경로(호출부가 있는 함수)만 검사한다.
+_LIVE_REJECTS = [
+    "체결강도 미무장 (100 이상 1.2/3초 연속)",
+    "대량체결 부족 (최근 5초: 3000만원+ 0/2건)",
+    "시가대비 +6.1% >= 5% — 눌림 가능성으로 매수 보류",
+    "지수 -5% 초과로 인한 전면 매매 중단",
+    "체결강도 데이터 소스 없음(phase1b 미연결)",
+    "버스트 계산 실패",
+]
+_uncat = [r for r in _LIVE_REJECTS
+          if SM.StrategyManager._reject_category(r) == "기타"]
+check("라이브 탈락 사유가 전부 분류됨('기타' 뭉개짐 없음)", not _uncat, str(_uncat))
+
+# check_burst 예외는 '정상 필터링'이 아니라 코드 이상이므로 인프라 경고로 떠야 한다.
+_cat = SM.StrategyManager._reject_category("버스트 계산 실패")
+check("버스트 계산 실패가 인프라 이상으로 분류됨",
+      _cat in SM.StrategyManager._REJECT_INFRA, _cat)
+
 # ═════════════════════════════════════════════════════════
 print("\n" + "=" * 60)
 print(f"통과 {len(PASS)}건 / 실패 {len(FAIL)}건")
