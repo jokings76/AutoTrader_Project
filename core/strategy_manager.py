@@ -1,19 +1,27 @@
 """
-매매 전략 매니저 — 1A/Pullback/1B/1L 통합 + 하이브리드 청산 + 동적 비중 + 수수료 반영
+매매 전략 매니저 — 1A/Pullback 2전략 + 하이브리드 청산 + 동적 비중 + 수수료 반영
 (2026-07-27 재설계: 1S/1N/Phase2/Phase3 삭제, 슬롯 구조 개편)
-(2026-07-31 재설계: 1A는 체결강도 단독 즉시진입으로 단순화, 1L은 1A와 설계
-중복이라 주석처리, 1B는 WallDetector(매도벽 FSM) 제거하고 가격 하락폭
-트리거+확증게이트만 남김 — 근거는 각 상수 정의부 주석 참고)
+(2026-08-02 정리: 1B/1L 코드 완전 제거 — 아래 "삭제된 전략" 참고)
 
-시간대 (2026-08-01 개편 — 1B 비활성화, 전략 2개 체제):
+시간대 (전략 2개 체제):
   1A       (09:00 ~ 14:50): 체결강도 100 이상 3초 유지 + 대량체결 버스트 -> 즉시매수
-                            (evaluate_1a_leading_strength). 주문은 호가 두께로
+                            (_maybe_tick_entry). 주문은 호가 두께로
                             지정가/시장가 자동 선택.
-  Pullback (09:25 ~ 14:50): 눌림목 반등 점수 + VWAP AND. 중단시각은 1A와 동일.
+  Pullback (09:25 ~ 14:50): 1A와 동일한 틱 트리거. 유니버스/슬롯/상한/익절캡만 다름.
   보유분 청산: 15:10 (FORCE_CLOSE_TIME) 전량 강제청산.
-  1B       [2026-08-01 비활성화] PHASE1B_ENABLED=False — 1A와 트리거 방향이
-                            정반대라 동시 적용 시 진입이 오락가락. 코드는 보존.
-  1L       [2026-07-31 주석처리] 1A(체결강도 단독)와 설계 중복 — on_trade 참고
+
+⚠️ 삭제된 전략 (2026-08-02, 사용자 지정 — 되살릴 일이 있으면 git 히스토리 참고):
+  1B  체결강도 FSM(매도벽 -> 하락 트리거 -> 반등확증). 2026-08-01에
+      PHASE1B_ENABLED=False로 비활성화한 뒤 한 달 가까이 죽은 코드였고,
+      1A와 트리거 방향이 정반대(1A=매수세 폭발 / 1B=60초 -2% 급락)라
+      되살릴 계획도 없어 제거. 마지막 살아있던 커밋: 900757c.
+  1L  주도테마 + 체결강도 100 2분 지속. 새 1A(강도 100 **3초**)와 설계가
+      겹쳐 1A가 항상 먼저 사가는 구조라 2026-07-31부터 죽어 있었음.
+      "주도테마" 축은 버리지 않았다 — 매수 **전** 게이트가 아니라 매수 **후**
+      동적 익절캡 가산점으로 살아 있다(on_price_update의 is_leading 참고).
+  ※ phase1b 컨트롤러 **객체**는 전략이 아니라 1A/Pullback의 체결틱·호가
+    데이터 파이프라인이므로 그대로 유지된다. 이름만 1B다 — 없애면 두 전략이
+    눈이 먼다. (core/phase1b_controller.py 최상단 주석 참고)
 
 전략 라우팅 (2026-08-01, 종목당 항상 한 전략만 — resolve_strategy 참고):
   눌림목자동 단독            -> Pullback 전용
@@ -22,15 +30,11 @@
   진입 근거가 항상 하나로 고정되고, 중복 종목만 시간대에 따라
   유리한 쪽(오전 모멘텀 / 오후 되돌림)이 가져간다.
 
-슬롯: 1A/Pullback/1L/1B 각각 자체 상한 3개 + 전체 합산 상한 6개(MAX_HOLDINGS) 공유.
-      1B는 실시간 틱 콜백에서 즉시 매수(우선권), 1A/Pullback은 조건검색 이벤트 경로.
+슬롯: 1A/Pullback 각각 자체 상한 4개 + 전체 합산 상한 6개(MAX_HOLDINGS) 공유.
 
 청산:
   손절 -3%(가격) / 익절 +2.5%(순수익) / 시간정리 30분
-  트레일링은 1L(주도주)에만 적용, 1A/Pullback/1B는 항상 flat 익절캡
-
-진입 (점수 기반 — scoring.py 위임):
-  score_phase1/pullback 이 하드 AND 대신 가중 점수로 통과 판정.
+  익절은 전 전략 flat 캡 — 트레일링은 1L 전용이었으므로 1L과 함께 제거됨.
 """
 
 import threading
@@ -41,7 +45,6 @@ from typing import Optional
 
 from .theme_manager import ThemeManager
 from core.strategy.indicators import is_volume_increasing_streak, obv_momentum
-from core.strategy.chemul_evaluator import ChemulState
 from core.strategy.trade_flow import STRENGTH_NEUTRAL
 from core.strategy.scoring import (
     ScoreConfig,
@@ -72,7 +75,7 @@ ROUND_TRIP_COST = 0.0023  # 왕복 수수료 및 세금
 # -------------------------------------------------
 # ★ Phase 설정 파일 연동 (이제 수치 수정은 phase_settings.py 에서 합니다)
 # -------------------------------------------------
-from config.phase_settings import COMMON, PHASE_1A, PHASE_1B
+from config.phase_settings import COMMON, PHASE_1A
 from config.phase_settings import EXIT_POLICY
 
 # 1A/Pullback 공통 시간 윈도우 — 09:00 장 시작 즉시부터(2026-07-31, 기존 09:01에서
@@ -117,11 +120,8 @@ DUAL_SOURCE_PULLBACK_FROM = time(10, 30)
 # 대량체결 게이트가 이미 담당하므로 시간으로 또 막을 근거가 없어 제거한다.
 # (상수는 남겨두지 않는다 — 참조가 사라진 시간 상수는 나중에 "왜 안 걸리지"
 #  하고 다시 붙일 위험이 있어 흔적을 남기지 않는 편이 안전하다.)
-# 1L(주도주) 시간 윈도우 — 09:00 장 시작 즉시부터 감시(2026-07-31, 기존 09:01에서
-# 1분 앞당김). 1L은 REST 분봉이 아니라 실시간 체결 틱(on_trade)만으로 판정하므로
-# 09:00 정각부터도 데이터 공백 없이 그대로 동작.
-LEADING_START = time(9, 0)
-LEADING_END = time(10, 50)
+# [2026-08-02 제거] 1L(주도주) 시간 윈도우 LEADING_START/LEADING_END —
+# 1L 전략 삭제와 함께 제거. GROUP_A_START(09:00)가 그 역할을 대신한다.
 
 # 진입 조건 (Phase 1A 설정값 사용)
 SURGE_THRESHOLD = PHASE_1A["surge_threshold"]
@@ -143,11 +143,10 @@ PHASE1A_SCORE_CAUTION_BONUS = 1.0
 # 처음엔 주도주상위 소스에만 적용했으나(HTS가 이미 강한 종목만 골라 넘겨주니
 # 그 위에 거래량증가지속/테마 요구사항을 또 얹지 않는다는 취지), 같은 논리로
 # 돌파자동매매용까지 확장 — 조건검색식 소스 구분 없이 1A 전체가 이제 체결강도
-# 하나만 짧게(1분) 확인해서 즉시매수한다. 1L(테마리더+강도100 2분)과 사실상
-# 겹친다는 점 인지: 1분<2분이라 이 경로가 1L보다 먼저 사가게 된다 — 그래서
-# 1L은 이번에 통째로 주석처리(on_trade 참고). 거래량/MA/양봉 등 품질필터가
-# 전부 빠지는 트레이드오프를 사용자가 인지하고 수용함(핵심 목표는 "고가 아닌
-# 트리거 지점에서 매수").
+# 하나만 짧게 확인해서 즉시매수한다. 이 경로가 1L(테마리더+강도100 2분)과
+# 사실상 겹쳤고(짧은 쪽이 항상 먼저 사감) 그래서 1L은 2026-07-31에 죽고
+# 08-02에 삭제됐다. 거래량/MA/양봉 등 품질필터가 전부 빠지는 트레이드오프를
+# 사용자가 인지하고 수용함(핵심 목표는 "고가 아닌 트리거 지점에서 매수").
 PHASE1A_LEADING_STRENGTH_MIN = 100.0
 # (2026-08-01 사용자 지정) 60초 -> 3초. "트리거 지점에서 사자"는 목표에 60초
 # 유지는 너무 느리다는 판단. 대신 아래 대량체결 버스트 조건을 AND로 걸어서
@@ -376,20 +375,22 @@ SEVERE_CRASH_ENTRY_CUTOFF = time(11, 0)
 # 청산 정책 (EXIT_POLICY 딕셔너리에서 가져옴)
 TAKE_PROFIT_CAP = EXIT_POLICY["default"]["take_profit_cap"]
 STOP_LOSS_RATE = EXIT_POLICY["default"]["stop_loss_rate"]
-TRAIL_ACTIVATE = EXIT_POLICY["default"]["trail_activate"]
-TRAIL_GIVEBACK = EXIT_POLICY["default"]["trail_giveback"]
 HOLDING_TIMEOUT = timedelta(minutes=EXIT_POLICY["default"]["holding_timeout_min"])
+# [2026-08-02 제거] TRAIL_ACTIVATE / TRAIL_GIVEBACK — 트레일링 익절은
+# `sub_strategy == "1L"`이 유일한 진입점이었고, 1L 삭제로 도달 불가가 됐다.
+# 지금 익절은 전 전략 flat 캡(1.5% / 2.5% + 동적 상향)으로 통일돼 있다.
+# EXIT_POLICY["default"]에는 trail_activate/trail_giveback 키가 그대로 남아
+# 있으므로, 되살릴 때는 여기서 다시 읽어오면 된다.
 
 # 전략/시간대별 익절 캡 (2026-07-30 사용자 지정) — 손절(-3%)은 전부 그대로 유지.
 # 1B/Pullback은 짧은 반등을 노리는 전략이라 기본 2.5%까지 기다리다 되돌림에
 # 물리는 경우가 많았고, 개장 직후 10분은 변동성이 커서 빠른 확정이 유리하다는
 # 판단. 익절 캡은 "매수 시점"으로 결정해 포지션 보유 중에 정책이 바뀌지 않게 한다
 # (09:09에 산 종목이 09:11에 기준이 올라가면 판단이 흔들리므로).
-TAKE_PROFIT_CAP_1B = 0.015
+# (2026-08-02) TAKE_PROFIT_CAP_1B는 1B 삭제와 함께 제거 — 값은 Pullback과 같았다.
 TAKE_PROFIT_CAP_PULLBACK = 0.015
 TAKE_PROFIT_CAP_EARLY = 0.015
 EARLY_WINDOW_END = time(9, 10)  # GROUP_A_START~이 시각 사이 매수분은 1.5%
-                                # (1L도 포함 — 이 구간은 트레일링 대신 flat 1.5%)
 
 # ── 동적 익절캡 (2026-07-30 사용자 지정) ───────────────────────
 # 1.5%캡 종목이 보유 중 체결강도 상승을 보이면 캡을 2.5%로 올려 더 태우고,
@@ -470,7 +471,6 @@ SLOT_EXPANSION_WAIT_SEC = 90        # 슬롯 만석이 이 시간 이상 지속�
 # 한 전략이 6칸을 독식하는 일은 여전히 불가능하다(캡 4).
 PHASE1A_MAX_SLOTS = 4
 PULLBACK_MAX_SLOTS = 4
-PHASE1B_MAX_SLOTS = PHASE_1B["max_slots"]
 
 # ⚠️ [미사용, 2026-08-02] 옛 watch_candidates 큐(1N 눌림목) 시절의 잔재.
 # 그 전략은 2026-07-27에 삭제됐고 지금 감시 목록은 watch_list_today +
@@ -478,81 +478,27 @@ PHASE1B_MAX_SLOTS = PHASE_1B["max_slots"]
 MAX_WATCH_SLOTS = 10
 WATCH_TIMEOUT = timedelta(minutes=10)
 
-# 주도주 우선 진입 (주도테마 + 체결강도 100 이상 2분 지속)
-LEADING_MAX_SLOTS = 3
-LEADING_STRENGTH_MIN = 100.0
-LEADING_SUSTAIN = timedelta(minutes=2)
+# [2026-08-02 제거] 1L 슬롯/임계값 상수(LEADING_MAX_SLOTS/STRENGTH_MIN/SUSTAIN).
 
-# ── 1B 전면 비활성화 (2026-08-01, 사용자 지정) ─────────────────────
-# "1A와 1B 동시 적용 시 애매한 부분이 있다" — 실제로 두 전략이 같은 후보 풀
-# (조건검색 편입 종목)과 같은 데이터 소스(TradeFlowTracker)를 공유하면서
-# 정반대 방향을 본다: 1A는 '지금 매수세가 터진다'에 사고, 1B는 '60초 내
-# -2% 밀렸다'에 산다. 같은 종목이 같은 시각에 두 전략의 트리거를 번갈아
-# 만족하면 진입 타이밍이 오락가락하고, 어느 로직이 그 자리를 만들었는지
-# 사후 분석도 불가능해진다. 그래서 1B는 통째로 끄고 1A 하나만 남긴다.
+# ── 1B 전략 삭제 (2026-08-02, 사용자 지정) ─────────────────────────
+# 2026-08-01에 PHASE1B_ENABLED=False로 비활성화한 뒤 실제로 한 번도 켜지
+# 않았고, 되살릴 계획도 없어 관련 코드/상수를 전부 제거했다.
 #
-# 삭제하지 않고 이 플래그 하나로 끈다 — 되살리려면 True로만 바꾸면 되고,
-# 관련 코드(_try_phase1b_buy / _check_1b_confirmations / on_trade의 하락
-# 트리거 / tick()의 확증 점검)는 전부 이 플래그로 가드되어 있다.
-# phase1b 컨트롤러 객체 자체는 계속 살아있다 — 이제 1B 전략이 아니라
-# **1A의 체결틱/호가 데이터 파이프라인**으로 쓰이기 때문(TradeFlowTracker,
-# OrderbookTracker). 이 객체를 없애면 1A가 눈이 먼다.
-PHASE1B_ENABLED = False
-
-# ── 1B 진입 트리거 재설계 (2026-07-31, 사용자 지정 "수술") ──────────
-# 기존엔 WallDetector(호가 1~2단 매도잔량 감시)의 5단계 FSM(눌림→벽등장→
-# 벽축소+강도상승→벽소실)을 거쳐야 확증게이트로 넘어갔는데, 이 FSM을 통째로
-# 제거하고 "가격이 60초 내 PHASE1B_PULLBACK_PCT 이상 하락"만으로 바로
-# 확증게이트(아래 PHASE1B_CONFIRM_WAIT)로 직행한다. 근거:
-#   ① WallDetector 파라미터(detect_multiplier=5.0/shrink_ratio=0.7/
-#      disappear_ratio=0.2)는 코드 도입 시점부터 "TBD: 실데이터로 튜닝"이라고
-#      명시된 placeholder였고, 이후 한 번도 튜닝된 적이 없었다.
-#   ② 호가 잔량 이력은 어느 데이터 공급자(대신증권 포함)로도 영구 조회 불가
-#      (거래소가 소매용으로 아카이브를 안 함) — 즉 이 필터는 원리상 백테스트
-#      검증이 영원히 불가능하다.
-#   ③ FSM 자체가 지연의 큰 축이었다(413630 실사례: 확증게이트 전 FSM 단계에서만
-#      19분 소요, 총 지연 20분 중 대부분).
-#   ④ 반면 확증게이트(가격/캔들 데이터만 사용)는 07-30 백테스트로 이미 검증됨
-#      (진입 37→14건, 승률 29.7%→50.0%) — 그 검증된 부분만 남기고 검증 불가능한
-#      부분(WallDetector)을 걷어낸 것.
-# PHASE1B_PULLBACK_PCT 재조정 근거: 기존 -1.5%는 같은 이유로 미검증 placeholder
-# 였음. 오늘(07-31) 실데이터로 -1.0/-1.5/-2.0/-2.5/-3.0% 5개 후보를 확증게이트와
-# 묶어 재생한 결과 하락폭이 깊을수록 단조롭게 개선됐다:
-#   -1.0%: 35건 승률54.3% 평균-0.030% | -1.5%(기존): 19건 승률57.9% 평균-0.220%
-#   -2.0%: 9건 승률77.8% 평균+1.261% | -2.5%: 4건 승률100% 평균+2.145%(표본 작음)
-# -2.0%를 채택 — 표본이 -2.5%/-3.0%보다 커서(9건) 상대적으로 더 신뢰할 만하고,
-# 단조 개선 추세의 중간 지점이라 표본이 작은 극단값에 과최적화됐을 위험이
-# -2.5% 이상보다 낮다고 판단. **표본이 하루치(35종목)뿐이라는 한계는 명확히
-# 인지할 것** — 내일 이후 실거래로 반드시 재검증.
-PHASE1B_PULLBACK_PCT = -2.0
-PHASE1B_PULLBACK_WINDOW_SEC = 60
-
-# ── 1B 반등확증 (2026-07-30 신규) ──────────────────────────────
-# 1B FSM은 "60초 내 -1.5% 하락"을 진입 요건으로 요구하는 역추세 전략인데,
-# 매도벽 소실 '즉시' 매수해서 하락 중 반복 진입(칼날잡기)이 발생했음.
-# 07-29+07-30 실거래 37건의 진입 후 분봉 경로를 재생해 확증규칙 10종을
-# 백테스트한 결과, "신호봉 고가를 1분봉 종가로 돌파"가 가장 강건했음:
-#   진입 37 -> 14건, 건당 평균 -1.33% -> -0.33%, 승률 29.7% -> 50.0%
-#   (07-29 -1.44%->-0.27%, 07-30 -0.83%->-0.48% — 양일 모두 개선)
-# 손절/익절 표면도 매끄러운 단조 형태로 과최적화 징후가 없었고, 같은 봉에서
-# 손절/익절 동시 도달 시 손절 우선으로 계산한 보수적 가정이었음.
-# 경제적 의미: "떨어진 자리를 회복해야 산다" — 반등을 가격으로 확인.
-PHASE1B_CONFIRM_WAIT = timedelta(minutes=5)   # 이 시간 내 미돌파면 매수 포기
-PHASE1B_CONFIRM_CHECK_SEC = 55                # 1분봉 종가 기준이라 분당 1회만 확인(REST 절약)
-
-# ── 1B 확증 슬리피지 축소 (2026-07-31) ──────────────────────────
-# 07-31 실거래 재현: 확증 성립 5건의 실제 매수가가 기준선(ref_high) 대비
-# +0.15%~+1.72% 더 비쌌고, 대기시간은 57~125초였음. 원인은 확증 '규칙'
-# 자체(완성봉 종가 돌파)가 아니라, REST 완성봉 폴링을 55초 간격으로만 하는
-# '감지 지연'이었음 — 확증 규칙(R2)은 07-30 백테스트로 검증된 값이라 그대로
-# 유지하고, 감지 지연만 없앤다. 무료인 실시간 체결가(TradeFlowTracker,
-# 이미 FSM이 켜둔 tick 구독으로 공짜로 들어옴)로 먼저 기준선 돌파 여부를
-# 확인해서, 아직 안 넘었으면 REST 호출 자체를 생략(429 예산도 기존보다 아낌
-# — 기존엔 넘었든 안 넘었든 55초마다 무조건 폴링). 넘었을 때만 아래 값
-# 간격으로 REST를 조회해 '완성봉 종가' 확정 여부를 검증 — 확증의 질(완성봉
-# 종가 기준)은 그대로, 알아채는 속도만 tick() 주기(10초) 수준으로 빨라짐.
-PHASE1B_CONFIRM_TICK_PRECHECK = True
-PHASE1B_CONFIRM_REST_GAP_SEC = 12             # 기준선 돌파 후 REST 재확인 최소 간격
+# 비활성화 당시의 판단 근거(보존): 1A와 1B가 같은 후보 풀(조건검색 편입
+# 종목)과 같은 데이터 소스(TradeFlowTracker)를 공유하면서 정반대 방향을
+# 본다 — 1A는 '지금 매수세가 터진다'에 사고, 1B는 '60초 내 -2% 밀렸다'에
+# 산다. 같은 종목이 두 트리거를 번갈아 만족하면 진입 타이밍이 오락가락하고
+# 어느 로직이 그 자리를 만들었는지 사후 분석도 불가능해진다.
+#
+# 삭제된 것: PHASE1B_ENABLED / PHASE1B_MAX_SLOTS / PHASE1B_PULLBACK_PCT /
+#   PHASE1B_PULLBACK_WINDOW_SEC / PHASE1B_CONFIRM_* / TAKE_PROFIT_CAP_1B,
+#   _try_phase1b_buy / _check_1b_confirmations / can_buy_phase1b / _1b_confirm,
+#   on_trade의 하락 트리거, WallDetector·ChemulEvaluator 배선.
+#   되살릴 일이 있으면 커밋 900757c를 참고할 것(파라미터 근거 주석 포함).
+#
+# ⚠️ phase1b **컨트롤러 객체**는 삭제하지 않았다 — 이제 1B 전략이 아니라
+# 1A/Pullback의 체결틱·호가 데이터 파이프라인(TradeFlowTracker,
+# OrderbookTracker)이기 때문이다. 없애면 두 전략이 눈이 먼다.
 
 # MDD 일손실 차단
 DAILY_LOSS_LIMIT = COMMON["mdd_daily_loss_limit"]
@@ -615,31 +561,12 @@ class StrategyManager:
         )  # 거래대금 폭발 이력 스코어러 (2026-07-26)
 
         # 주도테마 초기화 (등락률 기반, 2026-07-06 재설계)
+        # ⚠️ 1L 전략은 삭제됐지만 theme_mgr은 계속 살아있다 — 이제 매수 "전"
+        # 게이트가 아니라 매수 "후" 동적 익절캡 가산점으로 쓰인다
+        # (on_price_update의 is_leading 참고).
         self.theme_mgr = ThemeManager(rest_api=kiwoom_rest)
         self.theme_mgr.fetch_themes_from_github()
         self.theme_mgr.start_auto_update()
-        # 1L(주도주) 체결강도 100 이상 지속시간 추적 {stock_code: 최초 감지 시각}
-        self._leading_since: dict[str, datetime] = {}
-
-        # 1L 진단용 상태 (2026-07-30) — 1L이 연일 0건인데 on_trade는 틱마다
-        # 호출되는 핫패스라 매 틱 로깅이 불가능해서, 상태 전이(타이머 시작/리셋/
-        # 지속완료)와 주기 요약만 남긴다. 카운터는 여러 워커 스레드에서 동시
-        # 증가할 수 있어 정확한 값이 아닐 수 있음(진단용이므로 근사치 허용,
-        # 락을 걸면 틱 처리 경로가 느려짐).
-        self._l1_diag = {
-            "ticks": 0,        # 1L 판정까지 도달한 틱 수
-            "theme_ok": 0,     # 주도테마 소속이었던 틱
-            "strength_ok": 0,  # 체결강도 >= LEADING_STRENGTH_MIN 이었던 틱
-            "window_ok": 0,    # 시간창(09:00~10:50) 안이었던 틱
-            "both_ok": 0,      # 3조건 모두 충족(=타이머 유지)이었던 틱
-        }
-        self._l1_diag_last_report = self._now()
-        self._l1_max_sustain_sec = 0.0          # 오늘 도달한 최장 연속 유지 시간
-        self._l1_reset_logged_at: dict[str, datetime] = {}  # 리셋 로그 throttle
-        self._l1_block_logged_at: dict[str, datetime] = {}  # 차단 로그 throttle
-
-        # 1B 반등확증 대기 {code: {ref_high, since, last_check}} (2026-07-30)
-        self._1b_confirm: dict[str, dict] = {}
 
         # ── 진입 진단 (2026-08-01 신규) ────────────────────────────
         # "조건검색엔 계속 포착되는데 매수가 안 된다"를 장중에 원인별로
@@ -940,13 +867,11 @@ class StrategyManager:
         blocked, cooldowns, counts = self._restore_daily_risk_state()
 
         logger.info(
-            "DB 복원: 보유 %d (1A=%d, 눌림=%d, 1B=%d, 1L=%d) / 워치 %d / 워밍업 %ds "
+            "DB 복원: 보유 %d (1A=%d, 눌림=%d) / 워치 %d / 워밍업 %ds "
             "/ 손절차단 %d종목 / 쿨다운 %d종목 / 매수횟수기록 %d종목",
             len(self.holdings),
             self.count_holdings_by_strategy("1A"),
             self.count_holdings_by_strategy("1A_눌림"),
-            self.count_holdings_by_strategy("1B"),
-            self.count_holdings_by_strategy("1L"),
             len(self.watch_list_today),
             int(RESTART_WARMUP.total_seconds()),
             blocked, cooldowns, counts,
@@ -1023,9 +948,6 @@ class StrategyManager:
         self._cleanup_watched(now)
 
         self._track_soft_cap_full(now)
-        # 1B 비활성화(2026-08-01) — PHASE1B_ENABLED로 가드. 코드는 보존.
-        if PHASE1B_ENABLED:
-            self._check_1b_confirmations()
         self._update_dynamic_caps()
         self.check_timeouts()
 
@@ -1593,22 +1515,7 @@ class StrategyManager:
         )
         return True
 
-    def can_buy_phase1b(self) -> bool:
-        # 1B/1L은 점수 컷라인이 없는 실시간 틱 경로라 컷라인 조정 대상은 아니지만,
-        # COLD일 때 공유 슬롯 마지막 칸을 양보하는 것은 동일하게 적용된다.
-        return (
-            self.can_buy_more(None, "1B")
-            and self.count_holdings_by_strategy("1B") < PHASE1B_MAX_SLOTS
-            and GROUP_A_START <= self._now().time() < PULLBACK_END
-        )
-
-    def can_buy_leading(self) -> bool:
-        # 주도주 우선 진입: 09:00~10:50
-        return (
-            self.can_buy_more(None, "1L")
-            and self.count_holdings_by_strategy("1L") < LEADING_MAX_SLOTS
-            and LEADING_START <= self._now().time() < LEADING_END
-        )
+    # [2026-08-02 제거] can_buy_phase1b / can_buy_leading — 1B/1L 전략 삭제.
 
     # ========================================
     # 쿨다운 / 차단
@@ -1947,152 +1854,11 @@ class StrategyManager:
             # 가격/강도 추적이 같이 멈춘다).
             logger.exception("[%s] 틱 진입 평가 예외", code)
 
-        # 1L 전체 주석처리 (2026-07-31, 사용자 지정) — 새 1A(evaluate_1a_leading_strength,
-        # 체결강도 100 이상 1분 유지)가 1L(테마리더+강도100 2분)과 사실상 중복
-        # 설계라서 보류함. 1분<2분이라 새 1A가 항상 먼저 사가 1L은 실질적으로
-        # 죽은 코드가 되는 상태였음. 삭제 대신 아래 문자열 리터럴(주석 처리)로
-        # 남겨둠 — 재활성화하려면 이 블록을 다시 살아있는 코드로 되돌리면 됨.
-        if False:
-            """
-            now_dt = self._now()
-            now_t = now_dt.time()
-            strength = parsed_trade.get("strength") or 0.0
-
-            # 3개 하위조건을 개별로 평가 — 어느 조건이 막고 있는지 알기 위해
-            # (2026-07-30 진단 로깅). 기존엔 and로 묶여 있어서 실패 원인이
-            # 로그에 전혀 남지 않았고, 1L이 연일 0건인 이유를 알 수 없었음.
-            theme_ok = self.theme_mgr.is_leading_theme_stock(code)
-            strength_ok = strength >= LEADING_STRENGTH_MIN
-            window_ok = LEADING_START <= now_t < LEADING_END
-            qualifies = theme_ok and strength_ok and window_ok
-
-            d = self._l1_diag
-            d["ticks"] += 1
-            if theme_ok:
-                d["theme_ok"] += 1
-            if strength_ok:
-                d["strength_ok"] += 1
-            if window_ok:
-                d["window_ok"] += 1
-            if qualifies:
-                d["both_ok"] += 1
-
-            if not qualifies:
-                # 타이머가 돌고 있던 종목이 탈락한 경우만 로깅(=아깝게 놓친 케이스).
-                # 애초에 자격 없던 종목은 로그를 남기지 않음(틱마다 쏟아짐).
-                prev = self._leading_since.pop(code, None)
-                if prev is not None and window_ok:
-                    held = (now_dt - prev).total_seconds()
-                    self._l1_max_sustain_sec = max(self._l1_max_sustain_sec, held)
-                    last = self._l1_reset_logged_at.get(code)
-                    if last is None or (now_dt - last).total_seconds() >= 30:
-                        self._l1_reset_logged_at[code] = now_dt
-                        fail = []
-                        if not theme_ok:
-                            fail.append("주도테마 이탈")
-                        if not strength_ok:
-                            fail.append(f"강도 {strength:.0f}<{LEADING_STRENGTH_MIN:.0f}")
-                        logger.info(
-                            "[%s] 1L 지속 리셋: %.0f초 유지 후 탈락 (%s) — 2분 필요",
-                            code, held, ", ".join(fail) or "?",
-                        )
-            else:
-                first_seen = self._leading_since.get(code)
-                if first_seen is None:
-                    self._leading_since[code] = now_dt
-                    first_seen = now_dt
-                    logger.info(
-                        "[%s] 1L 지속 감시 시작 (테마=%s, 강도=%.0f) — %.0f초 유지 필요",
-                        code,
-                        self.theme_mgr.code_to_theme.get(code, "?"),
-                        strength,
-                        LEADING_SUSTAIN.total_seconds(),
-                    )
-
-                held = (now_dt - first_seen).total_seconds()
-                self._l1_max_sustain_sec = max(self._l1_max_sustain_sec, held)
-
-                if now_dt - first_seen >= LEADING_SUSTAIN:
-                    # 지속 조건은 통과 — 이후 슬롯/재매수 게이트에서 막히는지 확인
-                    can_buy = self.can_buy_leading()
-                    blocked, reason = self._is_rebuy_blocked(code)
-                    price = parsed_trade.get("price")
-                    if not can_buy or blocked or not price:
-                        last = self._l1_block_logged_at.get(code)
-                        if last is None or (now_dt - last).total_seconds() >= 60:
-                            self._l1_block_logged_at[code] = now_dt
-                            if not can_buy:
-                                why = (
-                                    f"슬롯/시장 게이트 (1L보유 "
-                                    f"{self.count_holdings_by_strategy('1L')}/{LEADING_MAX_SLOTS}, "
-                                    f"전체 {len(self.holdings)}/{MAX_HOLDINGS})"
-                                )
-                            elif blocked:
-                                why = f"재매수 차단 ({reason})"
-                            else:
-                                why = "체결가 없음"
-                            logger.info(
-                                "[%s] 1L 지속 %.0f초 충족했으나 매수 안 됨: %s",
-                                code, held, why,
-                            )
-                    else:
-                        stock_name = self._stock_names.get(code, code)
-                        theme_name = self.theme_mgr.code_to_theme.get(code, "")
-                        logger.info(
-                            "🚀 [주도주 우선 진입] %s 테마=%s 강도=%.1f (2분 이상 유지)",
-                            code,
-                            theme_name,
-                            strength,
-                        )
-                        info = {"current_price": price, "theme": theme_name}
-                        self._execute_buy(
-                            code, stock_name, phase=1, info=info, sub_strategy="1L"
-                        )
-                        self._leading_since.pop(code, None)
-                        return
-
-            self._maybe_report_1l_diag(now_dt)
-            """
-
-        # ── 1B 진입 트리거 [2026-08-01 비활성화, 사용자 지정] ──────────
-        # 1A와 방향이 정반대(1A=매수세 폭발 시 진입 / 1B=60초 -2% 급락 시 진입)
-        # 라 같은 후보 풀에 동시 적용하면 진입 타이밍이 오락가락한다. 삭제하지
-        # 않고 PHASE1B_ENABLED로 가드만 걸어둔다 — True로 바꾸면 그대로 복구됨.
-        # 주의: 체결틱 적재(add_tick)는 위쪽으로 이미 옮겼으므로 여기서
-        # phase1b.on_trade()를 부르면 **같은 틱이 두 번 쌓여** 체결강도/거래대금이
-        # 2배로 부풀려진다. 그래서 복구 시에도 add_tick은 위 한 곳에서만 한다.
-        if PHASE1B_ENABLED and self.phase1b and self.phase1b.is_watching(code):
-            drop_pct = self.phase1b.trade_flow.get_price_change_pct(
-                code, PHASE1B_PULLBACK_WINDOW_SEC, now
-            )
-            if drop_pct is not None and drop_pct <= PHASE1B_PULLBACK_PCT:
-                self._try_phase1b_buy(code, now)
-
-    def _maybe_report_1l_diag(self, now_dt):
-        """1L 판정 통계를 10분마다 1회 요약 로깅 (2026-07-30 진단용).
-        개별 전이 로그가 하나도 안 찍히는 경우(=자격 갖춘 종목이 아예 없음)를
-        구분하기 위함 — "조건이 근처까지 갔는지"를 숫자로 남긴다.
-        시간창(09:00~10:50) 밖에서는 의미가 없으므로 보고하지 않는다."""
-        if not (LEADING_START <= now_dt.time() < LEADING_END):
-            return
-        if (now_dt - self._l1_diag_last_report).total_seconds() < 600:
-            return
-        self._l1_diag_last_report = now_dt
-        d = self._l1_diag
-        ticks = d["ticks"] or 1  # 0 나눗셈 방지
-        logger.info(
-            "📊 [1L 진단 10분요약] 틱 %d | 주도테마소속 %d(%.1f%%) | 강도>=%.0f %d(%.1f%%) "
-            "| 3조건충족 %d(%.1f%%) | 최장유지 %.0f초/%.0f초필요 | 감시중 %d종목 | 주도테마 %d개",
-            d["ticks"],
-            d["theme_ok"], d["theme_ok"] / ticks * 100,
-            LEADING_STRENGTH_MIN,
-            d["strength_ok"], d["strength_ok"] / ticks * 100,
-            d["both_ok"], d["both_ok"] / ticks * 100,
-            self._l1_max_sustain_sec,
-            LEADING_SUSTAIN.total_seconds(),
-            len(self._leading_since),
-            len(getattr(self.theme_mgr, "leading_themes", []) or []),
-        )
+        # [2026-08-02 제거] 1L 진입 블록 / 1B 하락 트리거 / _maybe_report_1l_diag.
+        # 1L은 2026-07-31부터 `if False:`로, 1B는 2026-08-01부터
+        # PHASE1B_ENABLED=False로 죽어 있었고 되살릴 계획이 없어 삭제했다.
+        # on_trade는 이제 '틱 적재 -> 보유분 가격갱신 -> 틱 진입 평가'만 한다.
+        # 복구가 필요하면 커밋 900757c 참고.
 
     def on_orderbook(self, parsed_orderbook: dict, now: float = None):
         """호가창(0D) 수신 — 매도 1~3호가 잔량을 최신 상태로 유지한다.
@@ -2118,141 +1884,6 @@ class StrategyManager:
         except Exception:
             logger.exception("[%s] 호가 적재 실패", code)
 
-        # [보류] 1B 매도벽 FSM 트리거 — PHASE1B_ENABLED로 복구 가능
-        # if PHASE1B_ENABLED:
-        #     self.phase1b.wall_detector.on_orderbook(code, now=now)
-        #     state = self.phase1b.evaluator.evaluate(code, now=now)
-        #     if state == ChemulState.READY_TO_BUY:
-        #         self._try_phase1b_buy(code, now)
-
-    def _try_phase1b_buy(self, stock_code: str, now: float = None):
-        """FSM이 READY_TO_BUY 도달 → 즉시 매수하지 않고 '반등확증' 대기 등록.
-        (2026-07-30 변경, 근거는 PHASE1B_CONFIRM_WAIT 상수 주석 참고)
-
-        [2026-08-01] 1B 비활성화 — 호출부(on_trade)가 이미 막고 있지만,
-        나중에 다른 경로가 생겨도 새는 일이 없도록 여기서도 이중 가드한다."""
-        if not PHASE1B_ENABLED:
-            return
-        if stock_code in self.holdings or stock_code in self.pending:
-            return
-        if stock_code in self._1b_confirm:
-            return  # 이미 확증 대기 중
-        if not self.can_buy_phase1b():
-            logger.info("[%s] Phase 1B READY but 슬롯 부족", stock_code)
-            return
-        blocked, reason = self._is_rebuy_blocked(stock_code)
-        if blocked:
-            logger.info("[%s] Phase 1B 매수 차단: %s", stock_code, reason)
-            return
-
-        # 확증 기준선 = 신호 시점 1분봉의 고가("떨어진 자리")
-        try:
-            candles = self.api.get_minute_candles(stock_code, interval=1, count=2)
-        except Exception as e:
-            logger.warning("[%s] 1B 확증 기준선 조회 실패 → 매수 보류: %s", stock_code, e)
-            return
-        if not candles:
-            logger.warning("[%s] 1B 확증 기준선 없음(분봉 0개) → 매수 보류", stock_code)
-            return
-        ref_high = float(candles[0].get("high") or 0)
-        if ref_high <= 0:
-            logger.warning("[%s] 1B 확증 기준선 이상(high=%s) → 매수 보류", stock_code, ref_high)
-            return
-
-        now_dt = self._now()
-        self._1b_confirm[stock_code] = {
-            "ref_high": ref_high,
-            "since": now_dt,
-            "last_check": now_dt,
-        }
-        logger.info(
-            "[%s] 1B 반등확증 대기 시작 — 기준선(신호봉 고가) %s원 종가돌파 필요, %.0f분 내",
-            stock_code, f"{ref_high:,.0f}", PHASE1B_CONFIRM_WAIT.total_seconds() / 60,
-        )
-
-    def _check_1b_confirmations(self):
-        """반등확증 대기 종목을 '완성된 1분봉 종가'로 확인 (2026-07-30).
-        tick()에서 주기 호출 — FSM이 READY 상태를 벗어나도 계속 추적되어야 하므로
-        _try_phase1b_buy(틱 콜백)가 아니라 여기서 확인한다.
-
-        [2026-08-01] 1B 비활성화 — tick()이 이미 막고 있지만 이중 가드."""
-        if not PHASE1B_ENABLED:
-            return
-        if not self._1b_confirm:
-            return
-        now_dt = self._now()
-        for code in list(self._1b_confirm.keys()):
-            st = self._1b_confirm[code]
-
-            if code in self.holdings or code in self.pending:
-                self._1b_confirm.pop(code, None)
-                continue
-
-            if now_dt - st["since"] >= PHASE1B_CONFIRM_WAIT:
-                self._1b_confirm.pop(code, None)
-                logger.info(
-                    "[%s] 1B 반등확증 실패 — %.0f분 내 기준선 %s원 미돌파, 매수 포기",
-                    code, PHASE1B_CONFIRM_WAIT.total_seconds() / 60,
-                    f"{st['ref_high']:,.0f}",
-                )
-                continue
-
-            # 슬리피지 축소(2026-07-31) — 무료인 실시간 체결가로 먼저 기준선
-            # 돌파 여부를 본다. 아직 안 넘었으면 REST 호출 자체를 생략(기존:
-            # 넘었든 안 넘었든 55초마다 무조건 폴링 -> 429 예산도 오히려 아낌).
-            # tick 데이터가 없으면(WS 순간 끊김 등) 기존 55초 폴링으로 폴백
-            # (fail-safe — 확증 규칙 자체는 그대로, 감지 경로만 이원화).
-            tick_price = (
-                self.phase1b.trade_flow.get_latest_price(code) if self.phase1b else None
-            )
-            if PHASE1B_CONFIRM_TICK_PRECHECK and tick_price is not None:
-                if tick_price <= st["ref_high"]:
-                    continue
-                gap = PHASE1B_CONFIRM_REST_GAP_SEC
-            else:
-                gap = PHASE1B_CONFIRM_CHECK_SEC
-
-            if (now_dt - st["last_check"]).total_seconds() < gap:
-                continue
-            st["last_check"] = now_dt
-
-            try:
-                candles = self.api.get_minute_candles(code, interval=1, count=2)
-            except Exception as e:
-                logger.warning("[%s] 1B 확증 확인 실패(다음 주기 재시도): %s", code, e)
-                continue
-            if not candles or len(candles) < 2:
-                continue
-
-            # [0]은 진행 중인 봉이라 종가가 확정 안 됨 → [1](마지막 완성봉) 사용
-            closed = candles[1]
-            close_px = float(closed.get("close") or 0)
-            if close_px <= st["ref_high"]:
-                continue
-
-            if not self.can_buy_phase1b():
-                logger.info("[%s] 1B 확증됐으나 슬롯 부족 — 대기 유지", code)
-                continue
-            blocked, reason = self._is_rebuy_blocked(code)
-            if blocked:
-                self._1b_confirm.pop(code, None)
-                logger.info("[%s] 1B 확증됐으나 매수 차단: %s", code, reason)
-                continue
-
-            current_price = (
-                self.phase1b.trade_flow.get_latest_price(code) if self.phase1b else None
-            ) or close_px
-            self._1b_confirm.pop(code, None)
-            logger.info(
-                "[%s] 1B 반등확증 성립 — 완성봉 종가 %s원 > 기준선 %s원 (%.0f초 대기)",
-                code, f"{close_px:,.0f}", f"{st['ref_high']:,.0f}",
-                (now_dt - st["since"]).total_seconds(),
-            )
-            stock_name = self._stock_names.get(code, code)
-            info = {"current_price": current_price, "volume_ratio": 0.0}
-            self._execute_buy(code, stock_name, phase=1, info=info, sub_strategy="1B")
-            if self.phase1b:
-                self.phase1b.stop_watching(code)
 
     # ========================================
     # 진입 평가 (점수 기반 — scoring.py 위임)
@@ -3483,13 +3114,6 @@ class StrategyManager:
                     f"| 시간계수 x{info.get('time_mult', 1.0):.2f} "
                     f"(현재가 {current_price:,})"
                 )
-            elif sub_strategy == "1B":
-                entry_reason = f"1B 체결강도 FSM (현재가 {current_price:,})"
-            elif sub_strategy == "1L":
-                entry_reason = (
-                    f"주도주 우선 진입 | 테마: {info.get('theme', '?')} "
-                    f"| 체결강도 100이상 2분지속 (현재가 {current_price:,})"
-                )
             elif sub_strategy == "1A_눌림":
                 entry_reason = (
                     f"눌림목 반등 | MA5={ma_val:,.0f} "
@@ -3773,30 +3397,16 @@ class StrategyManager:
         if gross_rate <= STOP_LOSS_RATE:
             exit_reason = f"손절 가격{gross_rate*100:.2f}% (순 {net_rate*100:.2f}%)"
 
-        # 2) 익절 — 평상시엔 트레일링은 1L(주도주)에만, 나머지는 항상 flat 익절캡.
-        # 지수 급락(-5%↓) 대응 모드에서는 전략 구분 없이 트레일링 없이
-        # flat SEVERE_CRASH_TAKE_PROFIT로 통일(빠른 익절 확정). (2026-07-28)
+        # 2) 익절 — 전 전략 flat 익절캡. (2026-08-02) 트레일링 분기는 1L
+        # 전용이었고 1L 삭제로 도달 불가가 되어 함께 제거했다.
+        # 지수 급락(-5%↓) 대응 모드에서는 캡 대신 flat SEVERE_CRASH_TAKE_PROFIT로
+        # 통일(빠른 익절 확정). (2026-07-28)
         if exit_reason is None:
             if self._is_severe_crash():
                 if net_rate >= SEVERE_CRASH_TAKE_PROFIT:
                     exit_reason = (
                         f"익절(지수급락 대응) 순+{net_rate*100:.2f}% (가격 +{gross_rate*100:.2f}%)"
                     )
-            elif pos.get("sub_strategy") == "1L" and not self._is_early_buy(pos):
-                # 개장초반(09:01~09:10) 매수분은 1L도 트레일링 대신 flat 1.5%
-                # (2026-07-30 사용자 지정) — 아래 else의 캡 분기로 넘어간다.
-                highest = pos.get("highest_price", buy_price)
-                peak_net = self._net_rate(buy_price, highest)
-                if peak_net >= TRAIL_ACTIVATE:
-                    pos["trail_armed"] = True
-                if pos.get("trail_armed"):
-                    trail_line = highest * (1 - TRAIL_GIVEBACK)
-                    if current_price <= trail_line:
-                        give = (current_price - highest) / highest * 100
-                        exit_reason = (
-                            f"트레일링 고점-{TRAIL_GIVEBACK*100:.0f}% "
-                            f"({give:+.2f}%, 순 {net_rate*100:+.2f}%)"
-                        )
             else:
                 cap, cap_label = self._take_profit_cap(pos)
 
@@ -3951,13 +3561,13 @@ class StrategyManager:
             cap, _ = self._take_profit_cap(pos)
             # 경로 A(기존): 상한캡(2.5%) 종목의 조기 이탈 — 1A처럼 처음부터
             # 2.5%인 종목과 on_price_update에서 강도상향된 종목 둘 다 포함.
-            # 단, 1L은 제외한다(2026-07-31 실거래로 발견) — 1L은 익절 메커니즘이
-            # 트레일링 전용인데, _take_profit_cap이 sub="1L"을 특별 케이스하지
-            # 않아 fallback 기본캡(2.5%)을 반환하고 이게 TP_CAP_UPGRADED(2.5%)와
-            # 우연히 같아서 cap_exit이 잘못 True가 됐다. 그 결과 1L 포지션이
-            # 트레일링과 무관하게 이 캡 조기이탈 체크에 걸려 매수 66/69초 만에
-            # "동적캡 즉시매도"로 조기청산되는 실거래 사고가 있었다(010120, 067310).
-            cap_exit = pos.get("sub_strategy") != "1L" and cap >= TP_CAP_UPGRADED
+            # (2026-08-02) 예전엔 여기에 `sub_strategy != "1L"` 가드가 있었다.
+            # 1L은 익절이 트레일링 전용인데 _take_profit_cap이 1L을 특별
+            # 케이스하지 않아 fallback 기본캡(2.5%)을 반환했고, 그게
+            # TP_CAP_UPGRADED(2.5%)와 우연히 같아 cap_exit이 잘못 True가 되면서
+            # 1L 포지션이 매수 66/69초 만에 조기청산되는 실거래 사고가 있었다
+            # (010120, 067310). 1L 삭제로 이 가드는 불필요해져 제거.
+            cap_exit = cap >= TP_CAP_UPGRADED
             # 경로 B(신규): 손실 종목이 저점에서 반등했으나 그 반등이 강도로
             # 뒷받침되지 않는 경우 — 손실 최소화 청산.
             loss_rebound = self._is_loss_rebound_exit(pos, price, now_dt)
@@ -4035,8 +3645,8 @@ class StrategyManager:
         """포지션별 익절 캡과 표시용 라벨 (2026-07-30).
         기본 캡은 매수 시점 기준으로 고정하되, 동적캡 로직이 올려둔
         pos["tp_cap"]이 있으면 그 값이 우선한다.
-        1L은 트레일링을 쓰므로 평상시엔 이 함수를 타지 않지만(호출부 분기),
-        개장초반 매수분은 트레일링 대신 여기의 1.5%를 쓴다."""
+        (2026-08-02) 1L/1B 분기는 두 전략 삭제와 함께 제거 — 이제 이 함수가
+        모든 포지션의 익절 캡을 결정한다(트레일링 예외 없음)."""
         override = pos.get("tp_cap")
         if override is not None:
             return float(override), pos.get("tp_cap_label", "동적")
@@ -4045,8 +3655,6 @@ class StrategyManager:
             return TAKE_PROFIT_CAP_EARLY, "개장초반"
 
         sub = pos.get("sub_strategy")
-        if sub == "1B":
-            return TAKE_PROFIT_CAP_1B, "1B"
         if sub == "1A_눌림":
             return TAKE_PROFIT_CAP_PULLBACK, "눌림"
         return TAKE_PROFIT_CAP, "기본"

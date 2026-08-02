@@ -276,8 +276,11 @@ check("미보유 감시종목도 정상 적재", s.phase1b.trade_flow.tick_count
 before = len(s.order_manager.orders)
 feed(s.phase1b.trade_flow, "N1", 5, 1_000_000, now=time.time() - 50)
 s.on_trade({"stock_code": "N1", "price": 5_000, "side": "sell", "volume": 10})
-check("1B 하락 트리거는 비활성화되어 매수 시도 없음",
-      len(s.order_manager.orders) == before and not s._1b_confirm)
+# (2026-08-02) 1B 하락 트리거는 '비활성화'가 아니라 코드째 삭제됨.
+check("급락해도 매수 시도 없음(1B 하락 트리거 삭제됨)",
+      len(s.order_manager.orders) == before)
+check("1B 확증대기 상태(_1b_confirm) 자체가 존재하지 않음",
+      not hasattr(s, "_1b_confirm"))
 
 # ═════════════════════════════════════════════════════════
 print("\n[7] on_orderbook — 호가 적재 재활성화")
@@ -569,19 +572,43 @@ check("시장가인데 기준가를 못 구하면 주문 안 냄(매수단가 �
       not r["success"] and not om2.rest.sent, str(r))
 
 # ═════════════════════════════════════════════════════════
-print("\n[15] 1B 비활성화 확인")
+print("\n[15] 1B/1L 코드 완전 제거 확인 (2026-08-02)")
 # ═════════════════════════════════════════════════════════
-check("PHASE1B_ENABLED = False", SM.PHASE1B_ENABLED is False)
+# 이전 사양: PHASE1B_ENABLED=False 플래그로 '비활성화'.
+# 새 사양: 두 전략의 코드/상수/상태를 전부 삭제. 플래그 자체가 없어야 한다
+#          (남아 있으면 누군가 True로 되돌릴 수 있고, 그러면 삭제된 함수를
+#           부르며 AttributeError로 터진다).
+for name in ("PHASE1B_ENABLED", "PHASE1B_MAX_SLOTS", "PHASE1B_PULLBACK_PCT",
+             "PHASE1B_PULLBACK_WINDOW_SEC", "PHASE1B_CONFIRM_WAIT",
+             "PHASE1B_CONFIRM_CHECK_SEC", "PHASE1B_CONFIRM_TICK_PRECHECK",
+             "PHASE1B_CONFIRM_REST_GAP_SEC", "TAKE_PROFIT_CAP_1B",
+             "LEADING_MAX_SLOTS", "LEADING_STRENGTH_MIN", "LEADING_SUSTAIN",
+             "LEADING_START", "LEADING_END",
+             "TRAIL_ACTIVATE", "TRAIL_GIVEBACK"):
+    check(f"상수 {name} 제거됨", not hasattr(SM, name))
+
 s = build_strat()
-s.phase1b.start_watching("B1")
-s._try_phase1b_buy("B1")
-check("_try_phase1b_buy 호출해도 확증대기 등록 안 됨", not s._1b_confirm)
-s._1b_confirm["B1"] = {"ref_high": 1, "since": s._now(), "last_check": s._now()}
-s._check_1b_confirmations()
-check("_check_1b_confirmations도 아무 동작 안 함", "B1" in s._1b_confirm)
-s._1b_confirm.clear()
-s.tick()
-check("tick()에서도 1B 확증 점검이 돌지 않음", not s._1b_confirm)
+for meth in ("_try_phase1b_buy", "_check_1b_confirmations", "can_buy_phase1b",
+             "can_buy_leading", "_maybe_report_1l_diag"):
+    check(f"메서드 {meth} 제거됨", not hasattr(s, meth))
+for attr in ("_1b_confirm", "_leading_since", "_l1_diag", "_l1_diag_last_report",
+             "_l1_max_sustain_sec", "_l1_reset_logged_at", "_l1_block_logged_at"):
+    check(f"인스턴스 상태 {attr} 제거됨", not hasattr(s, attr))
+
+# 데이터 파이프라인은 반드시 살아있어야 한다 — 없애면 1A/Pullback이 눈이 먼다.
+check("phase1b.trade_flow 유지(1A/Pullback 진입 판정 소스)",
+      s.phase1b.trade_flow is not None)
+check("phase1b.orderbook 유지(하이브리드 주문 판정 소스)",
+      s.phase1b.orderbook is not None)
+check("phase1b에 wall_detector 없음(FSM 배선 제거)",
+      not hasattr(s.phase1b, "wall_detector"))
+check("phase1b에 evaluator 없음(FSM 배선 제거)",
+      not hasattr(s.phase1b, "evaluator"))
+s.tick()  # 삭제된 _check_1b_confirmations를 부르지 않는지
+check("tick()이 예외 없이 완주", True)
+
+# theme_mgr은 1L과 함께 죽지 않는다 — 동적 익절캡 가산점으로 계속 쓰인다.
+check("theme_mgr 유지(매수 후 동적 익절캡 가산점)", s.theme_mgr is not None)
 
 # ═════════════════════════════════════════════════════════
 print("\n[16] 시장가 거부 시 지정가 폴백 (모의서버 미검증 대비)")

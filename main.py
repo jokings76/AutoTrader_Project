@@ -128,9 +128,7 @@ class TradingBot:
                f"주문가능: {deposit:,}원\n"
                f"보유: {len(self.strategy_mgr.holdings)}종목 "
                f"(1A={self.strategy_mgr.count_holdings_by_strategy('1A')}, "
-               f"눌림={self.strategy_mgr.count_holdings_by_strategy('1A_눌림')}, "
-               f"1B={self.strategy_mgr.count_holdings_by_strategy('1B')}, "
-               f"1L={self.strategy_mgr.count_holdings_by_strategy('1L')})\n"
+               f"눌림={self.strategy_mgr.count_holdings_by_strategy('1A_눌림')})\n"
                f"동적 비중: 활성 (Kelly+Volatility)\n"
                f"초기 스냅샷: {self._signal_stats['snapshot']}종목 처리")
         send_telegram(msg, target="signal")
@@ -645,10 +643,8 @@ class TradingBot:
                     f"매수시도: {self._signal_stats['buy_attempted']}건",
                     f"보유: {len(h)}종목 "
                     f"(1A={self.strategy_mgr.count_holdings_by_strategy('1A')}, "
-                    f"눌림={self.strategy_mgr.count_holdings_by_strategy('1A_눌림')}, "
-                    f"1B={self.strategy_mgr.count_holdings_by_strategy('1B')}, "
-                    f"1L={self.strategy_mgr.count_holdings_by_strategy('1L')})",
-                    f"감시 중 (1B FSM): {len(self.phase1b_ctrl.watched)}종목",
+                    f"눌림={self.strategy_mgr.count_holdings_by_strategy('1A_눌림')})",
+                    f"감시 중(틱 수집): {len(self.phase1b_ctrl.watched)}종목",
                 ]
                 send_telegram("\n".join(lines), target="signal")
             except Exception:
@@ -938,8 +934,9 @@ class TradingBot:
     async def task_watchlist_reentry(self):
         """슬롯이 비어있을 때 1A/Pullback watch_list 후보를 재평가해 즉시 매수 시도.
         2026-07-28 신규: on_condition_hit은 종목당 최초 편입 시점 1회만 평가해서,
-        그때 슬롯이 꽉 차 있으면 이후 슬롯이 비어도 재시도가 안 되던 문제 수정
-        (1B/1L은 실시간 틱 콜백이라 원래도 계속 재시도됨, 이 태스크는 1A/Pullback 전용)."""
+        그때 슬롯이 꽉 차 있으면 이후 슬롯이 비어도 재시도가 안 되던 문제 수정.
+        (2026-08-02) 진입이 틱 구동으로 바뀌면서 主 경로에서 **안전망으로 강등**
+        됐다 — 평시엔 on_trade의 _maybe_tick_entry가 그 틱에서 바로 발화한다."""
         while not self._stop:
             await asyncio.sleep(15)
             try:
@@ -1191,9 +1188,7 @@ class TradingBot:
             logger.info(
                 f"보유: {len(h)}종목 "
                 f"(1A={self.strategy_mgr.count_holdings_by_strategy('1A')}, "
-                f"눌림={self.strategy_mgr.count_holdings_by_strategy('1A_눌림')}, "
-                f"1B={self.strategy_mgr.count_holdings_by_strategy('1B')}, "
-                f"1L={self.strategy_mgr.count_holdings_by_strategy('1L')})"
+                f"눌림={self.strategy_mgr.count_holdings_by_strategy('1A_눌림')})"
             )
 
         if self.ws:

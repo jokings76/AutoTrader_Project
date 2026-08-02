@@ -1020,7 +1020,7 @@ claude --remote-control
   - 이전 세션이 남긴 `.claude/worktrees/` 2개도 정리(3.3MB, git 미추적인데
     grep에는 계속 걸렸음). `git worktree remove`가 OneDrive 잠금으로 실패해
     등록 해제 후 PowerShell로 폴더를 지웠다.
-  - **유효한 테스트는 이제 3개뿐**: `test_patch_20260801.py`(250) /
+  - **유효한 테스트는 이제 3개뿐**: `test_patch_20260801.py`(250 -> 08-02에 281) /
     `test_patch_20260802.py`(83) / `test_live_dryrun_20260803.py`(71).
     정리 후 재검증 404건 전원 통과 + `import main` 정상.
 
@@ -1073,6 +1073,41 @@ claude --remote-control
   [검증] `test_live_dryrun_20260803.py` 71 -> **84건**(섹션 17 FID228 감시,
   18 정합성 신설) 전원 통과 + 기존 333건 유지 = **총 417건**.
 
+- 2026-08-02 (계속) — **1B/1L 전략 코드 완전 삭제** (순 -419줄).
+  발단은 "1B/1L 때문에 충돌이나 헷갈릴 수 있으면 삭제해도 된다"는 지시.
+  먼저 조사한 결론은 **실제 충돌은 없다**였다 — 1L은 `if False:` + 문자열
+  리터럴이라 파이썬이 파싱조차 안 했고, 1B는 `PHASE1B_ENABLED=False`로 전부
+  가드돼 테스트로 못박혀 있었다. 비용은 순수하게 "헷갈림"이었는데, **그
+  헷갈림으로 이미 실거래 사고가 두 번 났다**(08-01 `_cleanup_watched`가 1A
+  틱 버퍼를 지워 1A 창의 70%가 죽음 / 07-31 1L 특별케이스 누락으로 매수
+  66초 만에 조기청산). 그래서 "지금 안 터진다"가 아니라 "다음에 터진다"를
+  근거로 삭제를 택했다.
+  - **삭제한 것**: 1L 진입 블록·진단 함수·상수 5개·인스턴스 상태 6개 /
+    1B 매수 함수 2개(`_try_phase1b_buy`/`_check_1b_confirmations`)·
+    `can_buy_phase1b`/`can_buy_leading`·`_1b_confirm`·상수 8개·
+    `TAKE_PROFIT_CAP_1B`·on_trade 하락 트리거·on_orderbook FSM 주석 /
+    `Phase1BController`의 WallDetector·ChemulEvaluator 배선과
+    `on_trade`/`on_orderbook`/`get_state` 래퍼(전부 라이브 호출 0회).
+  - **트레일링 익절도 함께 제거**(사용자 지정) — `sub_strategy == "1L"`이
+    유일한 진입점이라 1L 삭제 시점에 이미 도달 불가였다. 이제 익절은 예외
+    없이 flat 캡이라 **라이브와 daily_backtest의 청산 규칙이 정확히 일치**한다
+    (예전엔 백테스트가 "트레일링은 재현 안 함"이라고 적어두고 넘어갔음).
+  - **유지한 것**: `phase1b` 컨트롤러 객체(trade_flow/orderbook/watched) —
+    전략이 아니라 1A/Pullback의 데이터 파이프라인이라 없애면 두 전략이 눈이
+    먼다. `theme_mgr`도 유지 — 1L과 함께 죽은 게 아니라 **매수 후 동적 익절캡
+    가산점**으로 계속 쓰인다.
+  - `config/phase_settings.py`의 `PHASE_1B`와 `EXIT_POLICY`의 `trail_*`는
+    이제 **아무도 안 읽는다** — 삭제 대신 "[미사용]" 배너를 달았다(CLAUDE.md
+    규칙 2). 거기서 값을 고쳐도 반영되지 않는다는 점 주의.
+  - **리네임은 미룸**: `phase1b` -> `TickDataPipeline`이 근본 해결이지만
+    호출부가 ~40곳이고 **08-03이 틱 구동 신규 구조 첫 실거래일**이라,
+    지금 얹으면 내일 문제가 났을 때 "새 전략 탓인지 리팩터링 탓인지"를
+    구분할 수 없게 된다. 실거래 검증 후로 이월.
+  - [검증] `test_patch_20260801.py` 250 -> **281건**(섹션 15를 "비활성화 확인"
+    에서 "코드 완전 제거 확인"으로 교체 — 상수 16개·메서드 5개·인스턴스 상태
+    7개가 **존재하지 않는지**를 단언하고, 반대로 데이터 파이프라인과 theme_mgr은
+    **살아있는지**를 단언). 3개 스위트 **448건 전원 통과**.
+
 \## 세션 이관 체크리스트 (2026-08-01 신설)
 
 새 세션(PC 터미널 / 모바일 원격 / 새 대화창 어디서든)이 이 프로젝트를
@@ -1092,7 +1127,7 @@ claude --remote-control
 | # | 명령 | 기대 결과 |
 |---|---|---|
 | 1 | `python -c "import main; print('OK')"` | `OK` (임포트 체인 전체 정상) |
-| 2 | `python test_patch_20260801.py` | **250건 전원 통과 / 실패 0건** |
+| 2 | `python test_patch_20260801.py` | **281건 전원 통과 / 실패 0건** |
 | 3 | `python test_patch_20260802.py` | **83건 전원 통과 / 실패 0건** (틱 구동) |
 | 4 | `python test_live_dryrun_20260803.py` | **84건 전원 통과** (하루 전 구간 통합) |
 | 5 | `git log --oneline -5` | 최신 커밋이 `5b424e8` 이후인지 |
@@ -1111,10 +1146,11 @@ claude --remote-control
 
 설정값이 의도대로인지 한 번에 보는 명령:
 ```
-python -c "import core.strategy_manager as s; from core.order_manager import FORCE_CLOSE_TIME; print('1A', s.GROUP_A_START, '~', s.PHASE1A_END); print('PB', s.PULLBACK_START, '~', s.PULLBACK_END); print('중복전환', s.DUAL_SOURCE_PULLBACK_FROM); print('청산', FORCE_CLOSE_TIME); print('슬롯', s.PHASE1A_MAX_SLOTS, s.PULLBACK_MAX_SLOTS, s.MAX_HOLDINGS, s.MAX_HOLDINGS_HARD); print('1B', s.PHASE1B_ENABLED)"
+python -c "import core.strategy_manager as s; from core.order_manager import FORCE_CLOSE_TIME; print('1A', s.GROUP_A_START, '~', s.PHASE1A_END); print('PB', s.PULLBACK_START, '~', s.PULLBACK_END); print('중복전환', s.DUAL_SOURCE_PULLBACK_FROM); print('청산', FORCE_CLOSE_TIME); print('슬롯', s.PHASE1A_MAX_SLOTS, s.PULLBACK_MAX_SLOTS, s.MAX_HOLDINGS, s.MAX_HOLDINGS_HARD); print('1B잔재', hasattr(s, 'PHASE1B_ENABLED')); print('틱구동', s.TICK_ENTRY_ENABLED)"
 ```
 기대값: `1A 09:00~14:50` / `PB 09:25~14:50` / `중복전환 10:30` / `청산 15:10` /
-`슬롯 4 4 6 8` / `1B False`
+`슬롯 4 4 6 8` / `1B잔재 False` / `틱구동 True`
+(`1B잔재 True`가 나오면 1B 코드가 되살아난 것 — 2026-08-02에 전부 삭제했다.)
 
 \### 모바일 확인 항목 (원격 세션이 제대로 붙었는지)
 폰에서 세션에 들어간 뒤 아래를 확인한다. **PC 검증과 목적이 다르다** —
@@ -1131,7 +1167,7 @@ python -c "import core.strategy_manager as s; from core.order_manager import FOR
    ```
    CLAUDE.md 읽고 현재 전략 구성이랑 08-03 확인 항목 요약해줘
    ```
-   1A/Pullback 2전략 체제, 1B 비활성화, 09:25 Pullback 시작, 10:30 중복 전환,
+   1A/Pullback 2전략 체제, 1B/1L 삭제됨, 09:25 Pullback 시작, 10:30 중복 전환,
    15:10 청산이 나오면 이관 성공. 안 나오면 이 문서를 다시 손봐야 한다.
 4. **모델 확인** — 원격 세션은 Sonnet 5로 시작한다. 전략/로직 작업이면
    `/model`로 **Opus 5**로 올리고 시작할 것.
@@ -1196,11 +1232,16 @@ python -c "import core.strategy_manager as s; from core.order_manager import FOR
   진입 종료 < 청산이라 청산 중 신규매수가 겹치지 않는다.
 - 등락률 상한은 **실제 매수한 전략**(sub_strategy)을 따른다 — 중복 종목이
   오전에 1A로 매수되면 16%, 오후에 Pullback으로 매수되면 10%.
-- **1A/Pullback 외 전략은 전부 비활성** — 1B는 플래그(`PHASE1B_ENABLED=False`),
-  1L은 `on_trade`/`on_orderbook`에서 주석 처리, 1S/Phase2/Phase3/1N은 `_legacy`
-  백업 후 제거됨. **`phase1b` 객체 자체는 반드시 유지** — 이제 1B 전략이 아니라
-  1A/Pullback의 **체결틱·호가 데이터 파이프라인**(TradeFlowTracker/
-  OrderbookTracker)이라 없애면 두 전략이 눈이 먼다.
+- **1A/Pullback 외 전략은 코드째 없다** (2026-08-02 삭제, 그 전엔 비활성 상태로
+  남아 있었음). 1B/1L은 이날 제거, 1S/Phase2/Phase3/1N은 `_legacy` 백업 후 제거.
+  트레일링 익절도 1L 전용이었어서 같이 사라졌다 — 이제 익절은 예외 없이 flat 캡.
+  - **⚠️ `phase1b` 객체 자체는 반드시 유지** — 전략이 아니라 1A/Pullback의
+    **체결틱·호가 데이터 파이프라인**(TradeFlowTracker/OrderbookTracker)이라
+    없애면 두 전략이 눈이 먼다. 이름만 1B다.
+  - 이름이 실제로 사고를 두 번 냈다(08-01 1A 버퍼 삭제 / 07-31 1L 조기청산).
+    `TickDataPipeline` 같은 리네임이 근본 해결인데 호출부가 ~40곳이라
+    **08-03 실거래 검증 후**로 미뤘다.
+  - 복구가 필요하면 커밋 `900757c`에 1B/1L 코드와 파라미터 근거 주석이 전부 있다.
 - 주문: 매수는 호가 두께로 시장가/지정가 자동 선택, **매도는 항상 시장가**
   (둘 다 실패 시 반대 방식으로 1회 폴백).
 - **주문 우선 레인 (2026-08-02)** — 주문(kt10000/kt10001)은 조회 대기열을
@@ -1276,7 +1317,8 @@ python -c "import core.strategy_manager as s; from core.order_manager import FOR
    1회 폴백`이 뜨면 매도 시장가가 거부된 것이므로 즉시 확인.
 6-6. **`⚠️ 미관리 잔고 감지` 알림이 뜨는지** — 뜨면 매도 미체결이 실제로
    발생했다는 뜻이므로 해당 종목을 수동 확인할 것.
-7. **1B/1L 관련 로그가 전혀 안 뜨는 게 정상**(둘 다 비활성). 뜨면 회귀.
+7. **1B/1L 관련 로그가 전혀 안 뜨는 게 정상**(2026-08-02에 코드째 삭제).
+   뜨면 회귀 — 옛 커밋이 섞여 들어왔는지 확인할 것.
 
 \### 진단 알림 읽는 법 (원인 판단표)
 - `대량체결 부족`이 대부분 -> **코드 정상**, 필터가 제대로 거르는 중(시장에
@@ -1337,7 +1379,8 @@ python -c "import core.strategy_manager as s; from core.order_manager import FOR
 - 시간대 계수 끄기: `TICK_BURST_TIME_MULT`의 계수를 전부 1.00으로
 - 상대 버스트 경로만 끄기: `TICK_BURST_REL_MULT = 10**9`
 - 주문 우선 레인 끄기: `KiwoomREST.ORDER_MIN_INTERVAL = 0.6` (조회와 동일)
-- 1B 되살리기: `PHASE1B_ENABLED = True`
+- ~~1B 되살리기: `PHASE1B_ENABLED = True`~~ — **2026-08-02에 코드째 삭제됨.**
+  되살리려면 커밋 `900757c`에서 되가져와야 한다(플래그만으로는 안 됨).
 - 제안 A 끄기: `PHASE1A_TIER_SINGLE_MULT = 1.0`, `PHASE1A_TIER_BURST_MULT = 1.0`
 - 제안 B 끄기: `core/strategy_performance.py`의 `ENABLED = False`
 - 제안 C 끄기: `PHASE1A_SIZE_MAX_MULT = 1.0`

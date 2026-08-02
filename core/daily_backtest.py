@@ -249,7 +249,8 @@ def _take_profit_cap(position: dict) -> float:
 
 def _exit_signal(position: dict, current_price: float, hhmm: str, minutes_held: float):
     """라이브 core/strategy_manager.py의 청산 규칙(손절/익절캡/시간정리)을 그대로 재현.
-    트레일링은 1L 전용인데 1L은 백테스트에서 재현 안 하므로 항상 flat 익절캡."""
+    (2026-08-02) 트레일링은 1L 전용이었고 1L 삭제와 함께 라이브에서도 제거됐다 —
+    이제 라이브·백테스트 둘 다 예외 없이 flat 익절캡이라 이 부분은 정확히 일치한다."""
     buy_price = position["buy_price"]
     gross_rate = (current_price - buy_price) / buy_price if buy_price > 0 else 0.0
     net_rate = gross_rate - ROUND_TRIP_COST
