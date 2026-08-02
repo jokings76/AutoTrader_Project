@@ -1108,6 +1108,30 @@ claude --remote-control
     7개가 **존재하지 않는지**를 단언하고, 반대로 데이터 파이프라인과 theme_mgr은
     **살아있는지**를 단언). 3개 스위트 **448건 전원 통과**.
 
+- 2026-08-02 (계속) — **`.history/` 삭제 + 신규 고아 모듈 배너**.
+  - **`.history/` 삭제** (1,050 파일 / 28.4MB). VSCode 로컬 히스토리 확장이
+    05-18~07-26에 쌓아둔 타임스탬프 사본으로, `.gitignore:15`에 등재돼 저장소엔
+    영향이 없었지만 **grep·검색·AI 컨텍스트를 심하게 오염**시켰다(이 세션의
+    1B/1L 조사에서 grep 결과 225KB가 통째로 이 쓰레기였다). 삭제 전 확인한 것:
+    전 파일이 `이름_YYYYMMDDHHMMSS.확장자` 자동 사본(수동 생성 0개), git 추적
+    0건, 코드 참조 0건(`core.history_fetcher`/`self.history` 히트는 전부 무관).
+    프로젝트가 OneDrive 안이라 휴지통에서 30일 복구 가능.
+    효과: 삭제된 옛 전략 심볼 검색 히트가 수백 건 -> `WallDetector` 17 /
+    `Phase3Controller` 3 / `evaluate_phase2` 1건으로 줄어 눈으로 훑을 수 있게 됨.
+  - **1B 삭제로 새로 고아가 된 2개에 DEPRECATED 배너**:
+    `core/strategy/wall_detector.py`, `core/strategy/chemul_evaluator.py`.
+    `phase1b_controller.py`의 배선이 사라지면서 이제 서로만 참조한다
+    (chemul_evaluator -> wall_detector). 08-02 앞선 정리에서 쓴 것과 같은
+    `[삭제 예정 / DEPRECATED]` 배너 형식을 그대로 따랐다(파일 삭제는 규칙 2로 보류).
+  - **도달성 분석 재실행** (main.py 기준, 상대 임포트 포함):
+    라이브 모듈 **34 -> 32개**. 정확히 위 2개만 줄어 앞선 세션의 분석과 일치.
+    나머지 고아는 전부 `_legacy` / 배너 기부착(`api/kiwoom_api.py`,
+    `order_queue.py`, `phase3_controller.py`) / 수동 도구 / `__init__.py`다.
+    **미조치로 남긴 것 3개**(전부 오늘 변경과 무관한 기존 고아):
+    `api/merge.py`(일회성 코드 병합 스크립트), `core/migrate_themes.py`
+    (일회성 DB 마이그레이션), `models/account_info.py`(9줄짜리 미사용 클래스 —
+    이름 때문에 '계좌 모델'로 오해할 여지는 있음).
+
 \## 세션 이관 체크리스트 (2026-08-01 신설)
 
 새 세션(PC 터미널 / 모바일 원격 / 새 대화창 어디서든)이 이 프로젝트를
