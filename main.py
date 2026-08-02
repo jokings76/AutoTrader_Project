@@ -6,6 +6,7 @@
 import asyncio
 import time
 import os
+import subprocess
 from datetime import datetime, timedelta
 
 from api.auth import get_access_token, send_telegram
@@ -1239,6 +1240,70 @@ class TradingBot:
             except Exception:
                 logger.exception("FID228 감시 예외")
 
+    @staticmethod
+    def _is_remote_control_running() -> bool:
+        """claude --remote-control 프로세스 존재 여부 확인 (블로킹 — 반드시
+        asyncio.to_thread로 호출할 것, 메인 루프를 막으면 안 됨).
+
+        Win32_Process 커맨드라인을 훑어 '--remote-control' 문자열을 찾는다.
+        확인 자체가 실패하면(powershell 오류 등) 오탐 알림을 막기 위해
+        '있다'(True)로 간주한다 — 이 워치독의 목적은 진짜 이상만 잡는 것.
+        """
+        try:
+            result = subprocess.run(
+                [
+                    "powershell", "-NoProfile", "-Command",
+                    "(Get-CimInstance Win32_Process -Filter \"Name='claude.exe'\").CommandLine",
+                ],
+                capture_output=True, text=True, timeout=15,
+            )
+            return "--remote-control" in (result.stdout or "")
+        except Exception:
+            logger.exception("원격제어 프로세스 확인 중 오류")
+            return True
+
+    async def task_remote_control_watchdog(self):
+        """모바일 원격제어(claude --remote-control) 기동 감시 — 09:06 1회 (2026-08-02 신규).
+
+        발단: 모바일 앱에서 원격제어 세션 '종료'를 누르는 과정(특히 실수로
+        두 번 누르는 경우)에서 세션이 비정상 종료되면, start_remote_control.ps1
+        의 재시작 루프가 있어도 연속 실패로 자동재시작을 포기하거나 PATH/인증
+        문제로 아예 못 뜨는 극단적 경우가 있을 수 있다. 원격제어는 트레이딩
+        봇(main.py)과 완전히 별도 프로세스/창이라 **매매 자체엔 영향이 없지만**,
+        "오늘 장중에 폰으로 확인을 못 한다"는 사실을 그날 안에 알아야 대응할
+        수 있다. FID228 워치독과 동일한 패턴 — 09:0X에 1회만 확인, 평소엔
+        조용히 로그만 남기고 끝난다.
+        """
+        notified = False
+        while not self._stop:
+            await asyncio.sleep(30)
+            try:
+                now = datetime.now()
+                if notified or not time_in(now, 9, 6):
+                    continue
+                if time_after(now, 14, 50):
+                    continue
+                notified = True
+
+                running = await asyncio.to_thread(self._is_remote_control_running)
+                if running:
+                    logger.info("✅ 원격제어(claude --remote-control) 프로세스 정상 확인")
+                    continue
+
+                msg = (
+                    "⚠️ [원격제어] claude --remote-control 프로세스가 안 보입니다.\n"
+                    "모의투자 봇 매매엔 영향 없음(완전 별도 프로세스) — 다만 오늘\n"
+                    "폰 원격 접속이 안 될 수 있습니다.\n"
+                    "PC에서 확인: start_remote_control.ps1 수동 재실행 필요할 수 있음."
+                )
+                logger.warning(msg.replace("\n", " | "))
+                try:
+                    send_telegram(msg, target="signal")
+                except Exception:
+                    logger.exception("원격제어 워치독 알림 발송 실패")
+            except Exception:
+                logger.exception("원격제어 워치독 예외")
+
     async def task_entry_diagnostics(self):
         """장중 진입 진단 알림 (2026-08-01 신규).
 
@@ -1337,6 +1402,7 @@ class TradingBot:
                 self.task_tick_archive(),
                 self.task_entry_diagnostics(),
                 self.task_fid228_watchdog(),
+                self.task_remote_control_watchdog(),
                 # self.task_condition_snapshot_poll(),
             )
         except asyncio.CancelledError:

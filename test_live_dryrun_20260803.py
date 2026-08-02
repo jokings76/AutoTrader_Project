@@ -692,6 +692,83 @@ check("버스트 계산 실패가 인프라 이상으로 분류됨",
       _cat in SM.StrategyManager._REJECT_INFRA, _cat)
 
 # ═════════════════════════════════════════════════════════
+print("\n[19] 기동 인프라 — 08:59 무인 기동이 실제로 성립하는지")
+# 여기서 보는 것은 '전략'이 아니라 **봇이 뜨는가 / 폰으로 볼 수 있는가**다.
+# 이 계층은 무인(비대화형) 실행이라 실패해도 화면에 아무도 없다 — 그래서
+# 대화형으로 손으로 확인하는 방식으로는 절대 못 잡는다(2026-07-28 교훈).
+import os as _os
+import re as _re
+
+# main.py는 **텍스트로** 읽는다 — 이 스위트는 main을 import하지 않는 구조라
+# (스텁 계약이 strategy_manager 기준) 여기서 import하면 부작용이 생긴다.
+# 검사 목적은 '배선이 코드에 실제로 있는가'이므로 소스 검사로 충분하고,
+# import 가능 여부는 이관 체크리스트 1번이 따로 본다.
+_ROOT = _os.path.dirname(_os.path.abspath(__file__))
+_main_src = open(_os.path.join(_ROOT, "main.py"), encoding="utf-8").read()
+
+
+def _func_body(src, name):
+    """def name(...) 부터 다음 같은 들여쓰기의 def 전까지를 잘라낸다."""
+    m = _re.search(rf"\n(\s*)(?:async )?def {name}\b", src)
+    if not m:
+        return ""
+    indent, start = m.group(1), m.start()
+    nxt = _re.search(rf"\n{indent}(?:async )?def ", src[start + 1:])
+    return src[start: start + 1 + nxt.start()] if nxt else src[start:]
+
+
+# (1) 원격제어 감시가 gather에 실제로 배선됐는지 — 정의만 하고 등록을 빠뜨리면
+#     조용히 아무 일도 안 일어난다(08-02에 겪은 '배선 누락' 부류).
+check("원격제어 워치독이 정의됨",
+      "async def task_remote_control_watchdog" in _main_src)
+check("원격제어 워치독이 gather에 등록됨",
+      "self.task_remote_control_watchdog()" in _main_src)
+
+# (2) 감시 자체가 매매를 방해하면 안 된다 — 블로킹 호출은 반드시 to_thread로.
+_rc_src = _func_body(_main_src, "task_remote_control_watchdog")
+check("원격제어 확인이 to_thread로 분리됨(이벤트 루프 비차단)",
+      "asyncio.to_thread" in _rc_src)
+check("원격제어 워치독에 예외 처리가 있음", "except Exception" in _rc_src)
+
+# (3) 확인 실패 시 True(=정상으로 간주) — 오탐 알림으로 장중 주의를 뺏지 않는다.
+_isrun_src = _func_body(_main_src, "_is_remote_control_running")
+check("프로세스 확인 실패 시 오탐 방지로 True 반환", "return True" in _isrun_src)
+check("프로세스 확인에 타임아웃이 걸려 있음", "timeout=" in _isrun_src)
+
+# (4) 세션 연속성 — 매일 새 대화로 리셋되면 폰에서 어제 맥락을 잃는다.
+_ps1 = _os.path.join(_ROOT, "start_remote_control.ps1")
+_ps1_txt = open(_ps1, encoding="utf-8-sig").read() if _os.path.exists(_ps1) else ""
+check("원격제어 런처가 존재함", bool(_ps1_txt))
+check("기본 경로가 --continue (전날 대화 이어가기)", "--continue" in _ps1_txt)
+check("자동 재시작 루프가 있음(모바일 종료 클릭 후 방치 방지)",
+      "while ($restartCount" in _ps1_txt)
+check("연속 즉시종료 시 무한재시작 중단 장치가 있음",
+      "maxConsecutiveFastFails" in _ps1_txt)
+check("이관용 1회성 새 세션 플래그를 지원함",
+      "NEW_SESSION_REQUESTED" in _ps1_txt)
+check("플래그는 사용 즉시 삭제(1회성 보장)",
+      "Remove-Item $newSessionFlag" in _ps1_txt)
+
+# (5) 인코딩 함정 — 여기서 틀리면 무인 기동이 통째로 실패한다(2026-07-28 실장애).
+_ps1_head = open(_ps1, "rb").read(3) if _os.path.exists(_ps1) else b""
+check("start_remote_control.ps1이 UTF-8 BOM (PS 5.1 한글 파싱)",
+      _ps1_head == b"\xef\xbb\xbf", repr(_ps1_head))
+_bat = _os.path.join(_ROOT, "start_trader.bat")
+_bat_raw = open(_bat, "rb").read() if _os.path.exists(_bat) else b""
+check("start_trader.bat이 순수 ASCII (cmd.exe 코드페이지 함정 회피)",
+      all(b < 0x80 for b in _bat_raw), f"{len(_bat_raw)}바이트")
+check("bat이 ASCII junction 경로를 참조(한글 경로 회피)",
+      b"C:\\AutoTrader_Bot\\ProjectRoot" in _bat_raw)
+
+# (6) 고아 STOP_SIGNAL — 있으면 기동 5초 만에 스스로 죽어 하루가 통째로 날아간다.
+check("setup()에 낡은 STOP_SIGNAL 정리 로직이 있음",
+      "낡은 STOP_SIGNAL" in _main_src)
+check("현재 STOP_SIGNAL 고아 파일이 없음",
+      not _os.path.exists(_os.path.join(_ROOT, "STOP_SIGNAL")))
+check("이관 플래그가 남아있지 않음(다음 기동은 이어가기)",
+      not _os.path.exists(_os.path.join(_ROOT, "NEW_SESSION_REQUESTED")))
+
+# ═════════════════════════════════════════════════════════
 print("\n" + "=" * 60)
 print(f"통과 {len(PASS)}건 / 실패 {len(FAIL)}건")
 if FAIL:
