@@ -105,7 +105,33 @@ check("그래서 CONDITION_NAMES에 없어야 한다",
       "종가베팅" not in __import__("config.settings", fromlist=["x"]).CONDITION_NAMES)
 
 print("\n" + "=" * 62)
-print("[7] 낡은 STOP_SIGNAL이 기동을 죽이지 않는지 (2026-08-02 실사고)")
+print("[7] seq 표기 차이(0 패딩)에 안 뚫리는가")
+print("=" * 62)
+# HTS 화면은 [000]/[005]처럼 0을 채워 보여주고 API는 실측상 패딩이 없다
+# (등록 seq=1,2,3 / 실시간 FID 841='1','3'). 둘이 섞이면 '6' != '006'으로
+# 조용히 어긋나 종가베팅 종목이 매매 라우팅으로 새어 들어간다.
+check("_norm_seq('006') == _norm_seq('6')", M._norm_seq("006") == M._norm_seq("6"))
+check("_norm_seq(6) == _norm_seq('006')", M._norm_seq(6) == M._norm_seq("006"))
+check("_norm_seq(None)은 빈 문자열", M._norm_seq(None) == "")
+
+# 실제 신호 경로에서 패딩이 달라도 차단되는지
+bot = build_bot(cb_seq=M._norm_seq("006"))     # 등록은 '006'으로 잡혔다고 가정
+asyncio.run(bot._on_signal("666666", "I", {"jmcode": "666666"}, cond_seq="6"))
+check("등록 '006' / 실시간 '6' 이어도 매매 라우팅 차단",
+      bot.calls == [] and "666666" in bot._closing_bet_codes, str(bot.calls))
+
+bot = build_bot(cb_seq=M._norm_seq("6"))       # 반대 조합
+asyncio.run(bot._on_signal("777777", "I", {"jmcode": "777777"}, cond_seq="006"))
+check("등록 '6' / 실시간 '006' 이어도 매매 라우팅 차단",
+      bot.calls == [] and "777777" in bot._closing_bet_codes, str(bot.calls))
+
+# 다른 조건식(seq=1)은 여전히 정상 통과해야 한다 — 과차단 방지
+asyncio.run(bot._on_signal("888888", "I", {"jmcode": "888888"}, cond_seq="1"))
+check("seq=1(주도주상위)은 과차단 없이 정상 라우팅",
+      any(c[0] == "888888" for c in bot.calls), str(bot.calls))
+
+print("\n" + "=" * 62)
+print("[8] 낡은 STOP_SIGNAL이 기동을 죽이지 않는지 (2026-08-02 실사고)")
 print("=" * 62)
 # 2026-08-02: 13:59 정상종료 후 14:14에 만들어진 고아 STOP_SIGNAL이 남아
 # 있었다. 그대로 뒀으면 다음날 08:59 무인 기동이 5초 만에 종료됐을 것이다.

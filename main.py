@@ -45,6 +45,19 @@ def time_after(now: datetime, h: int, m: int) -> bool:
     return (now.hour, now.minute) > (h, m)
 
 
+def _norm_seq(seq) -> str:
+    """조건식 seq 정규화 — 앞자리 0을 떼고 비교한다 (2026-08-02).
+
+    HTS 화면은 조건식을 [000]/[001]/[005]처럼 0을 채워 표시하는데, API가
+    주는 값은 실측상 패딩이 없다(등록 응답 seq=1,2,3 / 실시간 FID 841='1','3').
+    둘이 섞이면 '6' != '006'으로 조용히 어긋나고, 그러면 종가베팅 종목이
+    매매 라우팅 차단을 통과해 장중 1A 후보로 새어 들어간다 — 에러가 안 나서
+    로그만으로는 알아채기 어려운 종류의 사고다. 양쪽을 정규화해서 막는다.
+    """
+    s = str(seq if seq is not None else "").strip()
+    return s.lstrip("0") or ("0" if s else "")
+
+
 def _extract_stock_name(raw: dict, stock_code: str) -> str:
     if not isinstance(raw, dict):
         return stock_code
@@ -153,6 +166,14 @@ class TradingBot:
         # ★ 신규: 현재 진입 종목 스냅샷 처리
         await self._process_initial_snapshot()
 
+        # 종가베팅 유니버스 초기 스냅샷 (2026-08-02).
+        # 실시간 편입은 '구독 이후 새로 들어온 것'만 알려주므로, 장중에
+        # 재시작하면 그 전까지 쌓인 멤버십을 통째로 잃는다. 여기서 한 번
+        # 받아두면 재시작해도 14:50 유니버스가 온전하다.
+        # ⚠️ listen() 시작 전(setup 단계)이라 _wait_for가 소켓을 독점해도
+        #    안전하다. 장중 임의 시점에 부르면 체결틱을 흘리므로 금지.
+        await self._snapshot_closing_bet_universe()
+
         deposit = self.rest.get_orderable_amount()
         msg = (f"자동매매 봇 시작\n"
                f"모드: {'모의투자' if settings.IS_MOCK else '실전'}\n"
@@ -197,17 +218,52 @@ class TradingBot:
             cb_seq = name_to_seq.get(cb_name)
             if cb_seq:
                 await self.ws.subscribe_condition(cb_seq)
-                self._closing_bet_seq = str(cb_seq)
-                logger.info(f"   '{cb_name}' -> seq={cb_seq} (종가베팅 전용, 매매 라우팅 제외)")
+                self._closing_bet_seq = _norm_seq(cb_seq)
+                logger.info(
+                    "   '%s' -> seq=%s (종가베팅 전용, 매매 라우팅 제외)", cb_name, cb_seq
+                )
             else:
+                # 이름이 안 맞으면 조용히 0종목이 되는 게 아니라 **폴백**한다.
+                # HTS 화면의 [005] 같은 표기는 표시용 인덱스이고 API seq는
+                # 그것과 다르다(실측: 화면 [000]/[001]/[002] -> API seq 1/2/3).
+                # 그래서 번호가 아니라 반드시 '이름'으로 찾는다.
                 logger.warning(
-                    f"   '{cb_name}' 종가베팅 조건식 없음 — 기존 장중 검색식 유니버스로 폴백"
+                    "   '%s' 종가베팅 조건식 없음 — 기존 장중 검색식 유니버스로 폴백. "
+                    "HTS 조건식 이름과 config.ini CLOSING_BET_CONDITION_NAME이 "
+                    "정확히 같은지 확인할 것 (등록된 조건식: %s)",
+                    cb_name, sorted(cond_map.values())[:40],
                 )
 
         if not settings.CONDITION_NAMES and settings.CONDITION_NOS:
             for seq in settings.CONDITION_NOS:
                 if seq in cond_map:
                     await self.ws.subscribe_condition(seq)
+
+    async def _snapshot_closing_bet_universe(self):
+        """종가베팅 전용 검색식의 현재 편입 종목을 한 번 받아 유니버스를 채운다.
+
+        ⚠️ setup() 단계에서만 호출할 것 — fetch_condition_snapshot의 _wait_for가
+        소켓에서 직접 recv 하기 때문에, listen()이 돌고 있는 장중에 부르면
+        체결틱/호가를 최대 10초 흘린다(15:10까지 손절 감시가 살아있어야 하므로
+        치명적). setup()은 asyncio.gather(listen(), ...)보다 먼저 실행된다.
+
+        여기서 받은 종목은 **매매 라우팅에 넣지 않는다** — on_condition_hit을
+        부르지 않고 _closing_bet_codes에만 넣는다.
+        """
+        if not self._closing_bet_seq:
+            return
+        try:
+            codes = await self.ws.fetch_condition_snapshot(self._closing_bet_seq)
+        except Exception:
+            logger.exception("종가베팅 유니버스 초기 스냅샷 실패(실시간 편입으로 계속 누적)")
+            return
+        codes = [c for c in (codes or []) if c]
+        self._closing_bet_codes.update(codes)
+        logger.info(
+            "🔔 [종가베팅] 초기 유니버스 %d종목 (seq=%s) %s",
+            len(self._closing_bet_codes), self._closing_bet_seq,
+            sorted(self._closing_bet_codes)[:10],
+        )
 
     async def _process_initial_snapshot(self):
         """봇 시작 시 조건식에 이미 들어있는 종목들을 가져와서 처리.
@@ -376,7 +432,7 @@ class TradingBot:
         # 건드리지 않으므로 장중 1A/Pullback 진입 로직에 영향이 없다.
         # CONDITION_NAMES에 그냥 넣으면 resolve_strategy의 "둘 다 아님 -> 1A"
         # 폴백에 걸려 장중 매수 후보가 되어버린다.
-        if self._closing_bet_seq and str(cond_seq or "") == self._closing_bet_seq:
+        if self._closing_bet_seq and _norm_seq(cond_seq) == self._closing_bet_seq:
             if signal_type == "I":
                 self._closing_bet_codes.add(stock_code)
             else:
@@ -864,6 +920,24 @@ class TradingBot:
                 if not target_codes:
                     universe_src = "폴백(장중 검색식 전체)"
                     target_codes = list(strat._cond_names.keys())
+                    if self._closing_bet_seq:
+                        # 검색식은 정상 등록됐는데 하루 종일 편입이 0건이라면
+                        # (a) 조건이 너무 빡빡하거나 (b) 구독/파싱이 깨진 것이다.
+                        # 조용히 폴백만 하면 전환이 안 된 걸 눈치채지 못하므로
+                        # 텔레그램으로 올린다.
+                        warn = (
+                            f"⚠️ 종가베팅 검색식(seq={self._closing_bet_seq})이 "
+                            f"등록됐는데 오늘 편입 0건 — 조건이 과하거나 구독 이상. "
+                            f"장중 검색식 유니버스로 폴백합니다."
+                        )
+                        logger.warning(warn)
+                        if send_telegram:
+                            send_telegram(warn, target="closing_bet")
+                    else:
+                        logger.warning(
+                            "⚠️ 종가베팅 검색식 미등록 — config.ini의 "
+                            "CLOSING_BET_CONDITION_NAME과 HTS 조건식 이름을 확인할 것"
+                        )
                 logger.info(
                     "🔔 [종가베팅] 유니버스 %d종목 — %s", len(target_codes), universe_src
                 )
