@@ -89,6 +89,12 @@ class TradingBot:
         self.surge_seqs: set[str] = set()   # 급등 즉시매수 대상 조건 seq
         self._known_hits: dict[str, set[str]] = {}  # cond_seq -> 이미 본 종목 (폴링 diff용)
         self._orphan_notified: set[str] = set()  # 유령 포지션 알림 중복 방지 (2026-08-01)
+        # 장마감 마무리 작업 완료 플래그 (2026-08-03) — 셋 다 끝나면 즉시 종료한다.
+        # 예전엔 15:40 고정 시각까지 무조건 기다려서, 할 일이 다 끝난 뒤에도
+        # 테마 재계산/조건검색 수신이 계속 돌았다.
+        self._closing_bet_done = False   # 14:50 종가베팅 스캔·전송
+        self._force_close_done = False   # 15:10 강제청산
+        self._backtest_done = False      # 15:30 일일 백테스트
         self._last_signal_time = time.time()  # task_signal_watchdog와 WS 재연결 핸들러가 공유
 
         # ── 종가베팅 전용 조건검색식 (2026-08-02 신규) ───────────────
@@ -841,6 +847,14 @@ class TradingBot:
                     except Exception:
                         logger.exception(f"[{code}] 강제청산 실패")
                 await asyncio.sleep(60)
+
+            # 완료 판정은 트리거 블록 **밖**에서 매 루프 다시 본다 (2026-08-03).
+            # 안에 두면 위 블록이 하루 1회만 실행되므로, 그 순간 매도가 아직
+            # pending이라 holdings가 안 비어 있으면 플래그를 영영 못 세운다.
+            # 보유가 남아 있으면 완료로 치지 않는다 — 오버나이트 방지가 최우선이라
+            # 그때는 15:40 하드 폴백까지 봇을 살려 둔다.
+            if triggered and not self.strategy_mgr.holdings:
+                self._force_close_done = True
             await asyncio.sleep(10)
 
     async def task_auto_shutdown(self):
@@ -851,11 +865,39 @@ class TradingBot:
         # daily_backtest가 15:30에 트리거돼 보통 30~60초 안에 끝나는 걸 감안해
         # 15:40으로 늦춰서 재활성화(2026-07-30) — 강제청산(15:15)과 백테스트
         # 리포트(15:30) 둘 다 끝난 뒤에만 종료되도록.
+        # (2026-08-03) 고정 시각 대기 -> **할 일이 끝나면 즉시 종료**로 변경.
+        # 마무리 3종(14:50 종가베팅 / 15:10 강제청산 / 15:30 백테스트)이 모두
+        # 끝나면 기다리지 않고 내린다. 08-03에 15:10 청산이 끝난 뒤에도 테마
+        # 재계산과 조건검색 수신이 15:40까지 계속 돌았다.
+        #
+        # ⚠️ 종가베팅(14:50)만으로 내리면 안 된다 — 그 뒤에 **강제청산(15:10)**이
+        # 있어서, 먼저 종료하면 보유 종목이 그대로 오버나이트로 넘어간다.
+        # 그래서 "종가베팅 완료"가 아니라 "셋 다 완료"가 조건이다.
+        # 15:40은 그대로 두되 이제는 **하드 폴백**이다(어느 태스크가 멈춰도
+        # 봇이 밤새 도는 일은 없게).
         target_time = "15:40"
         while not self._stop:
             now_str = datetime.now().strftime("%H:%M")
-            if now_str >= target_time:
-                msg = f"⏰ 설정된 시간({target_time}) 도달. 매매를 중지하고 프로그램을 안전하게 자동 종료합니다."
+            all_done = (
+                self._closing_bet_done
+                and self._force_close_done
+                and self._backtest_done
+            )
+            if all_done or now_str >= target_time:
+                if all_done:
+                    msg = (
+                        "⏰ 장마감 마무리 완료(종가베팅·강제청산·일일리포트) — "
+                        "프로그램을 안전하게 자동 종료합니다."
+                    )
+                else:
+                    msg = (
+                        f"⏰ 설정된 시간({target_time}) 도달. 매매를 중지하고 "
+                        f"프로그램을 안전하게 자동 종료합니다. "
+                        f"(미완료: "
+                        f"{'종가베팅 ' if not self._closing_bet_done else ''}"
+                        f"{'강제청산 ' if not self._force_close_done else ''}"
+                        f"{'백테스트' if not self._backtest_done else ''})"
+                    )
                 logger.info(msg)
                 # 텔레그램 실패가 종료 절차를 막지 않게 한다 (2026-08-02) —
                 # 여기서 예외가 나면 gather가 무너져 shutdown()이 안 불린다.
@@ -1012,6 +1054,11 @@ class TradingBot:
 
             except Exception as e:
                 logger.exception("종가베팅 스캔 중 에러: %s", e)
+            finally:
+                # 실패해도 '이 작업은 오늘 끝났다'로 본다 — 여기서 예외가 났다고
+                # 종료를 무한정 미루면 봇이 밤새 도는 옛 문제로 되돌아간다.
+                # (실행 자체가 안 된 경우는 done_date 가드가 이미 막고 있다.)
+                self._closing_bet_done = True
 
     async def task_tick_archive(self):
         """매일 09:20에 1회, 오늘 조건검색에 걸린 종목들의 개장초반(09:00~09:15)
@@ -1073,6 +1120,10 @@ class TradingBot:
                 await asyncio.to_thread(run_daily_backtest, self.rest)
             except Exception:
                 logger.exception("일일 백테스트 실행 중 에러")
+            finally:
+                # 실패해도 완료로 본다 — 리포트는 부가 기능이라 이것 때문에
+                # 봇이 계속 떠 있을 이유가 없다(종료 조건 주석 참고).
+                self._backtest_done = True
 
     async def task_slot_replacement(self):
         """1분마다 정체 종목을 감시종목 고득점 후보로 교체 시도. 2026-07-26 신규."""

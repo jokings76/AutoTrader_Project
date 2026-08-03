@@ -23,6 +23,10 @@ import sys
 import time
 from datetime import datetime, timedelta
 
+import os as _os_testlog
+# 실거래 로그(autotrader.log) 오염 방지 — 반드시 core/main 임포트보다 먼저.
+_os_testlog.environ["AUTOTRADER_TEST_LOG"] = "1"
+
 import core.strategy_manager as SM
 from core.phase1b_controller import Phase1BController
 
@@ -302,16 +306,29 @@ check("10:30 이후 매수는 눌림 슬롯으로 들어감",
       str(s2.holdings.get("D001", {}).get("sub_strategy")))
 
 # ═════════════════════════════════════════════════════════
-print("\n[8] 점심(12:00) — 시간대 계수로 완화되는지")
+print("\n[8] 점심(12:00) — 완화가 제거됐는지 (2026-08-03 사양 변경)")
 # ═════════════════════════════════════════════════════════
+# 구버전은 점심 계수 0.65로 문턱이 1,950만원까지 내려가 2천만원 x2건이
+# **통과**했다. 08-03 실거래에서 그 완화 구간(11:30~13:00) 3건이 전부 손실
+# (합계 -5.29%)로 나와 완화를 없앴다 — 이제 점심도 오전과 같은 3천만원이다.
 s3, clk3 = build(datetime(2026, 8, 3, 12, 0, 0))
 s3.on_condition_hit("N001", "점심종목", cond_name="주도주상위")
 ob(s3, "N001")
 tick(s3, "N001", 130.0, T0 + 70)
-burst(s3, "N001", T0 + 73.5, n=2, value=20_000_000)   # 2천만 x2 (오전 기준 미달)
+burst(s3, "N001", T0 + 73.5, n=2, value=20_000_000)   # 2천만 x2 (기준 미달)
 tick(s3, "N001", 130.0, T0 + 73.5)
-check("점심엔 2천만원 x2건도 통과(계수 0.65 -> 문턱 1,950만)",
-      "N001" in s3.holdings, f"holdings={list(s3.holdings)}")
+check("점심에도 2천만원 x2건은 탈락(구버전은 여기서 매수)",
+      "N001" not in s3.holdings, f"holdings={list(s3.holdings)}")
+# 3천만원 x2건이면 점심에도 정상 진입한다 — '점심 매매 중단'이 아니라
+# '점심에도 같은 기준'임을 못박는다.
+s3b, _ = build(datetime(2026, 8, 3, 12, 0, 0))
+s3b.on_condition_hit("N002", "점심정상", cond_name="주도주상위")
+ob(s3b, "N002")
+tick(s3b, "N002", 130.0, T0 + 70)
+burst(s3b, "N002", T0 + 73.5, n=2, value=30_000_000)
+tick(s3b, "N002", 130.0, T0 + 73.5)
+check("점심에도 3천만원 x2건이면 정상 매수",
+      "N002" in s3b.holdings, f"holdings={list(s3b.holdings)}")
 
 s4, clk4 = build(datetime(2026, 8, 3, 9, 30, 0))
 s4.on_condition_hit("M001", "오전종목", cond_name="주도주상위")

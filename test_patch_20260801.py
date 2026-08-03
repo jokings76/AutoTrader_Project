@@ -9,6 +9,10 @@ import sys
 import time
 from datetime import datetime, timedelta
 
+import os as _os_testlog
+# 실거래 로그(autotrader.log) 오염 방지 — 반드시 core/main 임포트보다 먼저.
+_os_testlog.environ["AUTOTRADER_TEST_LOG"] = "1"
+
 import core.strategy_manager as SM
 from core.phase1b_controller import Phase1BController
 from core.strategy.trade_flow import TradeFlowTracker, STRENGTH_NEUTRAL

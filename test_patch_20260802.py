@@ -16,6 +16,10 @@ import sys
 import time
 from datetime import datetime, timedelta
 
+import os as _os_testlog
+# 실거래 로그(autotrader.log) 오염 방지 — 반드시 core/main 임포트보다 먼저.
+_os_testlog.environ["AUTOTRADER_TEST_LOG"] = "1"
+
 import core.strategy_manager as SM
 from core.phase1b_controller import Phase1BController
 from core.strategy.trade_flow import TradeFlowTracker
@@ -237,13 +241,19 @@ def tmul(h, m):
 
 check("09:30 -> 1.00 (개장 구간 원기준)", tmul(9, 30) == 1.00, str(tmul(9, 30)))
 check("10:30 정각 -> 0.85", tmul(10, 30) == 0.85, str(tmul(10, 30)))
-check("12:00 -> 0.65 (점심 최저)", tmul(12, 0) == 0.65, str(tmul(12, 0)))
+# (2026-08-03 사양 변경) 점심 계수 0.65 -> 1.00. 08-03 실거래에서 계수를
+# 가장 많이 낮춘 구간(0.65)의 3건이 전부 손실이었고(합계 -5.29%), 오전에 번
+# +6.56%를 거의 다 지웠다. "완화해야 오후가 산다"는 원래 가정이 실측으로
+# 뒤집힌 것 — 유동성이 마른 시간에 문턱까지 낮추면 약한 신호만 사게 된다.
+check("12:00 -> 1.00 (점심 완화 제거)", tmul(12, 0) == 1.00, str(tmul(12, 0)))
 check("13:30 -> 0.80", tmul(13, 30) == 0.80, str(tmul(13, 30)))
 check("14:30 -> 0.95 (마감 전 회복)", tmul(14, 30) == 0.95, str(tmul(14, 30)))
-check("계수는 단조 감소 후 회복 — 점심이 최저",
-      tmul(12, 0) < tmul(10, 30) < tmul(9, 30) and tmul(12, 0) < tmul(14, 30))
-check("점심 임계값이 실제로 낮아짐 (3천만 -> 1,950만)",
-      abs(SM.PHASE1A_BURST_TRADE_VALUE * tmul(12, 0) - 19_500_000) < 1)
+check("점심은 더 이상 최저가 아님(구버전 0.65 회귀 방지)",
+      tmul(12, 0) == 1.00 and tmul(12, 0) > tmul(13, 30))
+check("점심 임계값이 원기준 3천만원 그대로",
+      abs(SM.PHASE1A_BURST_TRADE_VALUE * tmul(12, 0) - 30_000_000) < 1)
+check("어떤 시간대도 원기준보다 느슨해지지 않음",
+      all(v <= 1.0 for _, v in SM.TICK_BURST_TIME_MULT))
 
 
 # ═════════════════════════════════════════════════════════
@@ -300,8 +310,12 @@ s_morn = build_strat(datetime(2026, 8, 3, 9, 30, 0))
 setup_candidate(s_morn, "BN")
 feed(s_morn.phase1b.trade_flow, "BN", 2, 20_000_000, now=t0, span=1.0)
 ok_morn, _ = s_morn.check_burst("BN", now=t0, now_dt=s_morn._now())
-check("같은 2천만원 x2건: 오전엔 탈락, 점심엔 통과(시간계수 효과)",
-      (not ok_morn) and ok_noon, f"오전={ok_morn} 점심={ok_noon}")
+# (2026-08-03) 구버전은 여기서 "점심엔 통과"였다(문턱 1,950만원). 점심 완화를
+# 없앴으므로 이제 오전·점심 모두 3천만원 기준이라 2천만원 x2건은 양쪽 다 탈락한다.
+check("2천만원 x2건은 오전·점심 모두 탈락(점심 완화 제거)",
+      (not ok_morn) and (not ok_noon), f"오전={ok_morn} 점심={ok_noon}")
+check("점심 문턱이 오전과 동일해짐",
+      d_noon.get("burst_min") == 30_000_000, str(d_noon.get("burst_min")))
 
 s = build_strat()
 setup_candidate(s, "BE")

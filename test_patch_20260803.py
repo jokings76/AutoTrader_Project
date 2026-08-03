@@ -23,6 +23,10 @@
 import sys
 from datetime import datetime, timedelta
 
+import os as _os_testlog
+# 실거래 로그(autotrader.log) 오염 방지 — 반드시 core/main 임포트보다 먼저.
+_os_testlog.environ["AUTOTRADER_TEST_LOG"] = "1"
+
 import core.strategy_manager as SM
 from core.phase1b_controller import Phase1BController
 
@@ -243,6 +247,57 @@ check("순 +2.5%에서는 아직 안 팜 (구버전이면 여기서 익절)", no
 px_40 = int(10_000 * (1 + SM.TAKE_PROFIT_CAP + SM.ROUND_TRIP_COST)) + 2
 s7.on_price_update("000007", px_40)
 check("순 +4.0% 도달 시 익절 캡 청산", sold(s7, "000007"))
+
+print("\n[9] 손절 — 워밍업 중에도 반드시 작동해야 한다")
+# 08-03 발견: on_price_update의 워밍업 return이 손절 판정보다 위에 있어서
+# 매수 직후 60초는 얼마가 빠지든 무방비였다. 가격 폴백 태스크도 결국 이
+# 함수를 부르므로 우회 경로도 없었다.
+s9 = build()
+p9 = put_pos(s9, code="000009", warmup_done=False)   # 워밍업 진행 중
+check("워밍업 중인 포지션인지 확인", s9._now() < p9["warmup_until"])
+s9.on_price_update("000009", 9_600)                  # -4% 급락
+check("워밍업 중에도 손절 발동", sold(s9, "000009"))
+check("사유가 손절",
+      any("손절" in (r.get("exit_reason") or "") for r in _Repo.sells),
+      str([r.get("exit_reason") for r in _Repo.sells])[:60])
+
+# 워밍업 중 '손절이 아닌' 판정은 여전히 보류되어야 한다(성급한 청산 방지).
+s9b = build()
+p9b = put_pos(s9b, code="000010", warmup_done=False)
+s9b.on_price_update("000010", px_arm)                # 순 +1% (본전스톱 무장 지점)
+check("워밍업 중엔 본전스톱 무장 안 함(강도류 판단 보류 유지)",
+      not p9b.get("breakeven_armed") and not sold(s9b, "000010"))
+
+# 손절선 자체는 그대로
+check("손절선 -3% 유지", abs(SM.STOP_LOSS_RATE - (-0.03)) < 1e-9, f"{SM.STOP_LOSS_RATE}")
+
+print("\n[10] 시간대 계수 — 점심 완화 제거 (08-03 실측: 완화 구간 전부 손실)")
+mult = dict(SM.TICK_BURST_TIME_MULT)
+check("점심(11:30~) 계수 1.00 (구 0.65)", abs(mult[(11, 30)] - 1.00) < 1e-9,
+      f"{mult[(11, 30)]}")
+check("개장 구간은 그대로 1.00", abs(mult[(9, 0)] - 1.00) < 1e-9)
+check("계수가 1.00을 넘지 않음(강화가 아니라 '완화 제거')",
+      all(v <= 1.0 for _, v in SM.TICK_BURST_TIME_MULT))
+s10 = build(datetime(2026, 8, 3, 12, 0, 0))
+check("12:00 시점 계수가 1.00으로 조회됨",
+      abs(s10.burst_time_multiplier(datetime(2026, 8, 3, 12, 0, 0)) - 1.00) < 1e-9)
+check("09:30 시점도 1.00",
+      abs(s10.burst_time_multiplier(datetime(2026, 8, 3, 9, 30, 0)) - 1.00) < 1e-9)
+
+print("\n[11] 자동종료 — 할 일 끝나면 즉시 (종가베팅만으론 안 됨)")
+msrc = open("main.py", encoding="utf-8").read()
+for f in ("_closing_bet_done", "_force_close_done", "_backtest_done"):
+    check(f"완료 플래그 {f} 존재", f"self.{f}" in msrc)
+check("셋 다 완료여야 종료(AND 조건)",
+      "self._closing_bet_done" in msrc and "and self._force_close_done" in msrc
+      and "and self._backtest_done" in msrc)
+check("15:40 하드 폴백 유지", 'target_time = "15:40"' in msrc)
+check("강제청산 완료 판정이 트리거 블록 밖(매 루프 재평가)",
+      "if triggered and not self.strategy_mgr.holdings:" in msrc)
+check("보유가 남으면 완료로 치지 않음(오버나이트 방지)",
+      "not self.strategy_mgr.holdings" in msrc)
+check("종가베팅/백테스트는 실패해도 완료 처리(무한 대기 방지)",
+      msrc.count("finally:") >= 2)
 
 print("\n[8] daily_backtest 동기화")
 import core.daily_backtest as DB

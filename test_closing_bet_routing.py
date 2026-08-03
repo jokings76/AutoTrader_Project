@@ -10,6 +10,10 @@ import sys, os, asyncio
 sys.path.insert(0, os.path.abspath("."))
 sys.stdout.reconfigure(encoding="utf-8")
 
+import os as _os_testlog
+# 실거래 로그(autotrader.log) 오염 방지 — 반드시 core/main 임포트보다 먼저.
+_os_testlog.environ["AUTOTRADER_TEST_LOG"] = "1"
+
 import main as M
 import core.strategy_manager as SM
 
