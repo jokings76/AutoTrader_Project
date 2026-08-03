@@ -388,9 +388,12 @@ HOLDING_TIMEOUT = timedelta(minutes=EXIT_POLICY["default"]["holding_timeout_min"
 # 판단. 익절 캡은 "매수 시점"으로 결정해 포지션 보유 중에 정책이 바뀌지 않게 한다
 # (09:09에 산 종목이 09:11에 기준이 올라가면 판단이 흔들리므로).
 # (2026-08-02) TAKE_PROFIT_CAP_1B는 1B 삭제와 함께 제거 — 값은 Pullback과 같았다.
-TAKE_PROFIT_CAP_PULLBACK = 0.015
-TAKE_PROFIT_CAP_EARLY = 0.015
-EARLY_WINDOW_END = time(9, 10)  # GROUP_A_START~이 시각 사이 매수분은 1.5%
+# (2026-08-03) 1.5% -> 2.5%. 08-03 실거래에서 익절 계열 청산 평균이 수수료
+# (0.23%)를 겨우 넘는 수준이라 캡이 사실상 '수수료 내고 본전'을 만들고 있었다.
+# 1A 기본캡(4.0%)보다는 여전히 타이트하게 둬서 전략 간 성격 차이는 유지한다.
+TAKE_PROFIT_CAP_PULLBACK = 0.025
+TAKE_PROFIT_CAP_EARLY = 0.025
+EARLY_WINDOW_END = time(9, 10)  # GROUP_A_START~이 시각 사이 매수분은 이 캡
 
 # ── 동적 익절캡 (2026-07-30 사용자 지정) ───────────────────────
 # 1.5%캡 종목이 보유 중 체결강도 상승을 보이면 캡을 2.5%로 올려 더 태우고,
@@ -403,7 +406,10 @@ EARLY_WINDOW_END = time(9, 10)  # GROUP_A_START~이 시각 사이 매수분은 1
 # 하락 판정을 AND로 걸어야 효과가 났다(OR로는 과민해서 오히려 악화).
 # 주의: 강도 임계값은 과거 틱이 없어 백테스트로 검증 불가 — 실전 관찰 필요.
 # 하락 임계값은 검증된 slot_replacement와 같은 값을 재사용해 일관성 유지.
-TP_CAP_UPGRADED = 0.025             # 상향 목표 캡
+# ⚠️ [대체됨, 2026-08-03] TP_CAP_UPGRADED_MAX(6.0%)로 교체. 이 값을 고쳐도
+# 반영되지 않는다 — 1A 기본캡과 값이 같아(둘 다 0.025) 동적캡 즉시매도가
+# 모든 1A에서 항상 참이 되던 결함의 원인이었다(아래 cap_exit 주석 참고).
+TP_CAP_UPGRADED = 0.025             # [미사용]
 # 상향 판단 시점 = 순수익 +1.0% 도달 (2026-07-31 사용자 지시로 1.5%->1.0% 하향).
 # 이 시점에 체결강도로 갈림길을 만든다:
 #   강도 상승 -> 캡을 2.5%로 올려 더 태움
@@ -414,10 +420,27 @@ TP_CAP_UPGRADED = 0.025             # 상향 목표 캡
 # 주의: 백테스트는 gross(가격) 기준이었으나 라이브 캡 비교는 전부 net(수수료
 # 차감) 기준이라 여기서도 net으로 통일했다(0.23%p 차이는 사용자에게 유리한 방향).
 TP_UPGRADE_TRIGGER = 0.010
-TP_UPGRADE_STRENGTH_RATIO = 1.2     # 진입강도 대비 이 배수 이상이면 상향
-TP_DECLINE_STRENGTH_RATIO = 0.8     # 진입강도 대비 이 배수 미만이면 "강도 하락"
+TP_UPGRADE_STRENGTH_RATIO = 1.2     # 기준강도 대비 이 배수 이상이면 상향
+TP_DECLINE_STRENGTH_RATIO = 0.8     # 기준강도 대비 이 배수 미만이면 "강도 하락"
 TP_DECLINE_VOLUME_RATIO = 1.0       # volume_ratio 이 값 미만이면 "거래량 하락"
 TP_VOL_CHECK_SEC = 30               # 거래량 확인(REST) 종목당 최소 간격
+TP_CAP_UPGRADED_MAX = 0.060         # 상향 시 목표 캡 (2026-08-03, 2.5% -> 6.0%)
+
+# ── 본전스톱 (2026-08-03 신규, '익절 조기확정'을 대체) ─────────────
+# 기존: 순 +1.0% 도달 시 체결강도가 안 올랐으면 **그 자리서 매도**(조기확정).
+# 문제: 08-03 실거래 2건 모두 매도 후 더 올랐다(037070 매도가 대비 +12.0%,
+#       439960 +3.4%). 이익을 지킨 게 아니라 기회를 확정해 버린 셈이었다.
+# 변경: 같은 지점에서 매도하는 대신 **손절선을 본전으로 끌어올린다**.
+#       하방을 먼저 닫으므로 캡을 올려도 리스크가 늘지 않는다
+#       (최악의 경우 = 왕복수수료 0.23%만 손실).
+# 왜 트레일링이 아니라 본전스톱인가: 08-03 틱 재생 결과 고점 대비 -0.5~1.0%
+# 트레일링은 오히려 현행보다 나빴다(+0.72% vs +0.86%). 매수 직후 본격
+# 상승 전에 -2.7%까지 밀리는 흔들림이 있어 좁은 트레일은 전부 털린다.
+# 의미 있는 개선은 -3.0% 트레일(+9.44%)부터인데, 그 폭은 하루치 1종목으로
+# 정하기엔 위험이 커서 캡(예측 가능) + 본전스톱(하방 차단) 조합을 먼저 쓴다.
+BREAKEVEN_STOP_ENABLED = True
+BREAKEVEN_TRIGGER = 0.010           # 순 +1.0% 도달 시 무장
+BREAKEVEN_FLOOR = 0.000             # 무장 후 순수익이 이 값 아래로 떨어지면 청산
 
 # ── 손실 반등 하이브리드 매도 (2026-07-31 사용자 지정) ──────────
 # 손실 중인 종목이 저점에서 한 번 반등했는데 그 반등이 체결강도·거래량 어느
@@ -3407,6 +3430,28 @@ class StrategyManager:
         if gross_rate <= STOP_LOSS_RATE:
             exit_reason = f"손절 가격{gross_rate*100:.2f}% (순 {net_rate*100:.2f}%)"
 
+        # 1-b) 본전스톱 (2026-08-03) — 순 +1.0%를 한 번이라도 찍은 포지션은
+        # 그 뒤 본전 아래로 내려오면 청산한다. '조기확정'이 하던 하방 보호를
+        # 이쪽이 대신 맡고, 상단은 캡까지 열어둔다.
+        # 무장은 아래 익절 분기에서 하지 않고 여기서 직접 한다 — 지수급락
+        # 모드로 빠져 익절 분기를 건너뛰어도 하방 보호는 살아있어야 한다.
+        if BREAKEVEN_STOP_ENABLED and exit_reason is None:
+            if not pos.get("breakeven_armed") and net_rate >= BREAKEVEN_TRIGGER:
+                pos["breakeven_armed"] = True
+                pos["breakeven_peak"] = net_rate
+                logger.info(
+                    "[%s] %s 🛡 본전스톱 무장 (순 +%.2f%% 도달 — 이제 손실 없음)",
+                    stock_code, pos.get("stock_name", ""), net_rate * 100,
+                )
+            elif pos.get("breakeven_armed"):
+                if net_rate > pos.get("breakeven_peak", 0.0):
+                    pos["breakeven_peak"] = net_rate
+                if net_rate <= BREAKEVEN_FLOOR:
+                    exit_reason = (
+                        f"본전스톱 (고점 순+{pos.get('breakeven_peak', 0.0)*100:.2f}% "
+                        f"-> 현재 순{net_rate*100:+.2f}%)"
+                    )
+
         # 2) 익절 — 전 전략 flat 익절캡. (2026-08-02) 트레일링 분기는 1L
         # 전용이었고 1L 삭제로 도달 불가가 되어 함께 제거했다.
         # 지수 급락(-5%↓) 대응 모드에서는 캡 대신 flat SEVERE_CRASH_TAKE_PROFIT로
@@ -3441,25 +3486,26 @@ class StrategyManager:
                         if is_leading:
                             reasons.append("주도테마")
                         label = "+".join(reasons)
-                        pos["tp_cap"] = TP_CAP_UPGRADED
+                        pos["tp_cap"] = TP_CAP_UPGRADED_MAX
                         pos["tp_cap_label"] = label
-                        cap, cap_label = TP_CAP_UPGRADED, label
+                        pos["tp_cap_upgraded"] = True   # 동적캡 즉시매도 대상 표식
+                        cap, cap_label = TP_CAP_UPGRADED_MAX, label
                         logger.info(
                             "[%s] %s 익절캡 상향 -> %.1f%% (순+%.2f%% 도달, 사유=%s, "
-                            "체결강도 진입 %.0f -> 현재 %.0f, 테마=%s)",
+                            "체결강도 기준 %.0f -> 현재 %.0f, 테마=%s)",
                             stock_code, pos.get("stock_name", ""),
-                            TP_CAP_UPGRADED * 100, net_rate * 100, label,
-                            pos.get("entry_strength") or 0,
+                            TP_CAP_UPGRADED_MAX * 100, net_rate * 100, label,
+                            self._strength_baseline(pos) or 0,
                             self._current_strength(stock_code),
                             self.theme_mgr.code_to_theme.get(stock_code, "-")
                             if self.theme_mgr else "-",
                         )
-                    elif rising is False:
-                        exit_reason = (
-                            f"익절 조기확정(강도 미상승) 순+{net_rate*100:.2f}% "
-                            f"(가격 +{gross_rate*100:.2f}%)"
-                        )
-                    # rising is None and not is_leading = 판단 불가 -> 기본 캡 유지
+                    # (2026-08-03) rising is False에서 '익절 조기확정'으로 즉시
+                    # 매도하던 분기를 제거했다. 08-03 실거래 2건이 전부 매도 후
+                    # 더 올랐고(+12.0% / +3.4%), 강도 미상승 판정 자체도 기준값이
+                    # 진입 순간의 스파이크라 신뢰도가 낮았다(_strength_baseline
+                    # 주석 참고). 이제 이 지점은 위의 본전스톱이 담당한다 —
+                    # 하방은 본전에서 막고, 상단은 기본 캡까지 열어둔다.
 
                 if exit_reason is None and net_rate >= cap:
                     exit_reason = (
@@ -3489,12 +3535,55 @@ class StrategyManager:
         if exit_reason:
             self._execute_sell(stock_code, current_price, exit_reason)
 
+    def _strength_baseline(self, pos: dict) -> float:
+        """청산 판정에 쓸 체결강도 '기준선' (2026-08-03 신규).
+
+        ⚠️ `entry_strength`를 그대로 쓰면 안 된다. 진입은 대량체결 버스트가
+        터지는 바로 그 순간에 일어나므로, 그때 캡처한 compute_strength(최근
+        10초 창)에는 그 버스트가 통째로 들어있어 **거의 항상 국소 최고점**이다.
+        08-03 실거래에서 042700/090710/010170 세 포지션의 entry_strength가
+        정확히 300(compute_strength 상한)으로 포화돼 있었다. 포화된 최고점을
+        기준선으로 삼고 `현재 < 기준 x 0.8`로 비교하면 **정상 수준으로만
+        돌아와도 '하락'으로 판정**된다 — 하락이 구조적으로 필연이 된다.
+        (08-02에 고친 avg_trade_value의 자기모순과 정확히 같은 종류의 실수다:
+         그때도 '지금 터지는 버스트'가 분모에 섞여 문턱이 같이 올라갔다.)
+
+        그래서 워밍업이 끝난 뒤 처음 관측되는 '안정화된' 강도를 기준선으로
+        다시 잡는다(re-anchor). 리앵커에 실패하면(계속 중립값/데이터 없음)
+        기준선이 없는 것으로 보고 호출부가 판단을 보류한다 — 옛 스파이크
+        값으로 폴백하지 않는다. 그렇게 하면 이 수정이 무의미해지기 때문이다.
+        """
+        return float(pos.get("strength_baseline") or 0.0)
+
+    def _maybe_anchor_strength_baseline(self, pos: dict, stock_code: str):
+        """워밍업 종료 후 첫 유효 강도를 기준선으로 고정 (2026-08-03).
+        중립값(100.0=틱 부족)은 '측정 실패'이므로 기준선으로 삼지 않는다."""
+        if pos.get("strength_baseline"):
+            return
+        warmup_until = pos.get("warmup_until")
+        if warmup_until and self._now() < warmup_until:
+            return
+        try:
+            s = self._current_strength(stock_code)
+        except Exception:
+            return
+        if s and s > 0 and s != STRENGTH_NEUTRAL:
+            pos["strength_baseline"] = float(s)
+            logger.info(
+                "[%s] %s 체결강도 기준선 %.0f 고정 (진입 스파이크 %.0f 대체)",
+                stock_code, pos.get("stock_name", ""), s,
+                pos.get("entry_strength") or 0,
+            )
+
     def _is_strength_rising_vs_entry(self, pos: dict, stock_code: str):
-        """진입 대비 체결강도가 유의하게 상승했는지 3값 판정 (2026-07-31).
-        True=상승(캡 상향) / False=미상승(조기 익절확정) / None=판단불가.
+        """기준선 대비 체결강도가 유의하게 상승했는지 3값 판정 (2026-07-31).
+        True=상승(캡 상향) / False=미상승 / None=판단불가.
         None을 따로 두는 이유: 강도 데이터가 없을 때 '미상승'으로 몰면 멀쩡한
-        포지션을 +1.0%에서 전부 잘라버리게 되므로, 그때는 기본 캡을 유지한다."""
-        entry_s = pos.get("entry_strength") or 0.0
+        포지션을 +1.0%에서 전부 잘라버리게 되므로, 그때는 기본 캡을 유지한다.
+        (2026-08-03) 비교 기준을 entry_strength -> strength_baseline으로 교체.
+        사유는 _strength_baseline docstring 참고."""
+        self._maybe_anchor_strength_baseline(pos, stock_code)
+        entry_s = self._strength_baseline(pos)
         if entry_s <= 0:
             return None
         if not (self.phase1b and getattr(self.phase1b, "trade_flow", None)):
@@ -3534,9 +3623,12 @@ class StrategyManager:
             if warmup_until and now_dt < warmup_until:
                 continue  # 매수 직후 워밍업 중엔 판단 보류(기존 관례와 동일)
 
-            entry_s = pos.get("entry_strength") or 0.0
+            # (2026-08-03) 비교 기준을 '진입 순간 스파이크'가 아니라 워밍업
+            # 종료 후 안정화된 기준선으로 교체 — 사유는 _strength_baseline 참고.
+            self._maybe_anchor_strength_baseline(pos, code)
+            entry_s = self._strength_baseline(pos)
             if entry_s <= 0:
-                continue  # 진입강도 기록이 없으면 비교 불가
+                continue  # 기준선 미확보 -> 비교 불가(보수적으로 유지)
             try:
                 cur_s = self._current_strength(code)
             except Exception:
@@ -3568,21 +3660,30 @@ class StrategyManager:
             if not price:
                 continue
 
-            cap, _ = self._take_profit_cap(pos)
-            # 경로 A(기존): 상한캡(2.5%) 종목의 조기 이탈 — 1A처럼 처음부터
-            # 2.5%인 종목과 on_price_update에서 강도상향된 종목 둘 다 포함.
-            # (2026-08-02) 예전엔 여기에 `sub_strategy != "1L"` 가드가 있었다.
-            # 1L은 익절이 트레일링 전용인데 _take_profit_cap이 1L을 특별
-            # 케이스하지 않아 fallback 기본캡(2.5%)을 반환했고, 그게
-            # TP_CAP_UPGRADED(2.5%)와 우연히 같아 cap_exit이 잘못 True가 되면서
-            # 1L 포지션이 매수 66/69초 만에 조기청산되는 실거래 사고가 있었다
-            # (010120, 067310). 1L 삭제로 이 가드는 불필요해져 제거.
-            cap_exit = cap >= TP_CAP_UPGRADED
+            # 경로 A: **실제로 상향된** 포지션의 조기 이탈.
+            #
+            # (2026-08-03 수정 — 오늘 실거래로 드러난 결함)
+            # 기존 조건은 `cap >= TP_CAP_UPGRADED`였는데, 1A 기본캡(0.025)이
+            # TP_CAP_UPGRADED(0.025)와 **같은 값**이라 모든 1A 포지션에서 항상
+            # True였다. 그 결과 1A는 매수 직후(워밍업 60초가 끝나는 순간)부터
+            # 이 즉시매도 판정의 대상이 됐고, 08-03에 6건이 75~250초 만에
+            # 잘려나갔다(평균 +0.35%, 수수료 0.23% 빼면 사실상 본전).
+            # 이 로직의 원래 의도는 주석 그대로 "상향된 종목"이므로,
+            # on_price_update가 실제로 캡을 올린 포지션만 대상으로 한정한다.
+            cap_exit = bool(pos.get("tp_cap_upgraded"))
             # 경로 B(신규): 손실 종목이 저점에서 반등했으나 그 반등이 강도로
             # 뒷받침되지 않는 경우 — 손실 최소화 청산.
             loss_rebound = self._is_loss_rebound_exit(pos, price, now_dt)
             if not cap_exit and not loss_rebound:
                 continue
+
+            # (2026-08-03) 경로 A는 '익절' 로직이므로 이익 구간에서만 발동한다.
+            # 기존엔 손익과 무관하게 발동해 08-03에 -0.99% / -0.48% / -0.43%를
+            # "동적캡 즉시매도"라는 이름으로 실현시켰다. 손실 구간의 청산은
+            # 손절(-3%)과 경로 B(손실반등)가 담당해야 할 몫이다.
+            if cap_exit and not loss_rebound:
+                if self._net_rate(pos["buy_price"], price) <= 0:
+                    continue
 
             last = self._tp_vol_checked_at.get(code)
             if last is not None and (now_dt - last).total_seconds() < TP_VOL_CHECK_SEC:

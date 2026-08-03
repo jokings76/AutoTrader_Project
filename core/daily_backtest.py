@@ -50,6 +50,9 @@ from core.strategy_manager import (
     TAKE_PROFIT_CAP,
     TAKE_PROFIT_CAP_PULLBACK,
     TAKE_PROFIT_CAP_EARLY,
+    BREAKEVEN_STOP_ENABLED,
+    BREAKEVEN_TRIGGER,
+    BREAKEVEN_FLOOR,
     EARLY_WINDOW_END,
     HOLDING_TIMEOUT,
     ROUND_TRIP_COST,
@@ -260,6 +263,16 @@ def _exit_signal(position: dict, current_price: float, hhmm: str, minutes_held: 
 
     if gross_rate <= STOP_LOSS_RATE:
         return "손절", net_rate
+
+    # 본전스톱 (2026-08-03) — 라이브 on_price_update와 동일 규칙.
+    # 순 +BREAKEVEN_TRIGGER를 한 번이라도 찍으면 그 뒤 본전 아래로 내려올 때
+    # 청산한다. 라이브에서 '익절 조기확정'을 대체한 장치이므로 여기에도 있어야
+    # 청산 정책 비교가 의미를 갖는다.
+    if BREAKEVEN_STOP_ENABLED:
+        if not position.get("breakeven_armed") and net_rate >= BREAKEVEN_TRIGGER:
+            position["breakeven_armed"] = True
+        elif position.get("breakeven_armed") and net_rate <= BREAKEVEN_FLOOR:
+            return "본전스톱", net_rate
 
     if net_rate >= _take_profit_cap(position):
         return "익절", net_rate
