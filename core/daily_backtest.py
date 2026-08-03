@@ -8,7 +8,7 @@
 안 돎)
 
 ⚠️ (2026-08-02) **이제 라이브 진입을 재현하지 못한다.** Pullback까지 틱 구동
-(체결강도 FID 228 100 이상 3초 연속 + 대량체결 버스트)으로 바뀌면서, 분봉만
+(체결강도 FID 228 100 이상 N초 연속(현재 2초) + 대량체결 버스트)으로 바뀌면서, 분봉만
 가진 이 백테스트가 재현할 수 있는 진입 로직이 하나도 남지 않았다. 그런데도
 숫자는 그럴듯하게 나오므로(눌림목 점수 경로가 그대로 살아있음) **진입 성과로
 읽으면 안 된다** — 리포트 상단에 경고를 넣어 두었다.
@@ -81,7 +81,7 @@ PULLBACK_ONLY_SOURCE = "눌림목자동"
 
 
 def _hhmm_to_time(hhmm: str):
-    """'0925' -> datetime.time(9,25). 라이브 라우팅 함수에 넘기기 위한 변환."""
+    """'0900' -> datetime.time(9,0). 라이브 라우팅 함수에 넘기기 위한 변환."""
     from datetime import time as _t
     return _t(int(hhmm[:2]), int(hhmm[2:]))
 
@@ -212,7 +212,7 @@ def _entry_signal(candles: list, idx: int, vwap_strategy: VWAPStrategy, cond_nam
     #         if info.get("score", 0) >= required:
     #             return "1A", info
 
-    # Pullback: 09:25~14:50, 눌림목 반등 점수 + VWAP AND
+    # Pullback: 09:00~14:50(라이브 상수에서 가져옴), 눌림목 반등 점수 + VWAP AND
     # (2026-08-01) 라이브 라우팅과 동일하게 재현한다 — 안 맞추면 재현 매매
     # 건수가 실제와 달라져 성과 판단이 틀어진다.
     #   눌림목자동 단독      -> 항상 Pullback
@@ -388,7 +388,7 @@ def _format_report(trades: list, universe_count: int, skipped: int) -> str:
     lines = [
         f"📊 일일 백테스트 결과 ({date.today()})",
         "⚠️ 참고: 2026-08-02부터 라이브 1A/Pullback은 **틱 구동**",
-        "(체결강도 3초 연속 + 대량체결 버스트)으로 바뀌었습니다.",
+        "(체결강도 연속유지 + 대량체결 버스트)으로 바뀌었습니다.",
         "아래 수치는 분봉 기준 눌림목 재현이라 **실제 진입과 다릅니다** —",
         "청산 정책 비교용으로만 보세요.",
         "",

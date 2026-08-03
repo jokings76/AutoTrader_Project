@@ -10,7 +10,7 @@
 재현하는 실제 흐름:
   08:59 기동 -> 조건검색 스냅샷(장 시작 전 편입)
   09:00 장 시작 -> 실시간 편입(type='02') -> pre-arm
-  09:xx 체결틱 유입 -> 무장(강도 3초) -> 버스트 -> 매수
+  09:xx 체결틱 유입 -> 무장(강도 N초 연속, 현재 2초) -> 버스트 -> 매수
   보유중 -> 가격 갱신 -> 동적 익절캡 -> 청산
   청산 후 -> 재매수 차단 규칙
   10:30  -> 중복 종목 전략 전환
@@ -192,7 +192,7 @@ ob(s, "A001")
 tick(s, "A001", 125.0, T0)                     # 무장 타이머 시작
 check("첫 틱: 아직 무장 아님", "A001" not in s._armed_at)
 tick(s, "A001", 130.0, T0 + 1.5)
-check("1.5초: 여전히 무장 아님(3초 요구)", "A001" not in s._armed_at)
+check("1.5초: 여전히 무장 아님(요구 2.0초)", "A001" not in s._armed_at)
 
 burst(s, "A001", T0 + 3.5)
 tick(s, "A001", 135.0, T0 + 3.5)
@@ -257,19 +257,24 @@ tick(s, "A002", 130.0, T0 + 30)
 check("손실 차단 종목은 무장돼도 매수 안 됨", "A002" not in s.holdings)
 
 # ═════════════════════════════════════════════════════════
-print("\n[6] 09:25 — Pullback 시간창 개시")
+print("\n[6] Pullback 시간창 — 1A와 동일한 09:00 개시 (2026-08-03 변경)")
 # ═════════════════════════════════════════════════════════
-clock.set(9, 24, 30)
+# 구버전은 09:25부터였다. 그 근거("개장 직후엔 당일 고가가 없어 눌림 판정
+# 불가")는 08-02에 분봉 재검증을 폐지하면서 소멸했다 — 지금 눌림 판정은 전부
+# HTS 조건식이 하고, 그건 여러 날 봉을 보므로 09:00에도 성립한다.
+clock.set(8, 59, 30)
 ob(s, "P001")
 tick(s, "P001", 130.0, T0 + 40)
 burst(s, "P001", T0 + 43.5)
 tick(s, "P001", 130.0, T0 + 43.5)
-check("09:24:30 — 눌림목은 아직 매수 안 됨(09:25부터)", "P001" not in s.holdings)
+check("08:59:30 — 장 시작 전이라 매수 안 됨", "P001" not in s.holdings)
 
-clock.set(9, 25, 0)
+clock.set(9, 0, 5)
 burst(s, "P001", T0 + 50)
 tick(s, "P001", 130.0, T0 + 50)
-check("09:25 정각 — 눌림목 매수 성립", "P001" in s.holdings)
+check("09:00 직후 — 눌림목 매수 성립(구버전은 09:25까지 대기)",
+      "P001" in s.holdings, f"holdings={list(s.holdings)}")
+check("1A와 시간창이 동일해짐", SM.PULLBACK_START == SM.GROUP_A_START)
 check("sub_strategy=1A_눌림", s.holdings["P001"]["sub_strategy"] == "1A_눌림")
 # 편입 시점의 분봉 1콜(시가 캐시용, 1A "시가대비 +5%" 필터의 근거)은 정상이다.
 # 검증할 것은 "진입 판정 자체가 분봉을 더 부르지 않는가" — 즉 종목당 1콜을
@@ -599,7 +604,7 @@ check("daily_backtest 임포트 정상(07-27 ImportError 붕괴 재발 방지)",
 check("삭제된 상수를 참조하지 않음",
       ok_import and not hasattr(DB, "OTHER_COND_START"))
 check("라이브 시간창을 상수로 참조(하드코딩 아님)",
-      ok_import and DB.PULLBACK_START_HHMM == "0925"
+      ok_import and DB.PULLBACK_START_HHMM == "0900"
       and DB.PULLBACK_END_HHMM == "1450",
       f"{DB.PULLBACK_START_HHMM}~{DB.PULLBACK_END_HHMM}" if ok_import else "")
 
@@ -678,13 +683,13 @@ print("\n[18] 정합성 — 주석/규칙이 코드와 일치하는지")
 # ═════════════════════════════════════════════════════════
 import inspect
 src_cbp = inspect.getsource(SM.StrategyManager.can_buy_pullback)
-check("can_buy_pullback 주석이 실제 시간창(09:25~14:50)과 일치",
-      "09:25" in src_cbp and "14:50" in src_cbp and "15:10" not in src_cbp,
+check("can_buy_pullback 주석이 실제 시간창(09:00~14:50)과 일치",
+      "09:00" in src_cbp and "14:50" in src_cbp and "15:10" not in src_cbp,
       next((l.strip() for l in src_cbp.split("\n") if "눌림목:" in l), ""))
 check("제거된 09:20 지연 게이트 분류가 규칙에서 빠짐",
       not any("조건식 지연" in str(k) for k, _ in SM.StrategyManager._REJECT_RULES))
-check("Pullback 시간창 상수가 09:25~14:50",
-      SM.PULLBACK_START == SM.time(9, 25) and SM.PULLBACK_END == SM.time(14, 50))
+check("Pullback 시간창 상수가 09:00~14:50 (2026-08-03: 09:25에서 앞당김)",
+      SM.PULLBACK_START == SM.time(9, 0) and SM.PULLBACK_END == SM.time(14, 50))
 check("Phase1BController docstring이 '데이터 파이프라인'임을 명시",
       "파이프라인" in (Phase1BController.__doc__ or ""))
 
@@ -784,6 +789,143 @@ check("현재 STOP_SIGNAL 고아 파일이 없음",
       not _os.path.exists(_os.path.join(_ROOT, "STOP_SIGNAL")))
 check("이관 플래그가 남아있지 않음(다음 기동은 이어가기)",
       not _os.path.exists(_os.path.join(_ROOT, "NEW_SESSION_REQUESTED")))
+
+# ═════════════════════════════════════════════════════════
+print("\n[20] 상수 정합성 불변식 — 서로 모순되는 설정이 없는지")
+# 08-03에 결함 ①(1A 기본캡 == TP_CAP_UPGRADED라 cap_exit이 항상 참)이 정확히
+# 이 부류였다. 값 하나를 고칠 때 짝이 되는 값을 안 고쳐서 생기는 사고를
+# 상수 수준에서 미리 잡는다.
+import core.daily_backtest as _DB
+from core.order_manager import FORCE_CLOSE_TIME as _FCT
+
+# 시간창
+check("[불변] Pullback 시작 == 1A 시작", SM.PULLBACK_START == SM.GROUP_A_START,
+      str(SM.PULLBACK_START))
+check("[불변] Pullback 종료 == 1A 종료", SM.PULLBACK_END == SM.PHASE1A_END)
+check("[불변] ENTRY_WINDOW_END == 두 전략 종료 중 늦은 쪽",
+      SM.ENTRY_WINDOW_END == max(SM.PHASE1A_END, SM.PULLBACK_END))
+check("[불변] 진입 종료 < 강제청산 (청산 중 신규매수 없음)",
+      SM.ENTRY_WINDOW_END.strftime("%H:%M") < _FCT)
+check("[불변] 신규매수 하드컷오프 == 강제청산 시각",
+      SM.ENTRY_HARD_CUTOFF.strftime("%H:%M") == _FCT)
+check("[불변] 개장초반 캡 경계가 진입창 안",
+      SM.GROUP_A_START < SM.EARLY_WINDOW_END < SM.PHASE1A_END)
+check("[불변] 중복종목 전환시각이 Pullback 창 안",
+      SM.PULLBACK_START <= SM.DUAL_SOURCE_PULLBACK_FROM < SM.PULLBACK_END)
+
+# 익절/손절
+check("[불변] 기본캡 != 상향캡 (결함① 재발 방지)",
+      SM.TAKE_PROFIT_CAP != SM.TP_CAP_UPGRADED_MAX)
+check("[불변] 상향캡 > 기본캡", SM.TP_CAP_UPGRADED_MAX > SM.TAKE_PROFIT_CAP)
+check("[불변] 개장초반캡 <= 기본캡", SM.TAKE_PROFIT_CAP_EARLY <= SM.TAKE_PROFIT_CAP)
+check("[불변] 눌림캡 <= 기본캡", SM.TAKE_PROFIT_CAP_PULLBACK <= SM.TAKE_PROFIT_CAP)
+check("[불변] 모든 캡이 왕복수수료보다 큼(구조적 손실 방지)",
+      min(SM.TAKE_PROFIT_CAP, SM.TAKE_PROFIT_CAP_PULLBACK,
+          SM.TAKE_PROFIT_CAP_EARLY) > SM.ROUND_TRIP_COST)
+check("[불변] 손절선이 음수", SM.STOP_LOSS_RATE < 0)
+check("[불변] 본전스톱 트리거 > 바닥", SM.BREAKEVEN_TRIGGER > SM.BREAKEVEN_FLOOR)
+
+# 틱 진입
+check("[불변] 무장 요구시간 < 무장 TTL(무장이 즉시 만료되면 안 됨)",
+      SM.TICK_STRENGTH_SUSTAIN_SEC < SM.TICK_ARM_TTL_SEC)
+check("[불변] 무장 요구시간 > 재평가 쿨다운",
+      SM.TICK_STRENGTH_SUSTAIN_SEC > SM.TICK_ENTRY_COOLDOWN_SEC)
+check("[불변] 시간대 계수가 원기준(1.0)을 넘지 않음",
+      all(v <= 1.0 for _, v in SM.TICK_BURST_TIME_MULT))
+check("[불변] 시간대 계수 구간이 오름차순",
+      [k for k, _ in SM.TICK_BURST_TIME_MULT]
+      == sorted(k for k, _ in SM.TICK_BURST_TIME_MULT))
+check("[불변] 상대경로 하한 < 절대 기준",
+      SM.TICK_BURST_REL_FLOOR < SM.PHASE1A_BURST_TRADE_VALUE)
+check("[불변] 단일체결 기준 > 절대 기준",
+      SM.PHASE1A_SINGLE_TRADE_VALUE > SM.PHASE1A_BURST_TRADE_VALUE)
+
+# 슬롯
+check("[불변] 전략별 슬롯 합 >= 공유상한(한쪽이 남으면 흡수 가능)",
+      SM.PHASE1A_MAX_SLOTS + SM.PULLBACK_MAX_SLOTS >= SM.MAX_HOLDINGS)
+check("[불변] 확장슬롯 > 공유상한", SM.MAX_HOLDINGS_HARD > SM.MAX_HOLDINGS)
+check("[불변] 전략별 캡 < 공유상한(한 전략 독식 불가)",
+      SM.PHASE1A_MAX_SLOTS < SM.MAX_HOLDINGS)
+
+# 백테스트 동기화 — 어긋나면 리포트가 라이브와 다른 규칙으로 계산된다
+check("[동기] 백테스트 캡", _DB.TAKE_PROFIT_CAP == SM.TAKE_PROFIT_CAP)
+check("[동기] 백테스트 눌림캡",
+      _DB.TAKE_PROFIT_CAP_PULLBACK == SM.TAKE_PROFIT_CAP_PULLBACK)
+check("[동기] 백테스트 개장초반캡",
+      _DB.TAKE_PROFIT_CAP_EARLY == SM.TAKE_PROFIT_CAP_EARLY)
+check("[동기] 백테스트 손절", _DB.STOP_LOSS_RATE == SM.STOP_LOSS_RATE)
+check("[동기] 백테스트 본전스톱 플래그",
+      _DB.BREAKEVEN_STOP_ENABLED == SM.BREAKEVEN_STOP_ENABLED)
+check("[동기] 백테스트 Pullback 창",
+      _DB.PULLBACK_START_HHMM == SM.PULLBACK_START.strftime("%H%M")
+      and _DB.PULLBACK_END_HHMM == SM.PULLBACK_END.strftime("%H%M"),
+      f"{_DB.PULLBACK_START_HHMM}~{_DB.PULLBACK_END_HHMM}")
+check("[동기] 백테스트 강제청산", _DB.FORCE_CLOSE_HHMM == _FCT.replace(":", ""))
+
+# ═════════════════════════════════════════════════════════
+print("\n[21] 08-04 설정 조합 통합 — 바뀐 값들이 함께 굴러가는지")
+# 오늘 바꾼 것: PB창 09:00 / 무장 2초 / 본전스톱 OFF / 캡 4.0·2.5·6.0 /
+#              손절 워밍업 중 작동 / 점심계수 1.00
+# 개별 검증은 test_patch_20260803.py가 하고, 여기선 **동시에** 태운다.
+
+# (1) 09:00 직후 눌림목 — 새 창 + 2초 무장으로 매수까지
+sN, cN = build(datetime(2026, 8, 3, 9, 2, 0))
+sN.on_condition_hit("PB1", "눌림새창", cond_name="눌림목자동")
+ob(sN, "PB1")
+TN = time.time()
+tick(sN, "PB1", 130.0, TN)
+tick(sN, "PB1", 130.0, TN + 1.5)
+check("1.5초에는 무장 전(요구 2.0초)", "PB1" not in sN._armed_at)
+burst(sN, "PB1", TN + 2.2)
+tick(sN, "PB1", 130.0, TN + 2.2)
+check("09:02 눌림목이 2.0초 무장 + 버스트로 매수 (구버전: 창밖+3초 미달로 둘 다 불가)",
+      "PB1" in sN.holdings, f"holdings={list(sN.holdings)}")
+check("눌림 전략으로 라우팅", sN.holdings["PB1"]["sub_strategy"] == "1A_눌림")
+
+# (2) 개장초반(09:10 이전) 매수분은 개장초반 캡을 받는다
+capN, lblN = sN._take_profit_cap(sN.holdings["PB1"])
+check("09:02 매수분 캡 = 개장초반 2.5%",
+      abs(capN - SM.TAKE_PROFIT_CAP_EARLY) < 1e-9, f"{capN} ({lblN})")
+
+# (3) 본전스톱 OFF — +1% 찍고 되돌려도 팔지 않는다
+buyN = sN.holdings["PB1"]["buy_price"]
+armN = int(buyN * (1 + SM.BREAKEVEN_TRIGGER + SM.ROUND_TRIP_COST)) + 1
+cN.set(9, 5, 0)
+sN.holdings["PB1"]["warmup_until"] = cN.dt - timedelta(seconds=1)
+sN.on_price_update("PB1", armN)
+check("본전스톱 OFF — 무장 안 함", not sN.holdings["PB1"].get("breakeven_armed"))
+sN.on_price_update("PB1", buyN)
+check("본전스톱 OFF — 본전 복귀에도 보유 유지", "PB1" in sN.holdings)
+
+# (4) 손절은 워밍업 중에도 작동 (별도 포지션으로)
+sS, cS = build(datetime(2026, 8, 3, 9, 3, 0))
+sS.holdings["ST1"] = {
+    "trade_id": 1, "qty": 10, "buy_price": 10_000, "buy_time": cS.dt,
+    "stock_name": "ST1", "sub_strategy": "1A",
+    "warmup_until": cS.dt + timedelta(seconds=60),   # 워밍업 진행 중
+    "entry_strength": 150.0, "highest_price": 10_000, "lowest_price": 10_000,
+}
+sS.on_price_update("ST1", 9_600)   # -4%
+check("워밍업 중에도 손절 발동", "ST1" not in sS.holdings)
+
+# (5) 점심 시간대 문턱이 원기준(3천만원) 유지
+check("12:00 버스트 문턱 = 3천만원(완화 제거)",
+      abs(SM.PHASE1A_BURST_TRADE_VALUE
+          * sN.burst_time_multiplier(datetime(2026, 8, 3, 12, 0, 0))
+          - 30_000_000) < 1)
+
+# (6) 1A는 09:10 이후 기본캡 4.0%로 넓어진다(개장초반과 구분되는지)
+sL, _ = build(datetime(2026, 8, 3, 11, 0, 0))
+sL.holdings["LT1"] = {
+    "trade_id": 1, "qty": 10, "buy_price": 10_000,
+    "buy_time": datetime(2026, 8, 3, 11, 0, 0), "stock_name": "LT1",
+    "sub_strategy": "1A", "warmup_until": None,
+    "entry_strength": 150.0, "highest_price": 10_000, "lowest_price": 10_000,
+    "buy_hhmm": "1100",
+}
+capL, lblL = sL._take_profit_cap(sL.holdings["LT1"])
+check("11:00 매수 1A 캡 = 기본 4.0%", abs(capL - SM.TAKE_PROFIT_CAP) < 1e-9,
+      f"{capL} ({lblL})")
 
 # ═════════════════════════════════════════════════════════
 print("\n" + "=" * 60)

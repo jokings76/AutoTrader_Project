@@ -142,38 +142,53 @@ check("상향 목표캡 6.0% (구 2.5%)", abs(SM.TP_CAP_UPGRADED_MAX - 0.060) < 
 check("기본캡 != 상향캡 (같으면 결함 ① 재발)",
       abs(SM.TAKE_PROFIT_CAP - SM.TP_CAP_UPGRADED_MAX) > 1e-9)
 
-print("\n[2] 본전스톱 — '익절 조기확정'을 대체")
-check("본전스톱 활성", SM.BREAKEVEN_STOP_ENABLED is True)
-check("무장 지점 순 +1.0%", abs(SM.BREAKEVEN_TRIGGER - 0.010) < 1e-9)
-check("바닥 = 본전(0%)", abs(SM.BREAKEVEN_FLOOR - 0.0) < 1e-9)
+print("\n[2] 본전스톱 — 현재 OFF (2026-08-03 저녁, 백테스트 근거로 비활성)")
+# 도입 당일 저녁 재생 결과 개장 구간에서 오히려 손해였다(끔 -0.177% vs
+# +1.0% -0.325%). 다만 시뮬레이션 진입에 무장 게이트가 빠져 있어 수치를 그대로
+# 믿을 수는 없다 -> 플래그로 끄고 로직은 보존한다.
+# 이 섹션은 (a) 기본값이 OFF인지 (b) **켰을 때 로직이 여전히 정상인지**를
+# 둘 다 확인한다. 로직이 썩으면 되살릴 때 조용히 깨지기 때문이다.
+check("본전스톱 기본값 OFF", SM.BREAKEVEN_STOP_ENABLED is False)
+check("무장 지점 상수는 보존(순 +1.0%)", abs(SM.BREAKEVEN_TRIGGER - 0.010) < 1e-9)
+check("바닥 상수도 보존(본전 0%)", abs(SM.BREAKEVEN_FLOOR - 0.0) < 1e-9)
 
+px_arm = int(10_000 * (1 + SM.BREAKEVEN_TRIGGER + SM.ROUND_TRIP_COST)) + 1
+
+# --- OFF 상태: +1% 찍고 되돌려도 본전스톱으로 팔지 않는다 ---
 s = build()
 pos = put_pos(s)
-# 순 +1.0% 도달 = 가격 +1.23% (수수료 0.23% 포함)
-px_arm = int(10_000 * (1 + SM.BREAKEVEN_TRIGGER + SM.ROUND_TRIP_COST)) + 1
 s.on_price_update("000001", px_arm)
-check("순 +1% 도달 시 무장 (매도 안 함)",
-      pos.get("breakeven_armed") is True and not sold(s), f"@{px_arm}")
+check("OFF면 무장 자체를 하지 않음", not pos.get("breakeven_armed"))
+s.on_price_update("000001", 10_000)
+check("OFF면 본전 이탈에도 청산 안 함", not sold(s))
 
-# 구버전이라면 여기서 '익절 조기확정'으로 팔았어야 한다.
+# 구버전 '익절 조기확정'은 플래그와 무관하게 완전히 제거돼야 한다.
 check("구버전의 '조기확정 매도'가 더 이상 없음", not sold(s))
 check("조기확정 문자열이 코드에서 제거됨",
       "익절 조기확정" not in open(
           "core/strategy_manager.py", encoding="utf-8").read().split(
               "# (2026-08-03) rising is False")[0].split("exit_reason = (")[-1])
 
-# 무장 후 본전 아래로 내려오면 청산
-s.on_price_update("000001", 10_000)   # 순 -0.23% (수수료만큼 손실)
-check("무장 후 본전 이탈 시 청산", sold(s))
-check("청산 사유가 본전스톱",
-      any("본전스톱" in (r.get("exit_reason") or "") for r in _Repo.sells),
-      str([r.get("exit_reason") for r in _Repo.sells])[:70])
-
-# 무장 전에는 본전스톱이 발동하지 않는다(진입 직후 흔들림에 잘리면 안 됨)
-s2 = build()
-put_pos(s2, code="000002")
-s2.on_price_update("000002", 9_990)   # 소폭 하락, +1% 찍은 적 없음
-check("무장 전에는 본전스톱 미발동", not sold(s2, "000002"))
+# --- ON으로 되돌렸을 때 로직이 살아있는지 (플래그만 임시 전환) ---
+SM.BREAKEVEN_STOP_ENABLED = True
+try:
+    s2 = build()
+    p2 = put_pos(s2, code="000002")
+    s2.on_price_update("000002", px_arm)
+    check("[ON] 순 +1% 도달 시 무장 (매도 안 함)",
+          p2.get("breakeven_armed") is True and not sold(s2, "000002"))
+    s2.on_price_update("000002", 10_000)
+    check("[ON] 무장 후 본전 이탈 시 청산", sold(s2, "000002"))
+    check("[ON] 청산 사유가 본전스톱",
+          any("본전스톱" in (r.get("exit_reason") or "") for r in _Repo.sells),
+          str([r.get("exit_reason") for r in _Repo.sells])[:70])
+    # 무장 전에는 발동하지 않는다(진입 직후 흔들림에 잘리면 안 됨)
+    s3 = build()
+    put_pos(s3, code="000003b")
+    s3.on_price_update("000003b", 9_990)
+    check("[ON] 무장 전에는 본전스톱 미발동", not sold(s3, "000003b"))
+finally:
+    SM.BREAKEVEN_STOP_ENABLED = False   # 원상복구 — 이후 섹션에 영향 주지 않게
 
 print("\n[3] 결함 ① — 동적캡 즉시매도가 모든 1A에 걸리던 문제")
 s3 = build()
@@ -227,12 +242,18 @@ s5._update_dynamic_caps()
 check("손실 구간에서는 동적캡 즉시매도 안 함", not sold(s5, "000005"))
 
 print("\n[6] 청산 우선순위 — 손절이 본전스톱보다 먼저")
-s6 = build()
-p6 = put_pos(s6, code="000006")
-s6.on_price_update("000006", px_arm)          # 먼저 무장
-check("무장 확인", p6.get("breakeven_armed") is True)
-s6.on_price_update("000006", 9_600)           # -4% 급락
-check("급락 시 손절로 청산", sold(s6, "000006"))
+# 본전스톱이 켜져 있어도 손절이 우선이어야 한다(순서가 뒤집히면 -4% 급락을
+# '본전스톱'으로 기록해 사후 분석이 어긋난다). 플래그를 임시로 켜서 검증한다.
+SM.BREAKEVEN_STOP_ENABLED = True
+try:
+    s6 = build()
+    p6 = put_pos(s6, code="000006")
+    s6.on_price_update("000006", px_arm)          # 먼저 무장
+    check("무장 확인", p6.get("breakeven_armed") is True)
+    s6.on_price_update("000006", 9_600)           # -4% 급락
+    check("급락 시 손절로 청산", sold(s6, "000006"))
+finally:
+    SM.BREAKEVEN_STOP_ENABLED = False
 check("사유가 손절(본전스톱 아님)",
       any("손절" in (r.get("exit_reason") or "") for r in _Repo.sells),
       str([r.get("exit_reason") for r in _Repo.sells])[:70])

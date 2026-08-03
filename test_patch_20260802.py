@@ -400,13 +400,17 @@ check("sub_strategy가 1A_눌림으로 기록",
 check("Pullback 진입에 분봉 REST를 쓰지 않음 (구버전은 2콜)",
       len([c for c in s.api.calls if c[0] == "candles"]) == 0, str(s.api.calls))
 
-# Pullback 시간창(09:25) 이전엔 안 산다
+# (2026-08-03) Pullback 시간창이 09:00으로 앞당겨져 09:10에도 매수된다.
+# 구버전은 09:25 전이라 여기서 탈락했다.
 s = build_strat(datetime(2026, 8, 3, 9, 10, 0))
 setup_candidate(s, "P2", cond="눌림목자동")
 tick(s, "P2", 130.0, t0)
 feed(s.phase1b.trade_flow, "P2", 2, 30_000_000, now=t0 + 3.5, span=0.5)
 tick(s, "P2", 130.0, t0 + 3.5)
-check("눌림목은 09:25 전에는 매수 안 함", "P2" not in s.holdings)
+check("눌림목이 09:10에도 매수됨 (구버전은 09:25까지 대기)",
+      "P2" in s.holdings, f"holdings={list(s.holdings)}")
+check("매수 전략이 눌림으로 라우팅됨",
+      s.holdings.get("P2", {}).get("sub_strategy") == "1A_눌림")
 
 # 1A는 09:10에도 산다 (시간창 09:00~)
 s = build_strat(datetime(2026, 8, 3, 9, 10, 0))
@@ -598,7 +602,8 @@ check("버스트 요구 건수가 2건(사용자 지정, 구버전 3건)",
       SM.PHASE1A_BURST_TRADE_COUNT == 2, str(SM.PHASE1A_BURST_TRADE_COUNT))
 check("버스트 창이 5초(구버전 3초, 사용자 원안 1초는 판정 불가)",
       SM.TICK_BURST_WINDOW_SEC == 5.0, str(SM.TICK_BURST_WINDOW_SEC))
-check("강도 유지 요구가 3초", SM.TICK_STRENGTH_SUSTAIN_SEC == 3.0)
+check("강도 유지 요구가 2초 (2026-08-03: 3.0에서 완화)",
+      SM.TICK_STRENGTH_SUSTAIN_SEC == 2.0, str(SM.TICK_STRENGTH_SUSTAIN_SEC))
 check("강도 임계값 100", SM.TICK_STRENGTH_MIN == 100.0)
 
 # 구버전: 15초 폴링이 유일한 진입 경로였다 -> 지금은 틱에서 바로 산다
