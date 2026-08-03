@@ -563,11 +563,14 @@ check("무장 이력 없는 후보는 대체 자격 없음",
       _SR2.find_replacement_candidate(st, 1.0) is None)
 check("is_armed_now도 False", not st.is_armed_now("CAND"))
 
-# (b) 방금 무장 + 틱 살아있음 -> 자격 있음
-st, _ = armed_strat(arm_age_sec=5)
-check("방금 무장한 후보는 대체 자격 있음", st.is_armed_now("CAND"))
+# (b) 방금 무장 + 틱 살아있음 -> is_armed_now True
+#     (선정까지 가려면 버스트도 필요 — 섹션 [19]에서 검증)
+st, _n = armed_strat(arm_age_sec=5)
+check("방금 무장한 후보는 is_armed_now=True", st.is_armed_now("CAND"))
+for _i in range(2):   # 버스트까지 만들어야 최종 선정된다
+    st.phase1b.trade_flow.add_tick("CAND", 10_000, "buy", 3_000, now=_n - _i * 0.3)
 got = _SR2.find_replacement_candidate(st, 1.0)
-check("후보로 선정됨", got is not None and got[0] == "CAND", str(got))
+check("무장+버스트면 후보로 선정됨", got is not None and got[0] == "CAND", str(got))
 
 # (c) 무장했지만 TTL(120초) 경과 -> 자격 없음
 st, _ = armed_strat(arm_age_sec=SM.TICK_ARM_TTL_SEC + 10)
@@ -600,13 +603,15 @@ check("[실사례] 40분 전 무장(950160 패턴)은 교체 자격 없음",
 
 # (h) 플래그를 끄면 옛 동작(점수만)으로 복귀하는지 — 롤백 경로 보장
 _SR2.REQUIRE_CANDIDATE_ARMED = False
+_SR2.REQUIRE_CANDIDATE_BURST = False
 try:
     st, _ = armed_strat(arm_age_sec=None)
     got_old = _SR2.find_replacement_candidate(st, 1.0)
-    check("[롤백] 플래그 OFF면 무장 무관하게 점수만으로 선정(구버전 동작)",
+    check("[롤백] 두 플래그 OFF면 점수만으로 선정(구버전 동작)",
           got_old is not None and got_old[0] == "CAND", str(got_old))
 finally:
     _SR2.REQUIRE_CANDIDATE_ARMED = True
+    _SR2.REQUIRE_CANDIDATE_BURST = True
 
 # (i) TICK_ENTRY_ENABLED가 꺼지면 무장 개념 자체가 없으므로 False
 _prev = SM.TICK_ENTRY_ENABLED
@@ -617,6 +622,80 @@ try:
           not st.is_armed_now("CAND"))
 finally:
     SM.TICK_ENTRY_ENABLED = _prev
+
+print("\n[19] 슬롯 교체 발동 조건 3종 (2026-08-03 사용자 지정)")
+# ① 슬롯 만석 ② 후보 무장 ③ 후보 버스트 — 셋 다여야 교체.
+check("슬롯 만석 요구가 코드에 있음",
+      "strat.occupied_slots() < MAX_HOLDINGS" in
+      open("core/slot_replacement.py", encoding="utf-8").read())
+check("버스트 요구 플래그 ON", _SR2.REQUIRE_CANDIDATE_BURST is True)
+
+
+def burst_ready(st, code, now=None):
+    """후보를 무장 + 버스트 성립 상태로 만든다(3천만원 x2건)."""
+    now = now or _tm.time()
+    for i in range(2):
+        st.phase1b.trade_flow.add_tick(code, 10_000, "buy", 3_000, now=now - i * 0.3)
+
+
+def full_slots(st, n=None):
+    n = n if n is not None else SM.MAX_HOLDINGS
+    for i in range(n):
+        st.holdings[f"FZ{i}"] = {
+            "trade_id": 1, "qty": 1, "buy_price": 10_000,
+            "buy_time": NOW - timedelta(minutes=1), "stock_name": f"FZ{i}",
+            "sub_strategy": "1A", "warmup_until": None, "entry_strength": 150.0,
+            "highest_price": 10_000, "lowest_price": 10_000,
+        }
+
+
+# ① 슬롯 여유면 후보가 완벽해도 교체하지 않는다 (08-03 사고의 직접 원인)
+st, now = armed_strat(arm_age_sec=5)
+burst_ready(st, "CAND", now)
+check("[①] 슬롯 여유(0/6)면 교체 시도 즉시 중단",
+      _SR2.try_slot_replacement(st, None, 0, st._now()) == 0)
+
+# ② 슬롯 만석 + 무장 + 버스트 -> 후보 자격 성립
+st, now = armed_strat(arm_age_sec=5)
+burst_ready(st, "CAND", now)
+full_slots(st)
+check("[②③] 만석 + 무장 + 버스트면 후보로 선정됨",
+      _SR2.find_replacement_candidate(st, 1.0) == ("CAND", 99.0),
+      str(_SR2.find_replacement_candidate(st, 1.0)))
+
+# ③ 무장했지만 버스트가 없으면 자격 없음 (오늘 950160이 정확히 이 상태)
+st, now = armed_strat(arm_age_sec=5)     # 틱은 소량만 — 버스트 미성립
+full_slots(st)
+check("[③] 무장했어도 버스트 없으면 후보 자격 없음(950160 패턴)",
+      _SR2.find_replacement_candidate(st, 1.0) is None)
+
+print("\n[20] 교체 '대상' 선정 — 진입 스파이크 대신 기준선 사용")
+# 08-03 교체 3종목의 진입강도가 300(상한 포화)/100/70이었다. 300에서 시작하면
+# `현재 < 진입 x 0.8` 판정을 피할 수 없다 — 결함 ②와 같은 구조.
+import core.slot_replacement as _SR3
+_ss = open("core/slot_replacement.py", encoding="utf-8").read()
+check("교체 대상 판정이 _strength_baseline을 사용",
+      "_strength_baseline(pos)" in _ss and "_maybe_anchor_strength_baseline" in _ss)
+check("entry_strength 직접 비교가 제거됨",
+      'entry_strength = pos.get("entry_strength")' not in _ss)
+
+# 기준선이 없으면(워밍업 직후 등) 교체 대상으로 잡히지 않는다
+sT = build()
+pT = put_pos(sT, code="STG1", entry_strength=300.0, now_dt=NOW)
+pT["buy_time"] = NOW - timedelta(minutes=20)   # 보유시간 조건은 충족
+sT._current_strength = lambda c: 5.0           # 진입강도 300 대비 큰 하락
+check("기준선 미확보면 교체 대상 아님(구버전은 300->5로 즉시 대상)",
+      _SR3.find_stagnant_holding(sT, sT._now()) is None)
+
+# 기준선이 잡히면 그 값 기준으로 판정한다
+pT["strength_baseline"] = 120.0
+sT._current_strength = lambda c: 110.0         # 120*0.8=96 보다 위 -> 하락 아님
+check("기준선 대비 하락이 아니면 교체 대상 아님",
+      _SR3.find_stagnant_holding(sT, sT._now()) is None)
+sT._current_strength = lambda c: 50.0          # 96 미만 -> 진짜 하락
+res = _SR3.find_stagnant_holding(sT, sT._now())
+check("기준선 대비 진짜 하락은 정상 감지",
+      res is not None and res[0] == "STG1", str(res))
 
 print("\n[14] 죽은 코드 배너 — 이름 때문에 생기는 오해 방지")
 _src = open("core/strategy_manager.py", encoding="utf-8").read()

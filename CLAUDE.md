@@ -1572,8 +1572,34 @@ claude --remote-control
     넣었다. 오늘 3건은 2순위만으로도 전부 차단된다(무장 시각 불일치).
     다만 "자리가 남는데 파는" 구조 자체는 남아 있으므로 다음 차례로 검토할 것.
 
-  [검증] 5개 스위트 **659건 전원 통과**
-  (285->287 / 86 / 104->117 / 145 / 24). 테스트 로그 분리가 작동해
+  [🔴 재적용 — 처음에 2순위만 넣어 사용자 의도를 절반만 반영했다]
+  - 사용자 의도는 **"슬롯 만석 + 대체후보 무장 + 버스트까지 완벽히 준비"**
+    였는데 처음엔 '무장'만 넣었다. ①슬롯 만석과 ③버스트를 추가로 적용.
+  - 이제 교체는 셋 다 충족해야 발동한다:
+    ① `occupied_slots() >= MAX_HOLDINGS` — 자리가 남으면 팔 이유가 없다
+    ② `is_armed_now(후보)` — 지금 무장 중
+    ③ `check_burst(후보)[0]` — 버스트도 지금 성립 = "슬롯만 비면 즉시 매수될 자리"
+  - ⚠️ **부작용 인지**: 버스트 창은 5초인데 교체 태스크는 **60초 주기**라 폴링이
+    버스트와 겹칠 확률이 낮다. 즉 이 조건을 켜면 교체가 **사실상 거의 안 돈다.**
+    08-03처럼 근거 없이 파는 것보다는 낫지만, 교체를 제대로 살리려면 60초
+    폴링이 아니라 **틱 진입 경로에서 '완전히 준비됐는데 슬롯만 없음'을 감지한
+    순간** 교체하는 구조가 맞다 — 이월 과제.
+  - 롤백: `REQUIRE_CANDIDATE_ARMED` / `REQUIRE_CANDIDATE_BURST`를 False로.
+
+  [🔴 교체 '대상' 선정에도 같은 결함 ②가 남아 있었다 — 사용자가 잡아냄]
+  - `find_stagnant_holding`이 아직 **`entry_strength`(진입 스파이크)**로 하락을
+    재고 있었다. 오늘 저녁 `_update_dynamic_caps`와
+    `_is_strength_rising_vs_entry` 두 곳은 고쳤는데 **여기만 빠졌다** — 같은
+    규칙이 **세 곳**에 흩어져 있어 두 곳만 고친 전형적인 사고다.
+  - 08-03 실측이 그대로 증거다. 교체된 3종목의 진입강도가
+    **090710 300**(compute_strength 상한 포화) / 336260 100 / 319400 70이고
+    현재강도는 5 / 9 / 45였다. **300에서 시작하면 `현재 < 진입 x 0.8` 판정을
+    피할 수 없다** — 교체 대상 선정이 구조적으로 남발되고 있었다.
+  - -> `_strength_baseline`(워밍업 후 리앵커)으로 교체. 기준선을 못 잡았으면
+    비교 자체를 포기한다(옛 스파이크로 폴백하면 수정이 무의미해진다).
+
+  [검증] 5개 스위트 **669건 전원 통과**
+  (287 / 86 / 117->127 / 145 / 24). 테스트 로그 분리가 작동해
   전수 실행 후에도 `autotrader.log` 크기 불변(799,833바이트) 확인.
 
 \## 세션 이관 체크리스트 (2026-08-01 신설)
@@ -1597,13 +1623,13 @@ claude --remote-control
 | 1 | `python -c "import main; print('OK')"` | `OK` (임포트 체인 전체 정상) |
 | 2 | `python test_patch_20260801.py` | **287건 전원 통과 / 실패 0건** |
 | 3 | `python test_patch_20260802.py` | **86건 전원 통과 / 실패 0건** (틱 구동) |
-| 4 | `python test_patch_20260803.py` | **117건 전원 통과** (익절/손절/시간계수/자동종료/종목명/지수가드/시간정리/슬롯교체) |
+| 4 | `python test_patch_20260803.py` | **127건 전원 통과** (익절/손절/시간계수/자동종료/종목명/지수가드/시간정리/슬롯교체) |
 | 5 | `python test_live_dryrun_20260803.py` | **145건 전원 통과** (종일 통합 + 기동 인프라 + 상수 불변식 + 설정조합) |
 | 6 | `python test_closing_bet_routing.py` | **24건 전원 통과** (종가베팅 분리 라우팅) |
 | 7 | `git log --oneline -5` | 최신 커밋이 `2fa4a2d` 이후인지 |
 | 8 | `git status --short` | 비어 있어야 정상(작업 중이면 예외) |
 
-**합계 659건**(287 + 86 + 117 + 145 + 24). 하나라도 실패하면 그 지점부터 원인 추적.
+**합계 669건**(287 + 86 + 127 + 145 + 24). 하나라도 실패하면 그 지점부터 원인 추적.
 
 - ⚠️ **4번(통합)이 가장 중요하다.** 2·3번이 전부 통과하는 상태에서도 08-03에
   매매를 반쪽 낼 버그 6건이 살아있었다(2026-08-02 히스토리 참고) — 유닛은
@@ -1775,8 +1801,9 @@ python -c "import core.strategy_manager as s; from core.order_manager import FOR
 - 점심 완화 원복: `TICK_BURST_TIME_MULT`의 `((11,30), 1.00)` -> `0.65`
 - 지수 하락 가드 끄기: `INDEX_GUARD_ENABLED = False`
 - 가드 임계 조정: `INDEX_GUARD_THRESHOLD`(-5.0, SEVERE_CRASH와 같은 값 유지할 것)
-- 슬롯교체 무장 요구 끄기: `core/slot_replacement.py`의
-  `REQUIRE_CANDIDATE_ARMED = False` (구버전 = 점수만으로 후보 선정) / `INDEX_GUARD_FROM`(11:00) /
+- 슬롯교체 조건 끄기: `core/slot_replacement.py`의
+  `REQUIRE_CANDIDATE_ARMED` / `REQUIRE_CANDIDATE_BURST` = False
+  (구버전 = 점수만으로 후보 선정). 슬롯 만석 요구는 코드에서 제거해야 함 / `INDEX_GUARD_FROM`(11:00) /
   `INDEX_GUARD_BREAKEVEN_UNTIL`(11:30) / `INDEX_GUARD_FORCE_CLOSE`(14:50)
 - 캡 원복: `config/phase_settings.py`의 `take_profit_cap` 0.040 -> 0.025,
   `TAKE_PROFIT_CAP_PULLBACK/EARLY` 0.025 -> 0.015

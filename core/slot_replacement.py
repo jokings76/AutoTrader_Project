@@ -5,6 +5,9 @@
 """
 
 from core.strategy.trade_flow import STRENGTH_NEUTRAL
+# MAX_HOLDINGS는 슬롯 만석 판정에 쓴다. strategy_manager는 이 모듈을
+# 임포트하지 않으므로(주석 언급만 있음) 순환 임포트 위험이 없다.
+from core.strategy_manager import MAX_HOLDINGS
 from utils.logger import logger
 
 STAGNANT_MIN_HOLD_MINUTES = 10        # 최소 보유 시간 (이전엔 교체 후보 자격 없음)
@@ -40,9 +43,27 @@ def find_stagnant_holding(strat, now) -> tuple[str, dict] | None:
         if held_minutes < STAGNANT_MIN_HOLD_MINUTES:
             continue
 
-        entry_strength = pos.get("entry_strength")
-        if entry_strength is None or entry_strength <= 0:
-            continue
+        # ⚠️ (2026-08-03) `entry_strength`를 그대로 쓰면 안 된다.
+        # 진입은 대량체결 버스트가 터지는 그 순간에 일어나므로, 그때 캡처한
+        # compute_strength(최근 10초 창)에는 그 버스트가 통째로 들어가 거의 항상
+        # **국소 최고점**이다. 그 값을 기준으로 `현재 < 기준 x 0.8`을 재면
+        # **정상 수준으로 돌아오기만 해도 '하락'**이 되어, 교체 대상 선정이
+        # 구조적으로 남발된다.
+        # 08-03 실측이 그대로 보여준다 — 교체된 3종목의 진입강도가
+        # 090710 **300**(compute_strength 상한 포화) / 336260 100 / 319400 70이고
+        # 현재강도는 5 / 9 / 45였다. 300에서 시작하면 하락 판정을 피할 수 없다.
+        # 같은 결함을 오늘 _update_dynamic_caps와 _is_strength_rising_vs_entry
+        # 에서는 고쳤는데 **여기만 빠져 있었다**(같은 규칙이 세 곳에 흩어져 있어
+        # 두 곳만 고친 전형적인 사고).
+        # -> 워밍업 종료 후 안정화된 기준선으로 교체. 기준선을 못 잡았으면
+        #    비교 자체를 포기한다(옛 스파이크로 폴백하면 수정이 무의미해진다).
+        try:
+            strat._maybe_anchor_strength_baseline(pos, code)
+            entry_strength = strat._strength_baseline(pos)
+        except Exception:
+            entry_strength = 0.0
+        if not entry_strength or entry_strength <= 0:
+            continue  # 기준선 미확보 -> 판단 불가(보수적으로 유지)
 
         try:
             current_strength = strat._current_strength(code)
@@ -107,6 +128,15 @@ def find_stagnant_holding(strat, now) -> tuple[str, dict] | None:
 #   True  = 무장 중인 후보만 교체 자격 (기본, 권장)
 #   False = 옛 동작(저장된 점수만으로 선정) — 되돌릴 때만 쓸 것
 REQUIRE_CANDIDATE_ARMED = True
+# (2026-08-03 사용자 지정) 무장에 더해 **버스트까지 지금 성립**해야 한다.
+# 즉 "슬롯만 비면 즉시 매수될 자리"만 교체 사유가 된다 — 파는 순간과 사는
+# 순간 사이의 간극을 최소화하는 것이 목적이다.
+#   ⚠️ 부작용 인지: 버스트 창은 5초인데 교체 태스크는 60초 주기라, 폴링이
+#   버스트와 겹칠 확률이 낮다. 즉 이 조건을 켜면 슬롯 교체가 **매우 드물게**
+#   일어난다(사실상 거의 안 돎). 08-03처럼 근거 없이 파는 것보다는 낫지만,
+#   교체를 제대로 살리려면 60초 폴링이 아니라 **틱 진입 경로에서 '완전히
+#   준비됐는데 슬롯만 없음'을 감지한 순간** 교체하는 구조가 맞다(이월 과제).
+REQUIRE_CANDIDATE_BURST = True
 
 
 def find_replacement_candidate(strat, stagnant_score: float) -> tuple[str, float] | None:
@@ -148,6 +178,14 @@ def find_replacement_candidate(strat, stagnant_score: float) -> tuple[str, float
                     continue
             except Exception:
                 continue
+        # 무장에 더해 버스트까지 지금 성립해야 '슬롯만 비면 즉시 매수'가 된다.
+        if REQUIRE_CANDIDATE_BURST:
+            try:
+                ok_burst, _ = strat.check_burst(code)
+                if not ok_burst:
+                    continue
+            except Exception:
+                continue
         if score > best_score:
             best_code, best_score = code, score
     if best_code is None:
@@ -156,9 +194,24 @@ def find_replacement_candidate(strat, stagnant_score: float) -> tuple[str, float
 
 
 def try_slot_replacement(strat, send_telegram, replacement_count: int, now) -> int:
-    """슬롯 교체 1회 시도. 반환값: 갱신된 replacement_count (교체 없었으면 그대로)."""
+    """슬롯 교체 1회 시도. 반환값: 갱신된 replacement_count (교체 없었으면 그대로).
+
+    (2026-08-03 사용자 지정) 발동 조건이 셋 다 충족될 때만 교체한다:
+      ① **슬롯 만석** — 자리가 남으면 아무것도 팔지 않고 빈 칸에 사면 된다.
+      ② 대체후보가 **지금 무장 중**
+      ③ 대체후보의 **버스트도 지금 성립** — 즉 "슬롯만 비면 즉시 매수될 자리"
+    ①이 빠져 있어서 08-03에 슬롯이 4~5칸 남는데도 3종목을 팔아 -235,860원을
+    확정했다(대체후보는 끝내 매수되지 않아 자리는 그냥 비었다).
+    """
     if replacement_count >= MAX_SLOT_REPLACEMENTS_PER_DAY:
         return replacement_count
+
+    # ① 슬롯 만석일 때만. 자리가 남으면 교체의 존재 이유(슬롯 기회비용)가 0이다.
+    try:
+        if strat.occupied_slots() < MAX_HOLDINGS:
+            return replacement_count
+    except Exception:
+        return replacement_count   # 슬롯 수를 못 세면 교체하지 않는다(보수적)
 
     # 지수 하락 가드 발동 중엔 교체하지 않는다 (2026-08-03).
     # 이 함수는 정체 종목을 **팔아서 자리만 비우고**, 실제 매수는 일반 진입

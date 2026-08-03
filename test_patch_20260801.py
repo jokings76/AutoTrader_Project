@@ -536,9 +536,12 @@ s.holdings["S1"] = {"buy_price": 10_000, "buy_quantity": 1, "buy_time": old,
 s._current_strength = lambda code: STRENGTH_NEUTRAL      # 틱 부족 = 판단 불가
 check("중립값(100)을 '강도 하락'으로 오판하지 않음",
       find_stagnant_holding(s, s._now()) is None)
+# (2026-08-03) 교체 대상 판정이 entry_strength -> _strength_baseline으로 바뀌었다.
+# 진입 스파이크(150)를 기준으로 쓰면 정상 복귀만으로도 '하락'이 되기 때문.
+s.holdings["S1"]["strength_baseline"] = 150.0
 s._current_strength = lambda code: 100.0 - 1             # 진짜 하락(<150*0.8)
 res = find_stagnant_holding(s, s._now())
-check("실제 강도 하락은 정상 감지", res is not None and res[0] == "S1")
+check("실제 강도 하락은 정상 감지(기준선 기준)", res is not None and res[0] == "S1")
 
 s._watch_scores = {"C1": 1.1, "C2": 1.4}
 s.watch_list_today = {"C1", "C2"}
@@ -552,6 +555,9 @@ for _c in ("C1", "C2"):
         s.phase1b.trade_flow.add_tick(_c, 10_000, "buy", 10, now=_t_now - _i * 0.3)
     s._armed_at[_c] = _t_now - 5
     s._strength_since[_c] = _t_now - (SM.TICK_STRENGTH_SUSTAIN_SEC + 1)
+    # (2026-08-03) 버스트까지 성립해야 대체후보 자격이 생긴다
+    for _j in range(2):
+        s.phase1b.trade_flow.add_tick(_c, 10_000, "buy", 3_000, now=_t_now - _j * 0.3)
 check("무장 상태 준비 확인", s.is_armed_now("C1") and s.is_armed_now("C2"))
 cand = find_replacement_candidate(s, 1.0)
 check("교체 후보는 1.2배 이상만(1.1 탈락, 1.4 선택)", cand == ("C2", 1.4), str(cand))
