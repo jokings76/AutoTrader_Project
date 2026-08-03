@@ -167,11 +167,17 @@ PHASE1A_SCORE_CAUTION_BONUS = 1.0
 # 사실상 겹쳤고(짧은 쪽이 항상 먼저 사감) 그래서 1L은 2026-07-31에 죽고
 # 08-02에 삭제됐다. 거래량/MA/양봉 등 품질필터가 전부 빠지는 트레이드오프를
 # 사용자가 인지하고 수용함(핵심 목표는 "고가 아닌 트리거 지점에서 매수").
-PHASE1A_LEADING_STRENGTH_MIN = 100.0
-# (2026-08-01 사용자 지정) 60초 -> 3초. "트리거 지점에서 사자"는 목표에 60초
-# 유지는 너무 느리다는 판단. 대신 아래 대량체결 버스트 조건을 AND로 걸어서
-# 짧은 창의 노이즈를 막는다 — 시간을 줄인 만큼 '체결의 질'로 보완하는 구조.
-PHASE1A_LEADING_SUSTAIN_SEC = 3
+# ⚠️ [미사용 / 2026-08-03 확인] 아래 PHASE1A_LEADING_* 3종은 **죽은 상수**다.
+#   유일한 사용처가 evaluate_1a_leading_strength()인데 그 함수는 08-02 틱 구동
+#   전환 때 호출부가 교체되어 **라이브 호출이 0건**이다(테스트만 호출).
+#   실제 1A/Pullback 무장은 TICK_STRENGTH_MIN / TICK_STRENGTH_SUSTAIN_SEC가
+#   담당하며, 그 게이트는 전략 라우팅보다 **앞**에 있어 두 전략에 공통 적용된다.
+#   즉 여기 3초를 고쳐도 매매는 1도 안 바뀐다.
+#   이름이 `PHASE1A_...`라서 "1A는 3초구나"로 오해하기 딱 좋아 배너를 단다 —
+#   이 프로젝트는 이름 때문에 실거래 사고가 두 번 났다(08-01 _cleanup_watched가
+#   1A 틱 버퍼를 지운 것 / 07-31 1L 조기청산).
+PHASE1A_LEADING_STRENGTH_MIN = 100.0   # [미사용]
+PHASE1A_LEADING_SUSTAIN_SEC = 3        # [미사용] 실제 값은 TICK_STRENGTH_SUSTAIN_SEC
 # 3초 윈도우 체결강도 판정 최소 틱 수. 이 미만이면 compute_strength가 중립값
 # (100.0)을 돌려주는데, 임계값도 100이라 "100 < 100 = False"로 **통과**해버린다.
 # 즉 데이터가 없을수록 오히려 쉽게 뚫리는 구조였다 — 1A는 그 우연을 쓰지 않고
@@ -415,6 +421,28 @@ ENTRY_HARD_CUTOFF = time(15, 10)
 SEVERE_CRASH_THRESHOLD = -5.0
 SEVERE_CRASH_TAKE_PROFIT = 0.015
 SEVERE_CRASH_ENTRY_CUTOFF = time(11, 0)
+
+# ── 지수 하락 가드 (2026-08-03 사용자 지정) ─────────────────────────
+# 위 SEVERE_CRASH(-5%)보다 **한 단계 얕은** 방어선. 둘은 공존한다:
+#   -3% (여기)  : 11:00 이후 발동 -> 신규매수 중단 + 본전 이상이면 정리 +
+#                 남은 건 14:50 강제청산
+#   -5% (기존)  : 익절 flat 1.5% + 11:00 이후 신규매수 중단
+# 판정은 **코스피/코스닥 중 나쁜 쪽**(둘 중 하나라도 -3% 이하면 발동).
+#
+# 왜 11:00부터인가: 개장 직후의 일시적 급락에 과민 반응하지 않기 위해서다.
+# 11시까지 회복 못 한 하락은 그날 추세일 가능성이 높다는 판단(사용자 지정).
+#
+# 왜 '본전 이상만' 파는가: 지수가 무너지는 날 반등을 기다리는 것보다 본전에
+# 나오는 게 낫다는 판단. 손실 중인 종목까지 즉시 던지면 저점 매도가 되므로,
+# 그건 14:50까지 회복 기회를 주고 그때도 안 되면 정리한다.
+#
+# ⚠️ 지수 조회는 _refresh_market_rates()의 60초 캐시를 그대로 재사용한다 —
+# 이미 _is_severe_crash가 매 가격갱신마다 부르고 있어 **REST 추가 부담 0**.
+INDEX_GUARD_ENABLED = True
+INDEX_GUARD_THRESHOLD = -3.0            # 코스피/코스닥 중 하나라도 이 값 이하
+INDEX_GUARD_FROM = time(11, 0)          # 이 시각부터 감시(그 전 급락은 무시)
+INDEX_GUARD_BREAKEVEN_UNTIL = time(11, 30)  # 이때까지 본전 이상이면 청산
+INDEX_GUARD_FORCE_CLOSE = time(14, 50)  # 남은 보유분(본전 미만) 강제청산
 
 # 청산 정책 (EXIT_POLICY 딕셔너리에서 가져옴)
 TAKE_PROFIT_CAP = EXIT_POLICY["default"]["take_profit_cap"]
@@ -717,6 +745,8 @@ class StrategyManager:
         self.quarantine_until = self._now()
         self._last_market_mode = "NORMAL"  # 지수방어 모드 전환 알림용
         self._last_severe_crash_state = False  # 지수 급락 대응 모드 전환 알림용
+        self._last_index_guard_state = False   # 지수 하락 가드(-3%) 전환 알림용
+        self._index_guard_exited: set[str] = set()  # 가드로 이미 청산한 종목
 
         # 점수 기반 진입 설정 (1A 전용). surge_min은 score_phase1이 안 쓰는
         # 필드라 ScoreConfig 기본값 그대로 둠.
@@ -1149,6 +1179,10 @@ class StrategyManager:
             return False
         if self._get_market_defense_mode() == "HALT":
             return False
+        # 지수 하락 가드(-3%, 11:00~) — 슬롯이 남아도 신규매수를 막는다.
+        # (2026-08-03) 여기서 막으면 진단 알림의 슬롯 통계도 왜곡되지 않는다.
+        if self._is_index_guard_active():
+            return False
         if self._now() < self.quarantine_until:
             return False
         held = self.occupied_slots()
@@ -1307,6 +1341,10 @@ class StrategyManager:
         ("시가급등 보류", ("시가대비",)),
         ("저유동성 보류", ("저유동성",)),
         ("지수 방어(HALT)", ("전면 매매 중단",)),
+        # (2026-08-03) 지수 하락 가드(-3%, 11:00~). 이게 대부분이면
+        # "코드 정상, 지수가 나빠서 일부러 안 산다"는 뜻이다 — 규칙이
+        # 없으면 "기타"로 뭉개져 장중에 매수 0건의 원인을 판단할 수 없다.
+        ("지수 하락 가드(-3%)", ("지수 하락 가드",)),
         ("데이터소스 없음", ("데이터 소스 없음",)),
         ("눌림 미충족", ("눌림 미성립", "반등 미확인")),
         ("VWAP 탈락", ("VWAP",)),
@@ -2048,6 +2086,51 @@ class StrategyManager:
 
         return is_crash
 
+    def _is_index_guard_active(self, now_dt: datetime = None) -> bool:
+        """지수 하락 가드(-3%) 발동 여부 (2026-08-03 신규, 사용자 지정).
+
+        조건: **INDEX_GUARD_FROM(11:00) 이후**이고, 코스피/코스닥 중
+        **하나라도** INDEX_GUARD_THRESHOLD(-3%) 이하.
+
+        SEVERE_CRASH(-5%)와 별개의 얕은 방어선이며 둘은 동시에 켜질 수 있다
+        (-5%면 -3% 조건도 자동으로 참). 서로 상충하지 않는다 — -5%는 익절 캡을
+        조이고, 이쪽은 신규매수 차단과 보유분 정리 시각을 정한다.
+
+        지수 조회는 _refresh_market_rates()의 60초 캐시를 재사용하므로 REST
+        추가 부담이 없다. 조회 실패 시 캐시된 직전 값이 쓰이고, 초기값은
+        0.0이라 **데이터가 없으면 발동하지 않는다**(보수적 = 매매를 막지 않음).
+        """
+        if not INDEX_GUARD_ENABLED:
+            return False
+        now_dt = now_dt or self._now()
+        if now_dt.time() < INDEX_GUARD_FROM:
+            return False
+        self._refresh_market_rates()
+        worst = min(self._kospi_rate, self._kosdaq_rate)
+        active = worst <= INDEX_GUARD_THRESHOLD
+
+        if active != self._last_index_guard_state:
+            rate_str = (
+                f"코스피 {self._kospi_rate:+.2f}% / 코스닥 {self._kosdaq_rate:+.2f}%"
+            )
+            if active:
+                logger.warning("🛡 지수 하락 가드 발동! %s", rate_str)
+                _notify(
+                    f"🛡 지수 하락 가드 발동 ({INDEX_GUARD_THRESHOLD:+.0f}% 이하)\n"
+                    f"{rate_str}\n"
+                    f"· 신규매수 즉시 중단\n"
+                    f"· {INDEX_GUARD_BREAKEVEN_UNTIL.strftime('%H:%M')}까지 "
+                    f"본전(순 0%) 이상인 보유분은 청산\n"
+                    f"· 그때도 손실인 보유분은 "
+                    f"{INDEX_GUARD_FORCE_CLOSE.strftime('%H:%M')} 강제청산"
+                )
+            else:
+                logger.info("✅ 지수 하락 가드 해제 %s", rate_str)
+                _notify(f"✅ 지수 회복 — 하락 가드 해제\n{rate_str}")
+            self._last_index_guard_state = active
+
+        return active
+
     # ════════════════════════════════════════════════════════════════
     # 틱 구동 진입 (2026-08-02 신설) — 무장(강도 N초 연속, 현재 2초) -> 발사(버스트)
     # ════════════════════════════════════════════════════════════════
@@ -2489,7 +2572,18 @@ class StrategyManager:
         self, stock_code: str, current_price: float,
         open_price: float = 0.0, cond_name: str = "",
     ) -> tuple[bool, dict]:
-        """1A 즉시진입 평가 — 체결강도(3초) + 대량체결 버스트.
+        """⚠️ [삭제 예정 / DEPRECATED — 2026-08-03 확인]
+
+        **라이브에서 호출되지 않는다.** 08-02에 진입이 틱 구동
+        (_maybe_tick_entry -> evaluate_tick_entry)으로 전면 전환되면서 호출부가
+        교체됐고, 지금 이 함수를 부르는 건 테스트뿐이다.
+        실제 1A 진입 조건을 고치려면 evaluate_tick_entry / _maybe_tick_entry를
+        보라. 여기 있는 PHASE1A_LEADING_SUSTAIN_SEC(3초)는 매매에 영향이 없다.
+        삭제하지 않는 이유는 CLAUDE.md 규칙 2(파일/코드 보존)와, 옛 방식으로
+        되돌릴 때의 참고용이다.
+
+        ── 이하 원래 설명 (2026-08-01 시점) ──
+        1A 즉시진입 평가 — 체결강도(3초) + 대량체결 버스트.
 
         [2026-08-01 개편, 사용자 지정] 게이트 순서(위에서 걸리면 즉시 탈락):
           0) 감시 시작(체결틱/호가 수집) — 최초 호출부터 데이터를 모은다
@@ -3120,6 +3214,17 @@ class StrategyManager:
             )
             return
 
+        # 지수 하락 가드(-3%, 11:00~) — 발동 중이면 신규매수를 전면 중단한다.
+        # (2026-08-03) can_buy_more에도 같은 체크를 넣었지만, 주문 직전에도
+        # 한 번 더 막는다 — 다른 경로가 추가돼도 절대 새지 않게 하는 하드가드다.
+        if self._is_index_guard_active():
+            self._note_reject(stock_code, "지수 하락 가드(-3%) — 신규매수 중단")
+            logger.info(
+                "[%s] %s 매수 차단: 지수 하락 가드(%.0f%% 이하) 발동 중 [%s]",
+                stock_code, stock_name, INDEX_GUARD_THRESHOLD, sub_strategy,
+            )
+            return
+
         cond_name_now = self._cond_names.get(stock_code, "")
 
         # 조건검색식 <-> 전략 결합 가드 (2026-08-01 사용자 지정).
@@ -3494,6 +3599,35 @@ class StrategyManager:
                 f"손절 가격{gross_rate*100:.2f}% (순 {net_rate*100:.2f}%)",
             )
             return
+
+        # ── 지수 하락 가드 청산 (2026-08-03 사용자 지정) ──────────────
+        # 손절 바로 다음에 둔다 — 지수가 무너지는 날은 개별 종목의 익절캡/
+        # 정체정리보다 '리스크 오프'가 우선이다. 손절보다는 뒤다(더 급한 건 손절).
+        # 워밍업보다도 앞이다: 가드는 가격 기반 판정이라 강도/거래량처럼
+        # 매수 직후 흔들리는 지표에 의존하지 않는다.
+        if self._is_index_guard_active():
+            now_t = self._now().time()
+            if now_t < INDEX_GUARD_BREAKEVEN_UNTIL:
+                # 1단계: 본전(순 0%) 이상이면 정리. 손실 중인 건 아직 안 판다 —
+                # 지수 급락 중 저점 매도가 되므로 회복 기회를 준다.
+                if net_rate >= 0:
+                    self._execute_sell(
+                        stock_code, current_price,
+                        f"지수 가드 본전청산 (순 {net_rate*100:+.2f}%, "
+                        f"{INDEX_GUARD_BREAKEVEN_UNTIL.strftime('%H:%M')} 이전)",
+                    )
+                    return
+            elif now_t >= INDEX_GUARD_FORCE_CLOSE:
+                # 2단계: 회복 기회를 다 주고도 남은 보유분은 손익 무관 강제청산.
+                # 정규 강제청산(15:10)보다 앞당겨 지수 약세일 때 오버나이트
+                # 리스크를 줄인다.
+                self._execute_sell(
+                    stock_code, current_price,
+                    f"지수 가드 강제청산 "
+                    f"({INDEX_GUARD_FORCE_CLOSE.strftime('%H:%M')}, "
+                    f"순 {net_rate*100:+.2f}%)",
+                )
+                return
 
         warmup_until = pos.get("warmup_until")
         if warmup_until and self._now() < warmup_until:

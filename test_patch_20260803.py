@@ -348,6 +348,103 @@ check("빈 문자열은 이름으로 안 봄",
 check("'name'이 후보 키에서 제거됨",
       M._extract_stock_name({"name": "아무거나"}, "005930") == "005930")
 
+print("\n[13] 지수 하락 가드 (-3%, 11:00~) — 2026-08-03 신규")
+
+
+def guard_strat(hh, mm, kospi=0.0, kosdaq=0.0):
+    st = build(datetime(2026, 8, 3, hh, mm, 0))
+    st._kospi_rate, st._kosdaq_rate = kospi, kosdaq
+    st._market_rate_at = st._now()          # 캐시 신선 -> REST 재조회 안 함
+    return st
+
+
+check("가드 활성 상수", SM.INDEX_GUARD_ENABLED is True)
+check("임계 -3%", abs(SM.INDEX_GUARD_THRESHOLD - (-3.0)) < 1e-9)
+check("감시 시작 11:00", SM.INDEX_GUARD_FROM == SM.time(11, 0))
+check("본전청산 마감 11:30", SM.INDEX_GUARD_BREAKEVEN_UNTIL == SM.time(11, 30))
+check("강제청산 14:50", SM.INDEX_GUARD_FORCE_CLOSE == SM.time(14, 50))
+
+# --- 발동 조건 ---
+check("11:00 전에는 -5%여도 발동 안 함(개장 급락 과민반응 방지)",
+      not guard_strat(10, 59, -5.0, -5.0)._is_index_guard_active())
+check("11:00 이후 코스피만 -3%여도 발동(둘 중 하나)",
+      guard_strat(11, 0, -3.1, +0.5)._is_index_guard_active())
+check("11:00 이후 코스닥만 -3%여도 발동",
+      guard_strat(11, 0, +0.5, -3.2)._is_index_guard_active())
+check("-2.9%면 발동 안 함(경계)",
+      not guard_strat(11, 5, -2.9, -2.9)._is_index_guard_active())
+check("지수 데이터가 0.0(미조회)이면 발동 안 함(보수적)",
+      not guard_strat(12, 0, 0.0, 0.0)._is_index_guard_active())
+
+# --- 신규매수 차단 ---
+sG = guard_strat(11, 10, -3.5, -1.0)
+check("가드 발동 중 can_buy_more=False", not sG.can_buy_more())
+sG2 = guard_strat(11, 10, -1.0, -1.0)
+check("가드 미발동이면 can_buy_more 정상", sG2.can_buy_more())
+
+# --- 1단계: 11:30 이전, 본전 이상이면 청산 ---
+sB = guard_strat(11, 10, -3.5, -1.0)
+put_pos(sB, code="G001", buy_price=10_000, now_dt=sB._now())
+# 순 0% = 가격 +0.23%(수수료). 그보다 위면 청산 대상.
+px_be = int(10_000 * (1 + SM.ROUND_TRIP_COST)) + 2
+sB.on_price_update("G001", px_be)
+check("11:10 본전 이상 -> 지수 가드 청산", sold(sB, "G001"))
+check("청산 사유가 '지수 가드 본전청산'",
+      any("지수 가드 본전청산" in (r.get("exit_reason") or "") for r in _Repo.sells),
+      str([r.get("exit_reason") for r in _Repo.sells])[:60])
+
+# 손실 중이면 아직 안 판다(저점 매도 방지)
+sL = guard_strat(11, 10, -3.5, -1.0)
+put_pos(sL, code="G002", buy_price=10_000, now_dt=sL._now())
+sL.on_price_update("G002", 9_900)     # 순 -1.2%
+check("11:10 손실 중이면 청산 안 함(회복 기회)", not sold(sL, "G002"))
+
+# --- 2단계: 11:30~14:50 사이엔 보유 유지, 14:50에 강제청산 ---
+sM = guard_strat(13, 0, -3.5, -1.0)
+put_pos(sM, code="G003", buy_price=10_000, now_dt=sM._now())
+sM.on_price_update("G003", 9_900)
+check("13:00 손실분은 아직 보유(14:50까지 회복 대기)", not sold(sM, "G003"))
+
+sF = guard_strat(14, 50, -3.5, -1.0)
+put_pos(sF, code="G004", buy_price=10_000, now_dt=sF._now())
+sF.on_price_update("G004", 9_900)
+check("14:50 강제청산 발동", sold(sF, "G004"))
+check("사유가 '지수 가드 강제청산'",
+      any("지수 가드 강제청산" in (r.get("exit_reason") or "") for r in _Repo.sells),
+      str([r.get("exit_reason") for r in _Repo.sells])[:60])
+
+# --- 우선순위: 손절이 가드보다 먼저 ---
+sP = guard_strat(11, 10, -3.5, -1.0)
+put_pos(sP, code="G005", buy_price=10_000, now_dt=sP._now())
+sP.on_price_update("G005", 9_600)     # -4%
+check("가드 발동 중에도 급락은 손절로 청산", sold(sP, "G005"))
+check("사유가 손절(가드 아님)",
+      any("손절" in (r.get("exit_reason") or "") for r in _Repo.sells),
+      str([r.get("exit_reason") for r in _Repo.sells])[:60])
+
+# --- 가드 미발동 시 기존 동작 불변 (회귀 방지) ---
+sN = guard_strat(11, 10, -1.0, -1.0)
+put_pos(sN, code="G006", buy_price=10_000, now_dt=sN._now())
+sN.on_price_update("G006", px_be)
+check("가드 미발동이면 본전 근처에서 팔지 않음(기존 동작 유지)",
+      not sold(sN, "G006"))
+
+# --- 진단 분류 (기타로 뭉개지지 않는지) ---
+check("가드 탈락 사유가 분류됨",
+      SM.StrategyManager._reject_category("지수 하락 가드(-3%) — 신규매수 중단")
+      != "기타")
+
+print("\n[14] 죽은 코드 배너 — 이름 때문에 생기는 오해 방지")
+_src = open("core/strategy_manager.py", encoding="utf-8").read()
+check("PHASE1A_LEADING_SUSTAIN_SEC에 [미사용] 배너",
+      "PHASE1A_LEADING_SUSTAIN_SEC = 3        # [미사용]" in _src)
+check("evaluate_1a_leading_strength에 DEPRECATED 배너",
+      "[삭제 예정 / DEPRECATED — 2026-08-03 확인]"
+      in (SM.StrategyManager.evaluate_1a_leading_strength.__doc__ or ""))
+check("라이브 무장은 TICK_STRENGTH_SUSTAIN_SEC만 사용",
+      "PHASE1A_LEADING_SUSTAIN_SEC" not in
+      __import__("inspect").getsource(SM.StrategyManager._maybe_tick_entry))
+
 print("\n[8] daily_backtest 동기화")
 import core.daily_backtest as DB
 check("백테스트가 라이브 캡을 그대로 참조", DB.TAKE_PROFIT_CAP == SM.TAKE_PROFIT_CAP,
