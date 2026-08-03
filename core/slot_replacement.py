@@ -138,6 +138,17 @@ def try_slot_replacement(strat, send_telegram, replacement_count: int, now) -> i
     if replacement_count >= MAX_SLOT_REPLACEMENTS_PER_DAY:
         return replacement_count
 
+    # 지수 하락 가드 발동 중엔 교체하지 않는다 (2026-08-03).
+    # 이 함수는 정체 종목을 **팔아서 자리만 비우고**, 실제 매수는 일반 진입
+    # 경로가 한다. 그런데 가드 중엔 그 매수가 막혀 있으므로, 교체를 시도하면
+    # **매도만 일어나고 대체는 안 되는** 반쪽 동작이 된다 — 손실만 확정된다.
+    # 가드 사양("본전 이하는 손절선이나 14:50까지 가져간다")과도 정면 충돌한다.
+    try:
+        if strat._is_index_guard_active():
+            return replacement_count
+    except Exception:
+        pass  # 가드 판정 실패는 교체를 막을 이유가 아니다(기존 동작 유지)
+
     found = find_stagnant_holding(strat, now)
     if not found:
         return replacement_count

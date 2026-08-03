@@ -359,31 +359,32 @@ def guard_strat(hh, mm, kospi=0.0, kosdaq=0.0):
 
 
 check("가드 활성 상수", SM.INDEX_GUARD_ENABLED is True)
-check("임계 -3%", abs(SM.INDEX_GUARD_THRESHOLD - (-3.0)) < 1e-9)
+check("임계 -5% (2026-08-03: -3.0에서 변경)",
+      abs(SM.INDEX_GUARD_THRESHOLD - (-5.0)) < 1e-9, str(SM.INDEX_GUARD_THRESHOLD))
 check("감시 시작 11:00", SM.INDEX_GUARD_FROM == SM.time(11, 0))
 check("본전청산 마감 11:30", SM.INDEX_GUARD_BREAKEVEN_UNTIL == SM.time(11, 30))
 check("강제청산 14:50", SM.INDEX_GUARD_FORCE_CLOSE == SM.time(14, 50))
 
 # --- 발동 조건 ---
-check("11:00 전에는 -5%여도 발동 안 함(개장 급락 과민반응 방지)",
-      not guard_strat(10, 59, -5.0, -5.0)._is_index_guard_active())
-check("11:00 이후 코스피만 -3%여도 발동(둘 중 하나)",
-      guard_strat(11, 0, -3.1, +0.5)._is_index_guard_active())
-check("11:00 이후 코스닥만 -3%여도 발동",
-      guard_strat(11, 0, +0.5, -3.2)._is_index_guard_active())
-check("-2.9%면 발동 안 함(경계)",
-      not guard_strat(11, 5, -2.9, -2.9)._is_index_guard_active())
+check("11:00 전에는 -6%여도 발동 안 함(개장 급락 과민반응 방지)",
+      not guard_strat(10, 59, -6.0, -6.0)._is_index_guard_active())
+check("11:00 이후 코스피만 -5%여도 발동(둘 중 하나)",
+      guard_strat(11, 0, -5.1, +0.5)._is_index_guard_active())
+check("11:00 이후 코스닥만 -5%여도 발동",
+      guard_strat(11, 0, +0.5, -5.2)._is_index_guard_active())
+check("-4.9%면 발동 안 함(경계)",
+      not guard_strat(11, 5, -4.9, -4.9)._is_index_guard_active())
 check("지수 데이터가 0.0(미조회)이면 발동 안 함(보수적)",
       not guard_strat(12, 0, 0.0, 0.0)._is_index_guard_active())
 
 # --- 신규매수 차단 ---
-sG = guard_strat(11, 10, -3.5, -1.0)
+sG = guard_strat(11, 10, -5.5, -1.0)
 check("가드 발동 중 can_buy_more=False", not sG.can_buy_more())
-sG2 = guard_strat(11, 10, -1.0, -1.0)
+sG2 = guard_strat(11, 10, -2.0, -1.0)
 check("가드 미발동이면 can_buy_more 정상", sG2.can_buy_more())
 
 # --- 1단계: 11:30 이전, 본전 이상이면 청산 ---
-sB = guard_strat(11, 10, -3.5, -1.0)
+sB = guard_strat(11, 10, -5.5, -1.0)
 put_pos(sB, code="G001", buy_price=10_000, now_dt=sB._now())
 # 순 0% = 가격 +0.23%(수수료). 그보다 위면 청산 대상.
 px_be = int(10_000 * (1 + SM.ROUND_TRIP_COST)) + 2
@@ -394,18 +395,18 @@ check("청산 사유가 '지수 가드 본전청산'",
       str([r.get("exit_reason") for r in _Repo.sells])[:60])
 
 # 손실 중이면 아직 안 판다(저점 매도 방지)
-sL = guard_strat(11, 10, -3.5, -1.0)
+sL = guard_strat(11, 10, -5.5, -1.0)
 put_pos(sL, code="G002", buy_price=10_000, now_dt=sL._now())
 sL.on_price_update("G002", 9_900)     # 순 -1.2%
 check("11:10 손실 중이면 청산 안 함(회복 기회)", not sold(sL, "G002"))
 
 # --- 2단계: 11:30~14:50 사이엔 보유 유지, 14:50에 강제청산 ---
-sM = guard_strat(13, 0, -3.5, -1.0)
+sM = guard_strat(13, 0, -5.5, -1.0)
 put_pos(sM, code="G003", buy_price=10_000, now_dt=sM._now())
 sM.on_price_update("G003", 9_900)
 check("13:00 손실분은 아직 보유(14:50까지 회복 대기)", not sold(sM, "G003"))
 
-sF = guard_strat(14, 50, -3.5, -1.0)
+sF = guard_strat(14, 50, -5.5, -1.0)
 put_pos(sF, code="G004", buy_price=10_000, now_dt=sF._now())
 sF.on_price_update("G004", 9_900)
 check("14:50 강제청산 발동", sold(sF, "G004"))
@@ -414,7 +415,7 @@ check("사유가 '지수 가드 강제청산'",
       str([r.get("exit_reason") for r in _Repo.sells])[:60])
 
 # --- 우선순위: 손절이 가드보다 먼저 ---
-sP = guard_strat(11, 10, -3.5, -1.0)
+sP = guard_strat(11, 10, -5.5, -1.0)
 put_pos(sP, code="G005", buy_price=10_000, now_dt=sP._now())
 sP.on_price_update("G005", 9_600)     # -4%
 check("가드 발동 중에도 급락은 손절로 청산", sold(sP, "G005"))
@@ -423,7 +424,7 @@ check("사유가 손절(가드 아님)",
       str([r.get("exit_reason") for r in _Repo.sells])[:60])
 
 # --- 가드 미발동 시 기존 동작 불변 (회귀 방지) ---
-sN = guard_strat(11, 10, -1.0, -1.0)
+sN = guard_strat(11, 10, -2.0, -1.0)
 put_pos(sN, code="G006", buy_price=10_000, now_dt=sN._now())
 sN.on_price_update("G006", px_be)
 check("가드 미발동이면 본전 근처에서 팔지 않음(기존 동작 유지)",
@@ -433,6 +434,102 @@ check("가드 미발동이면 본전 근처에서 팔지 않음(기존 동작 �
 check("가드 탈락 사유가 분류됨",
       SM.StrategyManager._reject_category("지수 하락 가드(-3%) — 신규매수 중단")
       != "기타")
+
+print("\n[15] 시간정리/정체정리 — '슬롯 만석'일 때만 (2026-08-03 변경)")
+# 존재 이유가 '슬롯 기회비용'인데 슬롯이 남으면 비울 이유가 없다.
+# 08-03 실측: 동시보유 최대 2/6이라 자리가 하루 종일 남았는데도 4건이 나갔다.
+
+
+def full_strat(hh, mm, n_hold, kospi=0.0, kosdaq=0.0, held_min=45):
+    st = build(datetime(2026, 8, 3, hh, mm, 0))
+    st._kospi_rate, st._kosdaq_rate = kospi, kosdaq
+    st._market_rate_at = st._now()
+    for i in range(n_hold):
+        st.holdings[f"H{i}"] = {
+            "trade_id": 1, "qty": 10, "buy_price": 10_000,
+            "buy_time": st._now() - timedelta(minutes=held_min),
+            "stock_name": f"H{i}", "sub_strategy": "1A", "warmup_until": None,
+            "entry_strength": 150.0, "highest_price": 10_000, "lowest_price": 10_000,
+        }
+    return st
+
+
+def netpx(p):
+    return int(10_000 * (1 + p / 100 + SM.ROUND_TRIP_COST))
+
+
+# 슬롯 여유 -> 시간정리 안 함 (구버전은 여기서 팔았다)
+sF = full_strat(11, 10, 1)
+sF.on_price_update("H0", netpx(-1.0))
+check("슬롯 여유(1/6)면 45분 보유해도 시간정리 안 함", "H0" in sF.holdings)
+sF.check_timeouts()
+check("check_timeouts 경로도 슬롯 여유면 안 팜(두 번째 경로)", "H0" in sF.holdings)
+
+# 슬롯 만석 -> 기존대로 시간정리
+sFull = full_strat(11, 10, SM.MAX_HOLDINGS)
+sFull.on_price_update("H0", netpx(-1.0))
+check("슬롯 만석이면 시간정리 발동(기존 동작 유지)", "H0" not in sFull.holdings)
+check("사유에 '슬롯 만석' 표기",
+      any("슬롯 만석" in (r.get("exit_reason") or "") for r in _Repo.sells),
+      str([r.get("exit_reason") for r in _Repo.sells])[:60])
+
+# 정체정리도 동일 규칙
+sD = full_strat(11, 10, 1, held_min=SM.DEAD_POSITION_MIN + 1)
+sD.on_price_update("H0", netpx(0.1))     # ±0.5% 밴드 안
+check("슬롯 여유면 정체정리도 안 함", "H0" in sD.holdings)
+sD2 = full_strat(11, 10, SM.MAX_HOLDINGS, held_min=SM.DEAD_POSITION_MIN + 1)
+sD2.on_price_update("H0", netpx(0.1))
+check("슬롯 만석이면 정체정리 발동", "H0" not in sD2.holdings)
+
+print("\n[16] 지수 가드 -5% — 시간정리와의 충돌 해소 확인")
+# 가드 사양("본전 이하는 손절선이나 14:50까지")이 30분 컷에 잘리면 무의미해진다.
+check("가드 임계가 -5.0%", abs(SM.INDEX_GUARD_THRESHOLD - (-5.0)) < 1e-9)
+check("[정합성] SEVERE_CRASH와 같은 임계 (한쪽만 고치면 어긋남)",
+      abs(SM.INDEX_GUARD_THRESHOLD - SM.SEVERE_CRASH_THRESHOLD) < 1e-9,
+      f"guard={SM.INDEX_GUARD_THRESHOLD} severe={SM.SEVERE_CRASH_THRESHOLD}")
+check("[정합성] 두 규칙의 매수중단 시각도 동일",
+      SM.INDEX_GUARD_FROM == SM.SEVERE_CRASH_ENTRY_CUTOFF)
+
+sG1 = full_strat(11, 10, SM.MAX_HOLDINGS, kospi=-5.2, kosdaq=-1.0)
+sG1.on_price_update("H0", netpx(-1.0))
+sG1.check_timeouts()
+check("가드 중 손실분은 슬롯 만석이어도 보유 유지(30분 컷 억제)",
+      "H0" in sG1.holdings)
+
+sG2 = full_strat(13, 0, SM.MAX_HOLDINGS, kospi=-5.2, kosdaq=-1.0)
+sG2.on_price_update("H0", netpx(-1.0))
+sG2.check_timeouts()
+check("13:00에도 계속 보유(손절선/14:50까지)", "H0" in sG2.holdings)
+
+sG3 = full_strat(13, 0, SM.MAX_HOLDINGS, kospi=-5.2, kosdaq=-1.0)
+sG3.on_price_update("H0", netpx(-3.5))
+check("가드 중에도 손절선 이탈은 손절", "H0" not in sG3.holdings)
+check("사유가 손절",
+      any("손절" in (r.get("exit_reason") or "") for r in _Repo.sells))
+
+sG4 = full_strat(14, 50, SM.MAX_HOLDINGS, kospi=-5.2, kosdaq=-1.0)
+sG4.on_price_update("H0", netpx(-1.0))
+check("14:50 강제청산", "H0" not in sG4.holdings)
+
+# 임계 미달이면 일반장과 동일
+sG5 = full_strat(11, 10, SM.MAX_HOLDINGS, kospi=-4.0, kosdaq=-1.0)
+sG5.on_price_update("H0", netpx(-1.0))
+check("-4.0%(임계 미달)는 일반장과 동일하게 시간정리", "H0" not in sG5.holdings)
+
+# 슬롯교체도 가드 중엔 멈춰야 한다(매도만 하고 재매수는 막히는 반쪽 동작 방지)
+import core.slot_replacement as _SR
+_sr_src = open("core/slot_replacement.py", encoding="utf-8").read()
+check("슬롯교체에 지수 가드 차단이 있음",
+      "_is_index_guard_active" in _sr_src)
+sSR = full_strat(11, 10, SM.MAX_HOLDINGS, kospi=-5.2, kosdaq=-1.0)
+check("가드 중 슬롯교체 시도가 즉시 반환(교체 0)",
+      _SR.try_slot_replacement(sSR, None, 0, sSR._now()) == 0)
+
+print("\n[17] 무장 1.5초")
+check("무장 요구시간 1.5초", abs(SM.TICK_STRENGTH_SUSTAIN_SEC - 1.5) < 1e-9,
+      str(SM.TICK_STRENGTH_SUSTAIN_SEC))
+check("[불변] 쿨다운보다는 큼", SM.TICK_STRENGTH_SUSTAIN_SEC > SM.TICK_ENTRY_COOLDOWN_SEC)
+check("[불변] 무장 TTL보다는 작음", SM.TICK_STRENGTH_SUSTAIN_SEC < SM.TICK_ARM_TTL_SEC)
 
 print("\n[14] 죽은 코드 배너 — 이름 때문에 생기는 오해 방지")
 _src = open("core/strategy_manager.py", encoding="utf-8").read()

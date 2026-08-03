@@ -1492,8 +1492,55 @@ claude --remote-control
     무장 -> 매수 성립. 상수를 3.0으로 되돌리면 같은 입력에서 매수가 안 되는
     **반증**까지 확인했다.
 
-  [검증] 5개 스위트 **622건 전원 통과**
-  (283 / 86 / 59->84 / 145 / 24). 테스트 로그 분리가 작동해
+  [지수 가드 -5%로 조정 + 시간정리 조건 변경 (사용자 지정, 같은 날 저녁)]
+  - **무장 2.0 -> 1.5초.** (사용자가 "2초가 하한이냐"고 물었는데 **2초는 하한이
+    아니라 그냥 당시 설정값**이었다 — 1.5초도 문제없이 가능하다.)
+    ⚠️ 저유동 종목 주의: 08-03 실측 틱 밀도가 037070 23.2틱/초 vs
+    **000400 0.4틱/초**로 60배 차이 난다. 후자는 틱이 2.5초에 하나라 요구시간을
+    낮춰도 체감 완화가 거의 없고, 대신 **증거가 2틱뿐**이라는 위험만 남는다.
+  - **지수 가드 임계 -3% -> -5%.** 이로써 기존 `SEVERE_CRASH`(-5%, 11:00)와
+    **완전히 같은 조건**이 됐다 — 지수가 -5% 이하면 두 규칙이 동시에 켜진다.
+    역할은 다르다: SEVERE_CRASH는 익절캡을 1.5%로 축소, INDEX_GUARD는
+    매수중단 + 11:30 본전청산 + 14:50 강제청산. **한쪽만 고치면 어긋나므로**
+    두 상수가 같은지 검사하는 정합성 테스트를 넣었다.
+  - **시간정리 30분 / 정체정리 15분 -> '슬롯 만석'일 때만 발동.**
+    존재 이유가 슬롯 기회비용인데 자리가 남으면 비울 이유가 없다. 08-03 실측은
+    동시보유 최대 **2/6**인데도 이 규칙으로 4건이 나갔다.
+
+  [🔴 이 변경들이 만든 충돌 3건 — 전부 잡음]
+  - **① 시간정리가 지수 가드 사양을 무력화하고 있었다.** "본전 이하는 손절선이나
+    14:50까지 가져간다"고 했는데, 시뮬레이션해보니 **보유 31분 종목이
+    '시간정리 30분'으로 먼저 매도**됐다. 가드 발동 중엔 신규매수가 막혀 슬롯을
+    비워도 쓸 곳이 없으므로, 가드 중에는 시간정리·정체정리를 억제하도록 했다.
+  - **② 시간정리 경로가 두 곳이었다.** `on_price_update`와 **`check_timeouts()`**
+    (틱이 안 들어오는 종목용 별도 루프). 앞쪽만 고쳤으면 뒤쪽으로 그대로
+    잘려나가 조건을 건 의미가 사라졌을 것이다 — 같은 규칙이 두 곳에 있는 걸
+    놓쳐 한쪽만 고치는 전형적인 사고다.
+  - **③ 슬롯교체가 가드 중에 '매도만' 하고 있었다.** `try_slot_replacement`는
+    정체 종목을 팔아 자리만 비우고 실제 매수는 일반 진입 경로가 하는데, 가드
+    중엔 그 매수가 막혀 있다 -> **매도만 일어나고 대체는 안 되는 반쪽 동작**.
+    손실만 확정된다. 가드 중 교체 중단을 추가했다.
+
+  [시나리오 8종 실측 검증]
+  | 상황 | 결과 |
+  |---|---|
+  | 일반장 · 슬롯 여유 · 45분 · -1.0% | 보유유지 (구버전은 매도) |
+  | 일반장 · 슬롯 만석 · 45분 · -1.0% | 시간정리 30분 (슬롯 만석) |
+  | 가드 · 11:10 · 슬롯 만석 · -1.0% | **보유유지** (30분 컷 억제) |
+  | 가드 · 11:10 · +0.5% | 지수 가드 본전청산 |
+  | 가드 · 13:00 · -1.0% | 보유유지 |
+  | 가드 · 13:00 · -3.5% | 손절 (가드보다 우선) |
+  | 가드 · 14:50 · -1.0% | 지수 가드 강제청산 |
+  | 지수 -4.0%(임계 미달) | 일반장과 동일 |
+
+  [백테스트 한계 명시]
+  - `daily_backtest`는 **종목별 독립 시뮬레이션이라 슬롯 개념이 없어** 이
+    '슬롯 만석' 조건을 재현할 수 없다. 그래서 조건 없이 30분 컷을 적용하며,
+    결과적으로 **시간정리가 라이브보다 과다 집계**된다. 청산 정책을 비교할 때
+    반드시 감안할 것(코드에 주석으로 박아둠). 실행 검증은 완료(11건 재현).
+
+  [검증] 5개 스위트 **644건 전원 통과**
+  (283->285 / 86 / 84->104 / 145 / 24). 테스트 로그 분리가 작동해
   전수 실행 후에도 `autotrader.log` 크기 불변(799,833바이트) 확인.
 
 \## 세션 이관 체크리스트 (2026-08-01 신설)
@@ -1515,15 +1562,15 @@ claude --remote-control
 | # | 명령 | 기대 결과 |
 |---|---|---|
 | 1 | `python -c "import main; print('OK')"` | `OK` (임포트 체인 전체 정상) |
-| 2 | `python test_patch_20260801.py` | **283건 전원 통과 / 실패 0건** |
+| 2 | `python test_patch_20260801.py` | **285건 전원 통과 / 실패 0건** |
 | 3 | `python test_patch_20260802.py` | **86건 전원 통과 / 실패 0건** (틱 구동) |
-| 4 | `python test_patch_20260803.py` | **84건 전원 통과** (익절/손절/시간계수/자동종료/종목명/지수가드) |
+| 4 | `python test_patch_20260803.py` | **104건 전원 통과** (익절/손절/시간계수/자동종료/종목명/지수가드/시간정리) |
 | 5 | `python test_live_dryrun_20260803.py` | **145건 전원 통과** (종일 통합 + 기동 인프라 + 상수 불변식 + 설정조합) |
 | 6 | `python test_closing_bet_routing.py` | **24건 전원 통과** (종가베팅 분리 라우팅) |
 | 7 | `git log --oneline -5` | 최신 커밋이 `2fa4a2d` 이후인지 |
 | 8 | `git status --short` | 비어 있어야 정상(작업 중이면 예외) |
 
-**합계 622건**(283 + 86 + 84 + 145 + 24). 하나라도 실패하면 그 지점부터 원인 추적.
+**합계 644건**(285 + 86 + 104 + 145 + 24). 하나라도 실패하면 그 지점부터 원인 추적.
 
 - ⚠️ **4번(통합)이 가장 중요하다.** 2·3번이 전부 통과하는 상태에서도 08-03에
   매매를 반쪽 낼 버그 6건이 살아있었다(2026-08-02 히스토리 참고) — 유닛은
@@ -1538,11 +1585,12 @@ claude --remote-control
 
 설정값이 의도대로인지 한 번에 보는 명령:
 ```
-python -c "import core.strategy_manager as s; from core.order_manager import FORCE_CLOSE_TIME; print('1A', s.GROUP_A_START, '~', s.PHASE1A_END); print('PB', s.PULLBACK_START, '~', s.PULLBACK_END); print('중복전환', s.DUAL_SOURCE_PULLBACK_FROM); print('청산', FORCE_CLOSE_TIME); print('슬롯', s.PHASE1A_MAX_SLOTS, s.PULLBACK_MAX_SLOTS, s.MAX_HOLDINGS, s.MAX_HOLDINGS_HARD); print('무장', s.TICK_STRENGTH_MIN, s.TICK_STRENGTH_SUSTAIN_SEC); print('캡', s.TAKE_PROFIT_CAP, s.TAKE_PROFIT_CAP_PULLBACK, s.TAKE_PROFIT_CAP_EARLY, s.TP_CAP_UPGRADED_MAX); print('본전스톱', s.BREAKEVEN_STOP_ENABLED); print('점심계수', dict(s.TICK_BURST_TIME_MULT)[(11,30)]); print('1B잔재', hasattr(s, 'PHASE1B_ENABLED')); print('틱구동', s.TICK_ENTRY_ENABLED)"
+python -c "import core.strategy_manager as s; from core.order_manager import FORCE_CLOSE_TIME; print('1A', s.GROUP_A_START, '~', s.PHASE1A_END); print('PB', s.PULLBACK_START, '~', s.PULLBACK_END); print('중복전환', s.DUAL_SOURCE_PULLBACK_FROM); print('청산', FORCE_CLOSE_TIME); print('슬롯', s.PHASE1A_MAX_SLOTS, s.PULLBACK_MAX_SLOTS, s.MAX_HOLDINGS, s.MAX_HOLDINGS_HARD); print('무장', s.TICK_STRENGTH_MIN, s.TICK_STRENGTH_SUSTAIN_SEC); print('지수가드', s.INDEX_GUARD_THRESHOLD, s.INDEX_GUARD_FROM, s.INDEX_GUARD_BREAKEVEN_UNTIL, s.INDEX_GUARD_FORCE_CLOSE); print('캡', s.TAKE_PROFIT_CAP, s.TAKE_PROFIT_CAP_PULLBACK, s.TAKE_PROFIT_CAP_EARLY, s.TP_CAP_UPGRADED_MAX); print('본전스톱', s.BREAKEVEN_STOP_ENABLED); print('점심계수', dict(s.TICK_BURST_TIME_MULT)[(11,30)]); print('1B잔재', hasattr(s, 'PHASE1B_ENABLED')); print('틱구동', s.TICK_ENTRY_ENABLED)"
 ```
 기대값(2026-08-03 마감 기준):
 `1A 09:00~14:50` / `PB 09:00~14:50` / `중복전환 10:30` / `청산 15:10` /
-`슬롯 4 4 6 8` / `무장 100.0 2.0` / `캡 0.04 0.025 0.025 0.06` /
+`슬롯 4 4 6 8` / `무장 100.0 1.5` / `지수가드 -5.0 11:00 11:30 14:50` /
+`캡 0.04 0.025 0.025 0.06` /
 `본전스톱 False` / `점심계수 1.0` / `1B잔재 False` / `틱구동 True`
 (`1B잔재 True`가 나오면 1B 코드가 되살아난 것 — 2026-08-02에 전부 삭제했다.)
 
@@ -1686,12 +1734,14 @@ python -c "import core.strategy_manager as s; from core.order_manager import FOR
    = 폴백이 걸린 것이므로 괄호 안의 미완료 항목을 확인할 것.
 
 \### 즉시 되돌리는 법 (실전에서 이상 시)
-- 무장 2초 -> 3초: `TICK_STRENGTH_SUSTAIN_SEC = 3.0`
+- 무장 1.5초 -> 2.0/3.0초: `TICK_STRENGTH_SUSTAIN_SEC`
+- 시간정리를 슬롯과 무관하게 되돌리기: on_price_update의 `if slots_full:`와
+  `check_timeouts()` 앞 가드를 제거(두 곳 다 고쳐야 함)
 - 본전스톱 켜기: `BREAKEVEN_STOP_ENABLED = True` (로직은 그대로 살아있음)
 - Pullback 창 원복: `PULLBACK_START = time(9, 25)`
 - 점심 완화 원복: `TICK_BURST_TIME_MULT`의 `((11,30), 1.00)` -> `0.65`
 - 지수 하락 가드 끄기: `INDEX_GUARD_ENABLED = False`
-- 가드 임계 조정: `INDEX_GUARD_THRESHOLD`(-3.0) / `INDEX_GUARD_FROM`(11:00) /
+- 가드 임계 조정: `INDEX_GUARD_THRESHOLD`(-5.0, SEVERE_CRASH와 같은 값 유지할 것) / `INDEX_GUARD_FROM`(11:00) /
   `INDEX_GUARD_BREAKEVEN_UNTIL`(11:30) / `INDEX_GUARD_FORCE_CLOSE`(14:50)
 - 캡 원복: `config/phase_settings.py`의 `take_profit_cap` 0.040 -> 0.025,
   `TAKE_PROFIT_CAP_PULLBACK/EARLY` 0.025 -> 0.015

@@ -191,8 +191,8 @@ clock.set(9, 3, 0)
 ob(s, "A001")
 tick(s, "A001", 125.0, T0)                     # 무장 타이머 시작
 check("첫 틱: 아직 무장 아님", "A001" not in s._armed_at)
-tick(s, "A001", 130.0, T0 + 1.5)
-check("1.5초: 여전히 무장 아님(요구 2.0초)", "A001" not in s._armed_at)
+tick(s, "A001", 130.0, T0 + 1.0)
+check("1.0초: 여전히 무장 아님(요구 1.5초)", "A001" not in s._armed_at)
 
 burst(s, "A001", T0 + 3.5)
 tick(s, "A001", 135.0, T0 + 3.5)
@@ -874,11 +874,11 @@ sN.on_condition_hit("PB1", "눌림새창", cond_name="눌림목자동")
 ob(sN, "PB1")
 TN = time.time()
 tick(sN, "PB1", 130.0, TN)
-tick(sN, "PB1", 130.0, TN + 1.5)
-check("1.5초에는 무장 전(요구 2.0초)", "PB1" not in sN._armed_at)
+tick(sN, "PB1", 130.0, TN + 1.0)
+check("1.0초에는 무장 전(요구 1.5초)", "PB1" not in sN._armed_at)
 burst(sN, "PB1", TN + 2.2)
 tick(sN, "PB1", 130.0, TN + 2.2)
-check("09:02 눌림목이 2.0초 무장 + 버스트로 매수 (구버전: 창밖+3초 미달로 둘 다 불가)",
+check("09:02 눌림목이 1.5초 무장 + 버스트로 매수 (구버전: 창밖+3초 미달로 둘 다 불가)",
       "PB1" in sN.holdings, f"holdings={list(sN.holdings)}")
 check("눌림 전략으로 라우팅", sN.holdings["PB1"]["sub_strategy"] == "1A_눌림")
 

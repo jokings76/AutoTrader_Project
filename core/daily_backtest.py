@@ -277,6 +277,14 @@ def _exit_signal(position: dict, current_price: float, hhmm: str, minutes_held: 
     if net_rate >= _take_profit_cap(position):
         return "익절", net_rate
 
+    # ⚠️ (2026-08-03) 라이브와 **의도적으로 다르다.** 라이브는 이 시각에
+    # 팔기 전에 '슬롯 만석'을 요구하도록 바뀌었지만(존재 이유가 슬롯 기회비용
+    # 이므로 자리가 남으면 비울 이유가 없다), 이 백테스트는 종목별 독립
+    # 시뮬레이션이라 **슬롯/동시보유 개념 자체가 없다**(모듈 docstring의
+    # '한계' 참고). 그래서 여기서는 조건 없이 30분 컷을 적용한다.
+    # 결과적으로 백테스트는 라이브보다 시간정리가 **과다 집계**된다 —
+    # 라이브에서는 슬롯이 남는 날(08-03 최대 2/6) 거의 발동하지 않는다.
+    # 청산 정책을 비교할 때 이 차이를 반드시 감안할 것.
     if minutes_held >= HOLDING_TIMEOUT.total_seconds() / 60:
         return "시간정리", net_rate
 

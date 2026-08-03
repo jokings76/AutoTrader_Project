@@ -239,7 +239,7 @@ TICK_ENTRY_ENABLED = True          # 즉시 끄는 스위치(False면 기존 폴
 # 228은 이미 매 체결 틱에 실려 온다(api/kiwoom_ws.py의 parsed["strength"]) —
 # 계산 0회, 추가 호출 0회, 지연 0ms.
 TICK_STRENGTH_MIN = 100.0          # 이 값 이상이어야 무장 타이머가 돈다
-# (2026-08-03) 3.0 -> 2.0초. **백테스트로 검증한 값이 아니다** — FID228 이력이
+# (2026-08-03) 3.0 -> 2.0 -> **1.5초**. **백테스트로 검증한 값이 아니다** — FID228 이력이
 # 남지 않아 과거 재현이 원리적으로 불가능하다(틱 아카이브엔 시각·가격·거래량만
 # 있다). 간접 근거는 08-03 매수 16건의 '매수 시점 강도 지속시간 vs 성과'가
 # 짧을수록 좋았다는 것뿐인데(3~5초 1건 +1.76% / 5~20초 4건 +0.13% / 20초+
@@ -248,7 +248,14 @@ TICK_STRENGTH_MIN = 100.0          # 이 값 이상이어야 무장 타이머가
 # 되돌릴 때는 이 값만 3.0으로 바꾸면 된다.
 # ⚠️ 이 값을 더 낮출 때 주의: 무장은 '매수세가 실제로 유지되는가'의 유일한
 # 증거다. 너무 짧으면 순간 스파이크에도 무장돼 버스트 하나만으로 매수가 나간다.
-TICK_STRENGTH_SUSTAIN_SEC = 2.0    # 연속 유지 요구 시간(초). 밑으로 떨어지면 리셋
+# ⚠️ 1.5초에서 더 내릴 때 주의 — 저유동 종목은 틱 간격 자체가 길다.
+#   08-03 실측 틱 밀도: 037070 23.2틱/초 / 006360 10.0 / 000400 **0.4틱/초**.
+#   000400 같은 종목은 틱이 2.5초에 하나라, 요구시간을 1.5초로 낮춰도 실제로는
+#   "2틱"으로 무장이 성립한다(타이머는 강도>=100인 첫 틱에서 시작해 다음 틱까지의
+#   경과를 재므로). 즉 저유동 종목에선 값을 낮춰도 체감 완화가 거의 없고,
+#   대신 **증거 자체가 2틱뿐**이라는 위험만 남는다. 유동성 필터와 버스트 조건이
+#   그 위험을 받치고 있다는 전제에서만 유효하다.
+TICK_STRENGTH_SUSTAIN_SEC = 1.5    # 연속 유지 요구 시간(초). 밑으로 떨어지면 리셋
 # 무장 후 이 시간(초) 안에 버스트가 안 오면 무장 해제. 강도가 계속 100 위라도
 # 버스트 없이 오래 끌면 "이미 지나간 자리"일 가능성이 커서 무한 대기를 막는다.
 TICK_ARM_TTL_SEC = 120.0
@@ -438,8 +445,20 @@ SEVERE_CRASH_ENTRY_CUTOFF = time(11, 0)
 #
 # ⚠️ 지수 조회는 _refresh_market_rates()의 60초 캐시를 그대로 재사용한다 —
 # 이미 _is_severe_crash가 매 가격갱신마다 부르고 있어 **REST 추가 부담 0**.
+#
+# ⚠️⚠️ (2026-08-03) 임계를 -3.0 -> **-5.0**으로 변경하면서 위 SEVERE_CRASH와
+# **완전히 같은 조건**이 됐다(-5%, 11:00). 즉 지금은 지수가 -5% 이하로 빠지면
+# **두 규칙이 동시에 켜진다.** 서로 상충하진 않지만 역할이 다르다:
+#     SEVERE_CRASH : 익절캡을 1.5%로 축소 (+ 매수중단, 중복)
+#     INDEX_GUARD  : 매수중단 + 11:30까지 본전청산 + 14:50 강제청산
+#   합쳐진 결과(시뮬레이션 검증):
+#     11:30 이전 순 0% 이상 -> 가드 본전청산
+#     11:30 이후 순 +1.5% 이상 -> SEVERE_CRASH 익절
+#     그 사이(0~1.5%)와 손실분 -> 손절(-3%) 또는 14:50 강제청산
+# **둘 중 하나만 고치면 동작이 어긋난다.** 임계를 바꿀 땐 반드시 같이 볼 것 —
+# 이 정합성은 test_patch_20260803.py가 검사한다.
 INDEX_GUARD_ENABLED = True
-INDEX_GUARD_THRESHOLD = -3.0            # 코스피/코스닥 중 하나라도 이 값 이하
+INDEX_GUARD_THRESHOLD = -5.0            # 코스피/코스닥 중 하나라도 이 값 이하
 INDEX_GUARD_FROM = time(11, 0)          # 이 시각부터 감시(그 전 급락은 무시)
 INDEX_GUARD_BREAKEVEN_UNTIL = time(11, 30)  # 이때까지 본전 이상이면 청산
 INDEX_GUARD_FORCE_CLOSE = time(14, 50)  # 남은 보유분(본전 미만) 강제청산
@@ -3722,18 +3741,34 @@ class StrategyManager:
         # 반면 돈을 번 청산(익절+트레일링)은 슬롯·분의 19%만 썼다 — 슬롯의
         # 기회비용을 생각하면 '아무 방향도 못 잡은 자리'를 오래 들고 있을 이유가
         # 없다. 30분 컷은 최후 방어선으로 그대로 유지한다.
-        if exit_reason is None:
-            held = self._now() - pos["buy_time"]
-            if held >= HOLDING_TIMEOUT:
-                exit_reason = f"시간정리 30분 (순 {net_rate*100:+.2f}%)"
-            elif (
-                held >= timedelta(minutes=DEAD_POSITION_MIN)
-                and abs(net_rate) <= DEAD_POSITION_BAND
-            ):
-                exit_reason = (
-                    f"정체 정리 {DEAD_POSITION_MIN}분 (순 {net_rate*100:+.2f}%, "
-                    f"±{DEAD_POSITION_BAND*100:.1f}% 밴드 — 슬롯 기회비용)"
-                )
+        #
+        # ⚠️ (2026-08-03 변경) 이 두 청산은 **슬롯이 꽉 찼을 때만** 발동한다.
+        # 근거: 둘 다 존재 이유가 '슬롯 기회비용'이다 — 자리를 비워 더 나은
+        # 후보를 받으려는 것. 그런데 슬롯이 남아 있으면 비울 이유가 없고,
+        # 자리를 만들어도 들어올 후보가 없으니 **손실만 확정**하게 된다.
+        # 08-03 실측: 동시보유 최대 2종목(상한 6)이라 슬롯이 하루 종일 남았는데도
+        # 시간정리·정체정리가 4건(-0.78%, +0.41%, +0.34%, ...) 나갔다.
+        #
+        # 지수 가드 발동 중에는 신규매수가 막혀 있으므로, 슬롯을 비워도 쓸 곳이
+        # 없다 -> 이때도 발동하지 않는다. 이게 없으면 "본전 이하는 손절선이나
+        # 14:50까지 가져간다"는 가드 사양이 30분 컷에 먼저 잘려 무의미해진다
+        # (시뮬레이션으로 확인: 보유 31분 종목이 '시간정리 30분'으로 매도됐다).
+        if exit_reason is None and not self._is_index_guard_active():
+            slots_full = self.occupied_slots() >= MAX_HOLDINGS
+            if slots_full:
+                held = self._now() - pos["buy_time"]
+                if held >= HOLDING_TIMEOUT:
+                    exit_reason = (
+                        f"시간정리 30분 (순 {net_rate*100:+.2f}%, 슬롯 만석)"
+                    )
+                elif (
+                    held >= timedelta(minutes=DEAD_POSITION_MIN)
+                    and abs(net_rate) <= DEAD_POSITION_BAND
+                ):
+                    exit_reason = (
+                        f"정체 정리 {DEAD_POSITION_MIN}분 (순 {net_rate*100:+.2f}%, "
+                        f"±{DEAD_POSITION_BAND*100:.1f}% 밴드 — 슬롯 만석)"
+                    )
 
         if exit_reason:
             self._execute_sell(stock_code, current_price, exit_reason)
@@ -4141,7 +4176,18 @@ class StrategyManager:
     # 타임아웃
     # ========================================
     def check_timeouts(self):
+        """보유 30분 초과분 정리 — **on_price_update와 별개의 두 번째 경로**다.
+
+        ⚠️ (2026-08-03) on_price_update의 시간정리에 '슬롯 만석' 조건을 걸면서
+        여기도 **똑같이** 걸어야 한다. 안 그러면 틱이 안 들어오는 종목이 이
+        경로로 30분에 잘려나가, 조건을 건 의미가 사라진다(같은 규칙이 두 곳에
+        있다는 걸 놓치면 한쪽만 고쳐 조용히 어긋나는 전형적인 사고다).
+        지수 가드 발동 중 제외도 같은 이유로 동일하게 적용한다.
+        """
         now = self._now()
+        # 슬롯이 남으면 자리를 비울 이유가 없고, 가드 중이면 비워도 쓸 곳이 없다.
+        if self.occupied_slots() < MAX_HOLDINGS or self._is_index_guard_active():
+            return
         for code in list(self.holdings.keys()):
             pos = self.holdings[code]
             warmup_until = pos.get("warmup_until")
@@ -4155,6 +4201,6 @@ class StrategyManager:
                 # 병합 메서드 사용
                 candles = self._get_merged_candles(code, interval=1, count=1)
                 if candles:
-                    self._execute_sell(code, candles[0]["close"], "시간정리 30분")
+                    self._execute_sell(code, candles[0]["close"], "시간정리 30분 (슬롯 만석)")
             except Exception as e:
                 logger.exception("[%s] 타임아웃 청산 실패: %s", code, e)

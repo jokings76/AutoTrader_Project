@@ -679,14 +679,14 @@ check("강도 100+ 첫 틱: 타이머만 시작, 아직 무장 아님",
       "INT1" in s._strength_since and "INT1" not in s._armed_at)
 check("무장 전에는 매수하지 않음", "INT1" not in s.holdings)
 
-# 1.5초 경과 — 아직 요구시간(2.0초) 미달  (2026-08-03: 3.0 -> 2.0초로 완화)
+# 1.0초 경과 — 아직 요구시간(1.5초) 미달  (2026-08-03: 3.0 -> 2.0 -> 1.5초)
 s.on_trade({"stock_code": "INT1", "price": 10_000, "side": "buy",
-            "volume": 10, "strength": 115.0}, now=t0 + 1.5)
-check("1.5초(요구 2.0초 미달)에는 무장 안 됨", "INT1" not in s._armed_at)
-# 2.0초를 넘기면 무장한다 — 구버전(3초)이면 여기서 아직 무장 전이었다
+            "volume": 10, "strength": 115.0}, now=t0 + 1.0)
+check("1.0초(요구 1.5초 미달)에는 무장 안 됨", "INT1" not in s._armed_at)
+# 1.5초를 넘기면 무장한다 — 구버전(2.0/3.0초)이면 여기서 아직 무장 전이었다
 s.on_trade({"stock_code": "INT1", "price": 10_000, "side": "buy",
-            "volume": 10, "strength": 115.0}, now=t0 + 2.1)
-check("2.1초에 무장 성립(구버전 3초였다면 미무장)", "INT1" in s._armed_at)
+            "volume": 10, "strength": 115.0}, now=t0 + 1.6)
+check("1.6초에 무장 성립(구버전 2.0초였다면 미무장)", "INT1" in s._armed_at)
 
 # 3.5초 경과 + 그 틱 자체가 대량체결(3천만원 x 2건)
 feed(s.phase1b.trade_flow, "INT1", 2, 30_000_000, now=t0 + 3.5, span=1.0)
@@ -954,9 +954,22 @@ check("매수 5초 지난 포지션은 교체 대상에서 제외(수수료 낭�
 # ═════════════════════════════════════════════════════════
 print("\n[23] 정체 포지션 15분 조기 정리")
 # ═════════════════════════════════════════════════════════
-def dead_pos(st, code, held_min, net_pct):
+# (2026-08-03) 정체정리·시간정리는 **슬롯이 꽉 찼을 때만** 발동한다.
+# 존재 이유가 '슬롯 기회비용'인데 자리가 남으면 비울 이유가 없기 때문 —
+# 08-03 실측에서 동시보유 최대 2/6인데도 4건이 이 규칙으로 나갔다.
+# 그래서 아래 헬퍼는 슬롯을 채운 뒤(fill) 판정한다.
+def dead_pos(st, code, held_min, net_pct, fill=True):
     px = 10_000
     cur = int(px * (1 + net_pct / 100 + SM.ROUND_TRIP_COST))
+    if fill:   # 대상 종목 포함 MAX_HOLDINGS개가 되도록 더미로 채운다
+        for i in range(SM.MAX_HOLDINGS - 1):
+            st.holdings[f"{code}_F{i}"] = {
+                "trade_id": 1, "buy_price": px, "buy_quantity": 1,
+                "stock_name": f"F{i}", "buy_time": st._now(),
+                "sub_strategy": "1A", "highest_price": px, "lowest_price": px,
+                "warmup_until": st._now() + timedelta(seconds=60),
+                "entry_strength": 0,
+            }
     st.holdings[code] = {
         "trade_id": 1, "buy_price": px, "buy_quantity": 1, "stock_name": code,
         "buy_time": st._now() - timedelta(minutes=held_min), "sub_strategy": "1A",
@@ -967,7 +980,8 @@ def dead_pos(st, code, held_min, net_pct):
     return code in st.holdings
 
 s = build_strat()
-check("15분 경과 & ±0.5% 이내 -> 정체 정리로 청산", not dead_pos(s, "D1", 16, 0.1))
+check("[슬롯 만석] 15분 경과 & ±0.5% 이내 -> 정체 정리로 청산",
+      not dead_pos(s, "D1", 16, 0.1))
 check("청산 사유가 '정체 정리'로 DB에 기록",
       any("정체 정리" in str(r.get("exit_reason", "")) for r in _Repo.sells),
       str([r.get("exit_reason") for r in _Repo.sells]))
@@ -978,7 +992,14 @@ check("15분 경과했지만 -1.5% -> 유지(손절이 담당)", dead_pos(s, "D3
 s = build_strat()
 check("10분밖에 안 됐으면 정체여도 유지", dead_pos(s, "D4", 10, 0.1))
 s = build_strat()
-check("30분 초과는 기존 시간정리로 청산", not dead_pos(s, "D5", 31, 1.0))
+check("[슬롯 만석] 30분 초과는 기존 시간정리로 청산", not dead_pos(s, "D5", 31, 1.0))
+# 슬롯이 남으면 둘 다 발동하지 않는다 (2026-08-03 신규 규칙)
+s = build_strat()
+check("[슬롯 여유] 15분 정체여도 청산 안 함",
+      dead_pos(s, "D6", 16, 0.1, fill=False))
+s = build_strat()
+check("[슬롯 여유] 30분 초과여도 청산 안 함",
+      dead_pos(s, "D7", 31, 1.0, fill=False))
 
 # ═════════════════════════════════════════════════════════
 print("\n[24] 제안 A — 신호 세기 계층화 (단일 대량체결 우대)")
