@@ -531,6 +531,93 @@ check("무장 요구시간 1.5초", abs(SM.TICK_STRENGTH_SUSTAIN_SEC - 1.5) < 1e
 check("[불변] 쿨다운보다는 큼", SM.TICK_STRENGTH_SUSTAIN_SEC > SM.TICK_ENTRY_COOLDOWN_SEC)
 check("[불변] 무장 TTL보다는 작음", SM.TICK_STRENGTH_SUSTAIN_SEC < SM.TICK_ARM_TTL_SEC)
 
+print("\n[18] 슬롯 교체 — 대체후보가 '지금 무장 중'일 때만 (2026-08-03)")
+# 08-03 실사례: 교체 3건이 전부 950160을 근거로 팔았는데 그 종목은 하루 종일
+# 매수되지 않았다(무장 9회가 전부 11:06~11:23, 교체는 12:00·12:02·13:07).
+# 235,860원을 실현손실로 확정하고 자리는 비워뒀다.
+import time as _tm
+import core.slot_replacement as _SR2
+
+check("대체후보 무장 요구 플래그 ON", _SR2.REQUIRE_CANDIDATE_ARMED is True)
+
+
+def armed_strat(arm_age_sec=None, with_ticks=True, score=99.0, code="CAND"):
+    """대체후보 1개를 watch_list에 올리고 무장 상태를 원하는 대로 만든다."""
+    st = build()
+    now = _tm.time()
+    st.watch_list_today.add(code)
+    st._watch_scores[code] = score
+    st.phase1b.start_watching(code)
+    if with_ticks:
+        for i in range(6):
+            st.phase1b.trade_flow.add_tick(code, 10_000, "buy", 10, now=now - i * 0.3)
+    if arm_age_sec is not None:
+        st._armed_at[code] = now - arm_age_sec
+        st._strength_since[code] = now - (SM.TICK_STRENGTH_SUSTAIN_SEC + 1)
+    return st, now
+
+
+# (a) 무장 기록이 아예 없는 후보 -> 자격 없음 (오늘 950160이 교체 시점에 이 상태)
+st, _ = armed_strat(arm_age_sec=None)
+check("무장 이력 없는 후보는 대체 자격 없음",
+      _SR2.find_replacement_candidate(st, 1.0) is None)
+check("is_armed_now도 False", not st.is_armed_now("CAND"))
+
+# (b) 방금 무장 + 틱 살아있음 -> 자격 있음
+st, _ = armed_strat(arm_age_sec=5)
+check("방금 무장한 후보는 대체 자격 있음", st.is_armed_now("CAND"))
+got = _SR2.find_replacement_candidate(st, 1.0)
+check("후보로 선정됨", got is not None and got[0] == "CAND", str(got))
+
+# (c) 무장했지만 TTL(120초) 경과 -> 자격 없음
+st, _ = armed_strat(arm_age_sec=SM.TICK_ARM_TTL_SEC + 10)
+check("무장 TTL 경과 후보는 자격 없음(이미 지나간 자리)",
+      not st.is_armed_now("CAND"))
+check("선정도 안 됨", _SR2.find_replacement_candidate(st, 1.0) is None)
+
+# (d) ⚠️ 무장 기록은 있는데 틱이 끊긴 경우 -> 자격 없음
+#     _armed_at은 그 종목의 '다음 틱'이 와야 만료 정리되므로, 틱이 끊기면
+#     낡은 무장이 그대로 남는다(08-02 강도 타이머 잔류 사고와 같은 구조).
+st, _ = armed_strat(arm_age_sec=5, with_ticks=False)
+check("무장 기록이 있어도 최근 틱이 없으면 자격 없음(무장 잔재 차단)",
+      not st.is_armed_now("CAND"))
+
+# (e) 점수가 낮으면 무장했어도 자격 없음 (기존 점수 게이트 유지)
+st, _ = armed_strat(arm_age_sec=5, score=0.1)
+check("점수 미달이면 무장했어도 자격 없음",
+      _SR2.find_replacement_candidate(st, 1.0) is None)
+
+# (f) 재매수 차단 종목은 무장했어도 자격 없음 (기존 게이트 유지)
+st, _ = armed_strat(arm_age_sec=5)
+st._stoploss_blocked.add("CAND")
+check("손실차단 종목은 무장했어도 자격 없음",
+      _SR2.find_replacement_candidate(st, 1.0) is None)
+
+# (g) 08-03 실사례 재현 — 무장이 40분 전이면 교체가 성립하지 않아야 한다
+st, now = armed_strat(arm_age_sec=40 * 60)
+check("[실사례] 40분 전 무장(950160 패턴)은 교체 자격 없음",
+      _SR2.find_replacement_candidate(st, 1.0) is None)
+
+# (h) 플래그를 끄면 옛 동작(점수만)으로 복귀하는지 — 롤백 경로 보장
+_SR2.REQUIRE_CANDIDATE_ARMED = False
+try:
+    st, _ = armed_strat(arm_age_sec=None)
+    got_old = _SR2.find_replacement_candidate(st, 1.0)
+    check("[롤백] 플래그 OFF면 무장 무관하게 점수만으로 선정(구버전 동작)",
+          got_old is not None and got_old[0] == "CAND", str(got_old))
+finally:
+    _SR2.REQUIRE_CANDIDATE_ARMED = True
+
+# (i) TICK_ENTRY_ENABLED가 꺼지면 무장 개념 자체가 없으므로 False
+_prev = SM.TICK_ENTRY_ENABLED
+SM.TICK_ENTRY_ENABLED = False
+try:
+    st, _ = armed_strat(arm_age_sec=5)
+    check("틱 진입이 꺼져 있으면 is_armed_now=False(보수적)",
+          not st.is_armed_now("CAND"))
+finally:
+    SM.TICK_ENTRY_ENABLED = _prev
+
 print("\n[14] 죽은 코드 배너 — 이름 때문에 생기는 오해 방지")
 _src = open("core/strategy_manager.py", encoding="utf-8").read()
 check("PHASE1A_LEADING_SUSTAIN_SEC에 [미사용] 배너",

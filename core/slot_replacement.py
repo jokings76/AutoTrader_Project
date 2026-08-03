@@ -103,13 +103,26 @@ def find_stagnant_holding(strat, now) -> tuple[str, dict] | None:
     return candidates[0]
 
 
+# (2026-08-03) 대체후보는 '지금 무장 중'이어야 한다.
+#   True  = 무장 중인 후보만 교체 자격 (기본, 권장)
+#   False = 옛 동작(저장된 점수만으로 선정) — 되돌릴 때만 쓸 것
+REQUIRE_CANDIDATE_ARMED = True
+
+
 def find_replacement_candidate(strat, stagnant_score: float) -> tuple[str, float] | None:
     """watch_list_today 중 미보유·미대기 종목 중 점수가 stagnant_score*margin
-    이상인 최고점 후보를 찾아 반환 (없으면 None).
+    이상이고 **지금 무장 중인** 최고점 후보를 반환 (없으면 None).
 
     (2026-08-01) 여기서 다루는 '점수'는 전부 **컷라인 대비 비율**이다
     (1.0 = 자기 전략 컷라인 정확히 충족). 1A는 체결강도(0~300),
     Pullback은 점수(0~9)로 스케일이 달라 원점수 비교가 무의미했다.
+
+    ⚠️ (2026-08-03) **무장 조건 추가.** 점수만 보면 08-02 틱 전환 이후엔
+    '살 수 없는 종목'을 근거로 보유분을 팔게 된다 — 점수는 과거 평가 시점의
+    저장값인데 실제 매수는 지금 이 순간의 무장+버스트를 요구하기 때문이다.
+    08-03 실사례: 교체 3건이 전부 950160을 근거로 팔았는데 그 종목은 하루 종일
+    매수되지 않았고(무장 9회 전부 11:06~11:23, 교체는 12:00 이후라 시각도
+    불일치), 235,860원만 실현손실로 확정됐다.
     """
     best_code, best_score = None, 0.0
     # 정체 종목의 점수를 모르면(0) 문턱이 0이 되어 아무 후보나 통과했다.
@@ -126,6 +139,15 @@ def find_replacement_candidate(strat, stagnant_score: float) -> tuple[str, float
         score = strat._watch_scores.get(code)
         if score is None or score < threshold:
             continue
+        # 점수를 통과해도 '지금 살 수 있는 상태'가 아니면 자격 없음.
+        # 판정 실패(예외/미구현)는 **자격 없음**으로 본다 — 여기서 관대하게
+        # 넘기면 이 수정 자체가 무의미해진다(팔고 못 사는 게 원래 문제였다).
+        if REQUIRE_CANDIDATE_ARMED:
+            try:
+                if not strat.is_armed_now(code):
+                    continue
+            except Exception:
+                continue
         if score > best_score:
             best_code, best_score = code, score
     if best_code is None:

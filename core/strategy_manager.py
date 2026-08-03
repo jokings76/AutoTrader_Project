@@ -2234,6 +2234,44 @@ class StrategyManager:
             self._armed_at.pop(stock_code, None)
         return self._strength_sustained_sec(stock_code, now)
 
+    def is_armed_now(self, stock_code: str, now: float = None) -> bool:
+        """지금 이 종목이 **무장 상태**인가 — 버스트만 오면 즉시 매수될 자리인가.
+        (2026-08-03 신규, 슬롯 교체의 대체후보 검증용)
+
+        왜 필요한가: 슬롯 교체는 후보를 `_watch_scores`(과거 평가 시점에 저장된
+        점수)로 고른다. 그런데 08-02에 진입이 **무장(FID228) + 버스트**로 바뀌면서
+        "점수 높은 후보"가 더 이상 "지금 살 수 있는 종목"을 뜻하지 않게 됐다.
+        08-03 실사례: 슬롯 교체 3건이 전부 950160을 근거로 팔았는데 그 종목은
+        **하루 종일 한 번도 매수되지 않았다**(무장은 9회 했지만 버스트가 없었고,
+        그 무장마저 11:06~11:23인데 교체는 12:00·12:02·13:07이라 시각도 안 겹쳤다).
+        결과: 235,860원을 실현손실로 확정하고 자리는 그냥 비워뒀다.
+
+        ⚠️ `_armed_at`에 키가 있는지만 보면 안 된다. 이 dict는 **그 종목의 다음
+        틱이 들어와야** 만료 정리가 된다(_maybe_tick_entry의 TTL 분기). 즉 틱이
+        끊기면 낡은 무장 기록이 그대로 남는다 — 08-02에 청산 후 강도 타이머가
+        잔류해 무장 단계를 통째로 우회하던 사고와 같은 구조다. 그래서
+        ① TTL 경과 여부와 ② **최근 틱이 실제로 들어오고 있는지**를 함께 본다.
+        """
+        if not TICK_ENTRY_ENABLED:
+            return False
+        now = now if now is not None else _time_mod.time()
+        armed_at = self._armed_at.get(stock_code)
+        if armed_at is None:
+            return False
+        if now - armed_at > TICK_ARM_TTL_SEC:
+            return False          # 무장한 지 오래 — 이미 지나간 자리
+        # 틱이 끊긴 종목의 '무장 잔재'를 걸러낸다. 틱이 없으면 강도 판정 자체가
+        # 갱신되지 않으므로 무장 상태라고 볼 근거가 없다.
+        try:
+            tf = self.phase1b.trade_flow if self.phase1b else None
+            if tf is None or tf.tick_count(stock_code, window_sec=TICK_ARM_TTL_SEC,
+                                           now=now) <= 0:
+                return False
+        except Exception:
+            return False
+        # 지금도 강도가 요구시간만큼 유지되고 있는가(무장 조건 자체를 재확인)
+        return self._strength_sustained_sec(stock_code, now) >= TICK_STRENGTH_SUSTAIN_SEC
+
     def _strength_sustained_sec(self, stock_code: str, now: float) -> float:
         since = self._strength_since.get(stock_code)
         if since is None:

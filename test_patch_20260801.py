@@ -542,11 +542,27 @@ check("실제 강도 하락은 정상 감지", res is not None and res[0] == "S1
 
 s._watch_scores = {"C1": 1.1, "C2": 1.4}
 s.watch_list_today = {"C1", "C2"}
+# (2026-08-03) 대체후보는 '지금 무장 중'이어야 자격이 생긴다 — 점수만으로는
+# 08-02 틱 전환 이후 '살 수 없는 종목'을 근거로 팔게 되기 때문(950160 실사례).
+# 그래서 두 후보 모두 무장 상태로 만들어 **점수 게이트 자체**를 검증한다.
+_t_now = time.time()
+for _c in ("C1", "C2"):
+    s.phase1b.start_watching(_c)
+    for _i in range(6):
+        s.phase1b.trade_flow.add_tick(_c, 10_000, "buy", 10, now=_t_now - _i * 0.3)
+    s._armed_at[_c] = _t_now - 5
+    s._strength_since[_c] = _t_now - (SM.TICK_STRENGTH_SUSTAIN_SEC + 1)
+check("무장 상태 준비 확인", s.is_armed_now("C1") and s.is_armed_now("C2"))
 cand = find_replacement_candidate(s, 1.0)
 check("교체 후보는 1.2배 이상만(1.1 탈락, 1.4 선택)", cand == ("C2", 1.4), str(cand))
 cand = find_replacement_candidate(s, 0.0)
 check("정체종목 점수 0이어도 문턱 1.2 유지(아무나 통과 금지)",
       cand == ("C2", 1.4), str(cand))
+# 무장을 풀면 점수가 충분해도 자격이 사라진다(신규 게이트)
+s._armed_at.pop("C2", None)
+check("무장 해제된 후보는 점수 1.4여도 탈락(신규 게이트)",
+      find_replacement_candidate(s, 1.0) is None,
+      str(find_replacement_candidate(s, 1.0)))
 
 # ═════════════════════════════════════════════════════════
 print("\n[14] order_manager 시장가/지정가 분기")
