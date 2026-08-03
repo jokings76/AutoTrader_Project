@@ -5,7 +5,7 @@
 
 시간대 (전략 2개 체제):
   1A       (09:00 ~ 14:50): 체결강도 100 이상 TICK_STRENGTH_SUSTAIN_SEC초 유지
-                            + 대량체결 버스트 -> 즉시매수 (현재 2초, 2026-08-03)
+                            + 대량체결 버스트 -> 즉시매수 (TICK_STRENGTH_SUSTAIN_SEC)
                             (_maybe_tick_entry). 주문은 호가 두께로
                             지정가/시장가 자동 선택.
   Pullback (09:00 ~ 14:50): 1A와 동일한 틱 트리거·시간창. 유니버스/슬롯/상한/익절캡만 다름.
@@ -764,7 +764,7 @@ class StrategyManager:
         self.quarantine_until = self._now()
         self._last_market_mode = "NORMAL"  # 지수방어 모드 전환 알림용
         self._last_severe_crash_state = False  # 지수 급락 대응 모드 전환 알림용
-        self._last_index_guard_state = False   # 지수 하락 가드(-3%) 전환 알림용
+        self._last_index_guard_state = False   # 지수 하락 가드 전환 알림용
         self._index_guard_exited: set[str] = set()  # 가드로 이미 청산한 종목
 
         # 점수 기반 진입 설정 (1A 전용). surge_min은 score_phase1이 안 쓰는
@@ -1193,16 +1193,40 @@ class StrategyManager:
         new_ratio = max(0.5, min(1.0, base_cfg.threshold_ratio + 0.05))
         return _dc_replace(base_cfg, threshold_ratio=new_ratio)
 
-    def can_buy_more(self, info: dict | None = None, sub_strategy: str | None = None) -> bool:
+    def _entry_block_reason(self) -> Optional[str]:
+        """**슬롯과 무관하게** 신규매수를 전면 차단하는 사유. 없으면 None.
+        (2026-08-04 신설 — 같은 규칙이 세 곳에 흩어져 생긴 결함을 한 점으로 모음)
+
+        왜 따로 뽑았나: 예전엔 이 판정들이 can_buy_more 안에만 있어서, 호출부는
+        "살 수 없다"는 사실만 알고 **이유가 슬롯인지 리스크 차단인지 구분하지
+        못했다.** 그 결과 두 가지 실제 문제가 있었다.
+
+          ① 우선순위 교체가 매도만 하는 반쪽 동작 — _try_1a_priority_upgrade는
+             "슬롯이 꽉 찼다"는 신호를 받으면 보유분을 팔아 자리를 비운다.
+             그런데 차단 사유가 지수 가드/MDD/HALT/WS격리면 자리를 비워도
+             매수가 막혀 있어 **손실만 확정하고 자리는 그냥 빈다.**
+             (08-03에 slot_replacement에서 똑같은 문제를 고쳤는데 이쪽 경로엔
+              같은 방어가 없었다 — 규칙이 여러 곳에 흩어진 전형적 사고.)
+          ② 진단 알림 오분류 — 가드로 하루 종일 못 사는 날에도 사유가
+             "슬롯 부족"으로 기록돼, 장중에 원인을 판단할 수 없었다.
+
+        판정 순서는 기존 can_buy_more와 동일하게 유지한다(리스크 -> HALT ->
+        가드 -> 격리). 전부 캐시/메모리 판정이라 핫패스 비용이 없다
+        (risk_can_trade의 기준자본은 1회만 REST, 지수는 60초 캐시).
+        """
         if not self.risk_can_trade():
-            return False
+            return "MDD 일손실 차단 — 신규매수 중단"
         if self._get_market_defense_mode() == "HALT":
-            return False
-        # 지수 하락 가드(-3%, 11:00~) — 슬롯이 남아도 신규매수를 막는다.
-        # (2026-08-03) 여기서 막으면 진단 알림의 슬롯 통계도 왜곡되지 않는다.
+            return "지수 -5% 초과로 인한 전면 매매 중단"
+        # 지수 하락 가드(11:00~) — 슬롯이 남아도 신규매수를 막는다.
         if self._is_index_guard_active():
-            return False
+            return f"지수 하락 가드({INDEX_GUARD_THRESHOLD:+.0f}%) — 신규매수 중단"
         if self._now() < self.quarantine_until:
+            return "WS 재연결 격리 중 — 신규매수 중단"
+        return None
+
+    def can_buy_more(self, info: dict | None = None, sub_strategy: str | None = None) -> bool:
+        if self._entry_block_reason():
             return False
         held = self.occupied_slots()
         # 오늘 성과가 나쁜(COLD) 전략은 공유 슬롯 마지막 칸을 다른 전략에
@@ -1352,18 +1376,25 @@ class StrategyManager:
         # (틱 구동 진입의 발사 조건이 죽는 것이므로 매수가 0건이 된다).
         ("버스트 계산 실패(코드 이상)", ("버스트 계산 실패",)),
         ("체결틱 부족(강도판단불가)", ("체결틱 부족",)),
-        # (2026-08-02) 틱 구동 진입의 1단계 — 강도 100이 3초를 못 채운 상태.
+        # (2026-08-02) 틱 구동 진입의 1단계 — 강도 100이 요구시간
+        # (TICK_STRENGTH_SUSTAIN_SEC)을 못 채운 상태.
         # 이게 대부분이면 '코드 정상, 신호가 아직 안 옴'이라는 뜻이다.
         # 여기 없으면 "기타"로 뭉개져 장중에 원인 판단이 불가능하다.
-        ("강도 미무장(3초 미달)", ("미무장",)),
+        # ⚠️ 라벨에 초 수를 박지 말 것 — 상수를 바꿔도 안 따라와서 진단 알림이
+        #    거짓말을 하게 된다(실제로 3.0->1.5초 변경 때 "3초 미달"로 남았다).
+        ("강도 미무장(요구시간 미달)", ("미무장",)),
         ("체결강도 미달", ("체결강도 미달", "체결강도 지속 미달")),
         ("시가급등 보류", ("시가대비",)),
         ("저유동성 보류", ("저유동성",)),
         ("지수 방어(HALT)", ("전면 매매 중단",)),
-        # (2026-08-03) 지수 하락 가드(-3%, 11:00~). 이게 대부분이면
-        # "코드 정상, 지수가 나빠서 일부러 안 산다"는 뜻이다 — 규칙이
-        # 없으면 "기타"로 뭉개져 장중에 매수 0건의 원인을 판단할 수 없다.
-        ("지수 하락 가드(-3%)", ("지수 하락 가드",)),
+        # (2026-08-03) 지수 하락 가드(INDEX_GUARD_THRESHOLD, 11:00~). 이게
+        # 대부분이면 "코드 정상, 지수가 나빠서 일부러 안 산다"는 뜻이다 —
+        # 규칙이 없으면 "기타"로 뭉개져 매수 0건의 원인을 판단할 수 없다.
+        # (라벨에 % 수치를 박지 않는다 — 상수를 -3 -> -5로 바꿔도 안 따라온다.)
+        ("지수 하락 가드", ("지수 하락 가드",)),
+        # (2026-08-04) 슬롯과 무관한 전면 차단 — _entry_block_reason 참고.
+        ("MDD 일손실 차단", ("MDD 일손실 차단",)),
+        ("WS 재연결 격리", ("WS 재연결 격리",)),
         ("데이터소스 없음", ("데이터 소스 없음",)),
         ("눌림 미충족", ("눌림 미성립", "반등 미확인")),
         ("VWAP 탈락", ("VWAP",)),
@@ -1429,15 +1460,17 @@ class StrategyManager:
         ]
 
         # 1) 매수 가능 여부 자체
+        # ⚠️ (2026-08-04) 전면 차단 사유는 반드시 _entry_block_reason()에서 가져온다.
+        # 예전엔 여기서 MDD/HALT/격리를 따로 나열했는데 **지수 하락 가드가 빠져
+        # 있어서**, 가드로 하루 종일 못 사는 날에도 보유 0/6인 채로
+        # "🔒 1A 슬롯 없음"이라고 표시됐다(원인을 정반대로 안내). 같은 규칙을
+        # 여러 곳에 복제하면 반드시 한 곳이 뒤처진다 — 단일 출처로 통일한다.
         gates = []
-        if not self.risk_can_trade():
-            gates.append("MDD 일손실 차단")
-        if self._get_market_defense_mode() == "HALT":
-            gates.append("지수 HALT")
-        if now < self.quarantine_until:
-            gates.append("WS 재연결 격리")
+        blocked = self._entry_block_reason()
+        if blocked:
+            gates.append(blocked.split(" —")[0])
         if now.time() >= ENTRY_HARD_CUTOFF:
-            gates.append("15:10 하드컷오프")
+            gates.append(f"{ENTRY_HARD_CUTOFF.strftime('%H:%M')} 하드컷오프")
         if gates:
             lines.append(f"⛔ 전면 차단: {', '.join(gates)}")
         elif not self.can_buy_phase1a():
@@ -1618,6 +1651,15 @@ class StrategyManager:
         """
         if candidate_tier <= 0:
             return False
+        # (2026-08-04) 자리를 비워도 살 수 없는 상태면 **아무것도 팔지 않는다.**
+        # 호출부는 can_buy_*가 False라는 것만 보고 이 함수를 부르는데, 그
+        # False가 슬롯이 아니라 지수 가드/MDD/HALT/WS격리 때문일 수 있다.
+        # 그 경우 여기서 팔면 매도만 일어나고 대체 매수는 막혀 있어 손실만
+        # 확정된다(08-03에 slot_replacement에서 고친 것과 같은 결함).
+        blocked = self._entry_block_reason()
+        if blocked:
+            logger.debug("[%s] 우선순위 교체 보류 — %s", candidate_code, blocked)
+            return False
         now_dt = self._now()
         if not (GROUP_A_START <= now_dt.time() < PHASE1A_END):
             return False
@@ -1761,7 +1803,7 @@ class StrategyManager:
                 # ⚠️ 장 시작 전에도 **감시는 반드시 켠다** (2026-08-02 수정).
                 # 예전엔 여기서 그냥 return 해서 08:59 기동 스냅샷 종목들이
                 # 09:00 이후 첫 watchlist_reentry(15초 주기)가 돌 때까지
-                # 체결틱을 한 개도 못 쌓았다. 무장(강도 3초 연속)은 틱이
+                # 체결틱을 한 개도 못 쌓았다. 무장(강도 연속 유지)은 틱이
                 # 쌓여야 시작되므로, **개장 직후 가장 중요한 최대 15초**를
                 # 통째로 날리는 구조였다(그 15초는 하루 중 거래가 가장
                 # 폭발하는 구간이다). 매수는 여전히 09:00부터만 일어난다 —
@@ -1867,7 +1909,7 @@ class StrategyManager:
         # 틱 구동 진입으로 전면 전환 (2026-08-02, 사용자 지정)
         # ══════════════════════════════════════════════════════════════
         # 1A와 Pullback이 **같은 트리거**를 쓴다: 체결강도(FID 228) 100 이상
-        # 3초 연속 유지 + 대량체결 버스트. 차이는 조건검색식(유니버스)에 이미
+        # 연속 유지(TICK_STRENGTH_SUSTAIN_SEC) + 대량체결 버스트. 차이는 유니버스에 이미
         # 들어있고, "지금 매수세가 실제로 들어오는가"라는 진입 순간의 판단은
         # 두 전략이 동일하기 때문이다. 전략별 차이는 이 함수 밖에서 유지된다 —
         # 슬롯/등락률 상한(1A 16% / 눌림 10%)/익절 캡/시간창.
@@ -1881,7 +1923,7 @@ class StrategyManager:
         # 삭제하지 않고 그대로 둔다(호출부만 교체 — 되돌릴 수 있게).
         #
         # [이 시점에 매수가 되는 일은 드물다 — 정상이다]
-        # 최초 편입 순간엔 체결틱이 아직 0개라 무장(3초 연속)이 성립할 수 없다.
+        # 최초 편입 순간엔 체결틱이 아직 0개라 무장(강도 연속 유지)이 성립할 수 없다.
         # 여기서 하는 일의 본질은 **pre-arm**(감시 시작 + 캐시 예열)이고,
         # 실제 진입은 on_trade의 _maybe_tick_entry가 이어받는다. 이미 감시 중인
         # 종목이 재편입된 경우엔 틱이 쌓여 있으므로 여기서 바로 발화할 수 있다.
@@ -1934,7 +1976,9 @@ class StrategyManager:
             )
 
         if not can_buy:
-            self._note_reject(stock_code, slot_msg)
+            # 슬롯이 아니라 전면 차단(지수 가드/MDD/HALT/격리)일 수 있다 —
+            # 사유를 그대로 적어야 진단 알림이 원인을 구분한다 (2026-08-04).
+            self._note_reject(stock_code, self._entry_block_reason() or slot_msg)
             return False
 
         self._execute_buy(stock_code, stock_name, phase, info, sub_strategy=sub_strategy)
@@ -2106,14 +2150,16 @@ class StrategyManager:
         return is_crash
 
     def _is_index_guard_active(self, now_dt: datetime = None) -> bool:
-        """지수 하락 가드(-3%) 발동 여부 (2026-08-03 신규, 사용자 지정).
+        """지수 하락 가드 발동 여부 (2026-08-03 신규, 사용자 지정).
 
         조건: **INDEX_GUARD_FROM(11:00) 이후**이고, 코스피/코스닥 중
-        **하나라도** INDEX_GUARD_THRESHOLD(-3%) 이하.
+        **하나라도** INDEX_GUARD_THRESHOLD 이하.
 
-        SEVERE_CRASH(-5%)와 별개의 얕은 방어선이며 둘은 동시에 켜질 수 있다
-        (-5%면 -3% 조건도 자동으로 참). 서로 상충하지 않는다 — -5%는 익절 캡을
+        ⚠️ 임계값은 2026-08-03 저녁에 -3% -> **-5%**로 조정돼 SEVERE_CRASH와
+        정확히 같은 값이다(정합성 테스트로 못박아 둠). 둘은 같은 지수 수준에서
+        동시에 켜지지만 하는 일이 다르다 — SEVERE_CRASH는 익절 캡을 1.5%로
         조이고, 이쪽은 신규매수 차단과 보유분 정리 시각을 정한다.
+        한쪽 임계만 고치면 동작이 어긋나므로 반드시 같이 바꿀 것.
 
         지수 조회는 _refresh_market_rates()의 60초 캐시를 재사용하므로 REST
         추가 부담이 없다. 조회 실패 시 캐시된 직전 값이 쓰이고, 초기값은
@@ -2151,7 +2197,7 @@ class StrategyManager:
         return active
 
     # ════════════════════════════════════════════════════════════════
-    # 틱 구동 진입 (2026-08-02 신설) — 무장(강도 N초 연속, 현재 2초) -> 발사(버스트)
+    # 틱 구동 진입 (2026-08-02 신설) — 무장(강도 N초 연속, N=TICK_STRENGTH_SUSTAIN_SEC) -> 발사(버스트)
     # ════════════════════════════════════════════════════════════════
     def burst_time_multiplier(self, now_dt: datetime = None) -> float:
         """현재 시각의 대량체결 임계값 계수. TICK_BURST_TIME_MULT 참고.
@@ -2284,7 +2330,7 @@ class StrategyManager:
         **매도 직후와 감시 해제 시 반드시 불러야 한다.** 안 부르면
         `_strength_since`에 매수 전의 옛 타임스탬프가 그대로 남아, 그 종목이
         재매수 가능해진 뒤 첫 틱에서 `now - since`가 수 분~수 시간으로 계산돼
-        **3초 확인을 건너뛰고 즉시 무장**된다. 그 상태로 버스트가 하나 오면
+        **연속 유지 확인을 건너뛰고 즉시 무장**된다. 그 상태로 버스트가 하나 오면
         진입 조건의 절반(무장)이 사실상 없는 채로 매수가 나간다.
 
         재매수 차단(_is_rebuy_blocked)이 손실청산·쿨다운·횟수는 막아주지만,
@@ -2421,7 +2467,7 @@ class StrategyManager:
 
         # 무장 확인은 여기서도 한다 — _maybe_tick_entry가 이미 걸렀지만,
         # on_condition_hit/watchlist_reentry 등 다른 경로가 이 함수를 직접
-        # 부를 수 있어서 자체적으로 닫아둔다. 이게 없으면 "강도 3초 유지"가
+        # 부를 수 있어서 자체적으로 닫아둔다. 이게 없으면 "강도 연속 유지"가
         # 그 경로들에서 조용히 생략된다(진입 조건의 절반이 사라지는 구멍).
         if sustained < TICK_STRENGTH_SUSTAIN_SEC:
             return False, {
@@ -2505,7 +2551,7 @@ class StrategyManager:
         if self.phase1b and not self.phase1b.is_watching(stock_code):
             self.phase1b.start_watching(stock_code)
 
-        # ── ② 무장: 강도 3초 연속 (여기까지가 틱의 대부분) ────────
+        # ── ② 무장: 강도 연속 유지 (여기까지가 틱의 대부분) ────────
         sustained = self.update_strength_timer(
             stock_code, parsed_trade.get("strength") or 0.0, now=now
         )
@@ -2586,11 +2632,17 @@ class StrategyManager:
                     )
                     can_buy = self.can_buy_phase1a(info)
                 if not can_buy:
+                    # 차단 사유가 슬롯이 아닐 수 있다(지수 가드/MDD/HALT/격리).
+                    # 그대로 "슬롯 부족"으로 적으면 진단 알림이 원인을 통째로
+                    # 오분류해, 장중에 "왜 안 사는가"를 판단할 수 없게 된다.
                     self._note_reject(
                         stock_code,
-                        f"슬롯 부족 ({sub_strategy} "
-                        f"{self.count_holdings_by_strategy(sub_strategy)}, "
-                        f"전체 {self.occupied_slots()}/{MAX_HOLDINGS})",
+                        self._entry_block_reason()
+                        or (
+                            f"슬롯 부족 ({sub_strategy} "
+                            f"{self.count_holdings_by_strategy(sub_strategy)}, "
+                            f"전체 {self.occupied_slots()}/{MAX_HOLDINGS})"
+                        ),
                     )
                     return False
             self.pending.add(stock_code)
@@ -3271,11 +3323,14 @@ class StrategyManager:
             )
             return
 
-        # 지수 하락 가드(-3%, 11:00~) — 발동 중이면 신규매수를 전면 중단한다.
+        # 지수 하락 가드(INDEX_GUARD_FROM 이후) — 발동 중이면 신규매수를 전면 중단한다.
         # (2026-08-03) can_buy_more에도 같은 체크를 넣었지만, 주문 직전에도
         # 한 번 더 막는다 — 다른 경로가 추가돼도 절대 새지 않게 하는 하드가드다.
         if self._is_index_guard_active():
-            self._note_reject(stock_code, "지수 하락 가드(-3%) — 신규매수 중단")
+            self._note_reject(
+                stock_code,
+                f"지수 하락 가드({INDEX_GUARD_THRESHOLD:+.0f}%) — 신규매수 중단",
+            )
             logger.info(
                 "[%s] %s 매수 차단: 지수 하락 가드(%.0f%% 이하) 발동 중 [%s]",
                 stock_code, stock_name, INDEX_GUARD_THRESHOLD, sub_strategy,
@@ -3875,7 +3930,7 @@ class StrategyManager:
         return cur_s >= entry_s * TP_UPGRADE_STRENGTH_RATIO
 
     def _update_dynamic_caps(self):
-        """익절캡이 상한(2.5%)인 종목의 조기 이탈 판정 (2026-07-30, tick() 주기 실행).
+        """**동적 상향된** 포지션의 조기 이탈 판정 (2026-07-30, tick() 주기 실행).
 
         체결강도 하락 AND 거래량 하락이 동시에 오면 캡을 기다리지 않고 즉시 매도.
         (사용자 스펙이 AND — OR로 하면 과민해서 백테스트상 오히려 손해였음:
@@ -4150,7 +4205,7 @@ class StrategyManager:
             sub = pos.get("sub_strategy", "?")
             del self.holdings[stock_code]
             # 틱 진입 상태 초기화 (2026-08-02) — 이걸 빼먹으면 매수 전에 켜둔
-            # 강도 타이머가 그대로 남아, 재매수 가능해진 순간 "3초 연속"이
+            # 강도 타이머가 그대로 남아, 재매수 가능해진 순간 "연속 유지"가
             # 이미 충족된 것으로 계산돼 무장 단계를 통째로 건너뛴다.
             self.reset_tick_entry_state(stock_code)
 

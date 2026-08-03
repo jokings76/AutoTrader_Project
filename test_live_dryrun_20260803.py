@@ -10,7 +10,7 @@
 재현하는 실제 흐름:
   08:59 기동 -> 조건검색 스냅샷(장 시작 전 편입)
   09:00 장 시작 -> 실시간 편입(type='02') -> pre-arm
-  09:xx 체결틱 유입 -> 무장(강도 N초 연속, 현재 2초) -> 버스트 -> 매수
+  09:xx 체결틱 유입 -> 무장(강도 TICK_STRENGTH_SUSTAIN_SEC 연속) -> 버스트 -> 매수
   보유중 -> 가격 갱신 -> 동적 익절캡 -> 청산
   청산 후 -> 재매수 차단 규칙
   10:30  -> 중복 종목 전략 전환
@@ -626,8 +626,16 @@ unknown = [k for k, v in cats.items() if v == "기타"]
 check("틱 경로의 모든 탈락 사유가 분류됨('기타'로 안 뭉개짐)",
       not unknown, str(unknown))
 check("미무장이 전용 분류를 가짐",
-      SM.StrategyManager._reject_category("체결강도 미무장 (100 이상 1.2/3초 연속)")
-      == "강도 미무장(3초 미달)")
+      SM.StrategyManager._reject_category("체결강도 미무장 (100 이상 1.2/1.5초 연속)")
+      == "강도 미무장(요구시간 미달)")
+# (2026-08-04) 분류 라벨에 초 수/％ 수치를 박으면 상수를 바꿔도 안 따라와서
+# 진단 알림이 거짓말을 한다 — 실제로 무장 3.0->1.5초 변경 후에도 "3초 미달"로
+# 남아 있었고, 지수 가드 -3->-5% 변경 후에도 "(-3%)"로 남아 있었다.
+_labels = [lab for lab, _ in SM.StrategyManager._REJECT_RULES]
+check("분류 라벨에 하드코딩된 초 수가 없음",
+      not any("초 미달" in l for l in _labels), str(_labels))
+check("분류 라벨에 하드코딩된 % 수치가 없음",
+      not any("%" in l for l in _labels), str(_labels))
 
 s15, clk15 = build(datetime(2026, 8, 3, 9, 30, 0))
 s15.on_condition_hit("DG1", "진단", cond_name="주도주상위")
@@ -926,6 +934,90 @@ sL.holdings["LT1"] = {
 capL, lblL = sL._take_profit_cap(sL.holdings["LT1"])
 check("11:00 매수 1A 캡 = 기본 4.0%", abs(capL - SM.TAKE_PROFIT_CAP) < 1e-9,
       f"{capL} ({lblL})")
+
+# ═════════════════════════════════════════════════════════
+print("\n[22] 전면차단(가드/MDD/HALT/격리)이 '매도만 하는' 반쪽 동작을 만들지 않는지")
+# (2026-08-04) 08-03에 slot_replacement에서 고친 것과 **같은 결함**이
+# _try_1a_priority_upgrade 경로에 그대로 남아 있었다.
+#   호출부는 can_buy_*가 False라는 것만 보고 "슬롯이 꽉 찼다"로 해석해
+#   보유분을 팔아 자리를 비운다. 그런데 그 False가 지수 가드/MDD/HALT/격리
+#   때문이면 비운 자리를 채울 매수가 막혀 있어 **손실만 확정된다.**
+# 같은 규칙이 여러 곳에 흩어져 한쪽만 고치는 이 프로젝트의 반복 사고 패턴이라
+# _entry_block_reason() 한 점으로 모으고 여기서 못박는다.
+
+
+def _fill_slots(s, n=None, price=10_000):
+    """슬롯을 만석으로 채우고, 그 종목들에 체결틱까지 흘려 넣는다.
+    (틱이 없으면 _fresh_tick_price/candidate_tier가 성립하지 않아
+     교체 로직이 '우연히' 안 도는 상태가 되어 테스트가 무의미해진다)"""
+    n = n or SM.MAX_HOLDINGS
+    t0 = time.time()
+    for i in range(n):
+        code = f"FL{i:03d}"
+        s.holdings[code] = {
+            "trade_id": 1, "qty": 10, "buy_quantity": 10, "buy_price": price,
+            "buy_time": s._now() - timedelta(minutes=20), "stock_name": code,
+            "sub_strategy": "1A", "warmup_until": s._now() - timedelta(seconds=1),
+            "entry_strength": 300.0, "highest_price": price, "lowest_price": price,
+        }
+        s.phase1b.start_watching(code)
+        for k in range(30):
+            s.phase1b.trade_flow.add_tick(code, price, "buy", 5, now=t0 - 100 + k * 3)
+        s.phase1b.trade_flow.add_tick(code, price, "buy", 5, now=t0 - 0.5)
+
+
+def _set_idx(s, v):
+    """지수 등락률을 주입한다. _market_rate_at을 '지금'으로 두면 60초 캐시가
+    유효해져 REST 스텁이 값을 덮어쓰지 않는다."""
+    s._kospi_rate = s._kosdaq_rate = v
+    s._market_rate_at = s._now()
+
+
+_blockers = [
+    ("지수 하락 가드", lambda s: _set_idx(s, SM.INDEX_GUARD_THRESHOLD - 1.0)),
+    ("MDD 일손실 차단", lambda s: setattr(s, "_risk_tripped", True)),
+    ("WS 재연결 격리", lambda s: setattr(s, "quarantine_until",
+                                       s._now() + timedelta(minutes=5))),
+]
+
+
+for _label, _apply in _blockers:
+    sB, _ = build(datetime(2026, 8, 3, 11, 5, 0))
+    _fill_slots(sB)
+    _apply(sB)
+    _sold = []
+    sB._execute_sell = lambda c, p, r: _sold.append((c, r))
+    sB.candidate_tier = lambda c: (0.1 if c.startswith("FL") else 99.0)
+    _did = sB._try_1a_priority_upgrade("NEWC1", 99.0)
+    check(f"{_label} 중 우선순위 교체가 자리를 비우지 않음",
+          _did is False and not _sold, f"did={_did} sold={_sold}")
+    check(f"{_label} 사유가 진단에 그대로 기록됨(슬롯 부족으로 오분류 안 됨)",
+          _label in (sB._entry_block_reason() or ""), str(sB._entry_block_reason()))
+
+# 대조군 — 차단 사유가 없으면 교체는 **여전히 동작해야 한다**(과잉차단 아님)
+sC, _ = build(datetime(2026, 8, 3, 11, 5, 0))
+_fill_slots(sC)
+_soldC = []
+sC._execute_sell = lambda c, p, r: _soldC.append((c, r))
+sC.candidate_tier = lambda c: (0.1 if c.startswith("FL") else 99.0)
+check("[대조군] 차단 사유 없음", sC._entry_block_reason() is None,
+      str(sC._entry_block_reason()))
+check("[대조군] 정상 상태에서는 우선순위 교체가 동작(과잉차단 아님)",
+      sC._try_1a_priority_upgrade("NEWC2", 99.0) is True and bool(_soldC),
+      str(_soldC))
+
+# can_buy_more 리팩터링 후에도 판정이 동일한지 (경계 포함)
+sM, cM = build(datetime(2026, 8, 3, 10, 59, 0))
+_set_idx(sM, -6.0)
+check("10:59엔 지수 가드 미발동(11:00부터)", sM.can_buy_more() is True)
+cM.set(11, 0, 0); _set_idx(sM, SM.INDEX_GUARD_THRESHOLD - 1.0)
+check("11:00 정각부터 지수 가드 발동", sM.can_buy_more() is False)
+_set_idx(sM, SM.INDEX_GUARD_THRESHOLD + 0.1)
+check("임계 미달(-4.9%)이면 매수 재개", sM.can_buy_more() is True)
+_set_idx(sM, SM.INDEX_GUARD_THRESHOLD)
+check("임계 정확히 도달하면 차단", sM.can_buy_more() is False)
+_set_idx(sM, 0.0)
+check("지수 회복 후 매수 재개", sM.can_buy_more() is True)
 
 # ═════════════════════════════════════════════════════════
 print("\n" + "=" * 60)
