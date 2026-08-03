@@ -299,6 +299,34 @@ check("보유가 남으면 완료로 치지 않음(오버나이트 방지)",
 check("종가베팅/백테스트는 실패해도 완료 처리(무한 대기 방지)",
       msrc.count("finally:") >= 2)
 
+print("\n[12] 종목명 추출 — 실시간 편입 push의 'name'은 종목명이 아니다")
+# 08-03 실거래: 매수 알림·로그·holdings의 종목명이 전부 "조건검색"으로 찍혔다.
+# 원인은 실시간 편입 push(type='02') 최상위 'name'이 **실시간 타입 라벨**인데
+# 후보 키에 들어 있어서, "찾았다"고 판단해 REST 폴백이 무력화된 것.
+import main as M
+
+RT_PUSH = {  # 키움 실시간 편입 push 실제 형태 (api/kiwoom_ws.py:550 실측 기록)
+    "type": "02", "name": "조건검색", "item": "079650",
+    "values": {"841": "3", "9001": "079650", "843": "I", "20": "100621"},
+}
+got = M._extract_stock_name(RT_PUSH, "079650")
+check("실시간 push에서 '조건검색'을 종목명으로 쓰지 않음", got != "조건검색", got)
+check("종목명이 없으면 stock_code 반환(=REST 폴백 신호)", got == "079650", got)
+
+# 기동 스냅샷(CNSRREQ)은 '302'에 진짜 이름이 있다 — 이건 계속 살아야 한다.
+SNAPSHOT = {"9001": "A002990", "302": "금호건설", "10": "5000"}
+check("스냅샷의 302 종목명은 정상 추출",
+      M._extract_stock_name(SNAPSHOT, "002990") == "금호건설")
+# 다른 후보 키도 유지되는지(회귀 방지)
+check("hng_name 폴백 유지",
+      M._extract_stock_name({"hng_name": "삼성전자"}, "005930") == "삼성전자")
+check("dict가 아니면 stock_code", M._extract_stock_name(None, "005930") == "005930")
+check("빈 문자열은 이름으로 안 봄",
+      M._extract_stock_name({"302": "   "}, "005930") == "005930")
+# 'name' 키가 후보 목록에서 실제로 빠졌는지 (구버전 회귀 방지)
+check("'name'이 후보 키에서 제거됨",
+      M._extract_stock_name({"name": "아무거나"}, "005930") == "005930")
+
 print("\n[8] daily_backtest 동기화")
 import core.daily_backtest as DB
 check("백테스트가 라이브 캡을 그대로 참조", DB.TAKE_PROFIT_CAP == SM.TAKE_PROFIT_CAP,

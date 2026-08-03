@@ -60,9 +60,25 @@ def _norm_seq(seq) -> str:
 
 
 def _extract_stock_name(raw: dict, stock_code: str) -> str:
+    """raw 페이로드에서 종목명을 뽑는다. 못 찾으면 stock_code를 그대로 반환해
+    호출부가 REST 폴백(_fetch_stock_name)을 타도록 신호한다.
+
+    ⚠️ 후보 키에 **'name'을 넣으면 안 된다** (2026-08-03 실거래로 확인).
+    키움 실시간 편입 push(type='02')의 최상위 'name'은 종목명이 아니라
+    **실시간 타입 라벨("조건검색")**이다:
+        {'type':'02', 'name':'조건검색', 'item':'079650',
+         'values':{'841':'3','9001':'079650','843':'I','20':'100621'}}
+    즉 이 페이로드에는 종목명이 아예 없다. 그런데 'name'을 후보로 두면
+    "조건검색"을 찾아냈다고 판단해버리고, 그 값이 stock_code와 다르므로
+    호출부의 `if stock_name == stock_code:` REST 폴백이 **영영 실행되지
+    않는다**. 그 결과 매수 알림·로그·holdings의 종목명이 전부 "조건검색"으로
+    찍혔다(08-03 텔레그램 '매수 체결' 3건 모두).
+    기동 스냅샷(CNSRREQ)은 '302'에 진짜 종목명이 실려 오므로 정상이었고,
+    08-01에 실시간 편입 파싱을 되살리면서 이 경로가 처음 살아나 드러났다.
+    """
     if not isinstance(raw, dict):
         return stock_code
-    for key in ("302", "hng_name", "stock_name", "name", "kor_name", "jongmok"):
+    for key in ("302", "hng_name", "stock_name", "kor_name", "jongmok"):
         v = raw.get(key)
         if v and isinstance(v, str) and v.strip():
             return v.strip()
