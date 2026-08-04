@@ -135,7 +135,7 @@ def tick(strat, code, strength, at, price=10_000, side="buy", volume=10):
 def trigger(strat, code, t0):
     """무장(1.5초) + 버스트 -> 되돌림 대기 계획 생성까지."""
     tick(strat, code, 130.0, t0)
-    feed(strat.phase1b.trade_flow, code, 2, 30_000_000, now=t0 + 3.5)
+    feed(strat.phase1b.trade_flow, code, 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5)
     tick(strat, code, 130.0, t0 + 3.5)
 
 

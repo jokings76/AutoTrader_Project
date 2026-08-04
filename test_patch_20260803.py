@@ -32,6 +32,11 @@ from core.phase1b_controller import Phase1BController
 
 PASS, FAIL = [], []
 
+# 버스트 1건이 성립하는 수량 — 문턱 상수를 따라간다 (08-04: 3천만->4천만).
+# 수치를 박으면 문턱을 올릴 때마다 픽스처가 조용히 미달이 된다.
+_BURST_VOL = int(SM.PHASE1A_BURST_TRADE_VALUE // 10_000) + 1
+
+
 
 def check(name, cond, detail=""):
     (PASS if cond else FAIL).append(name)
@@ -568,7 +573,7 @@ check("is_armed_now도 False", not st.is_armed_now("CAND"))
 st, _n = armed_strat(arm_age_sec=5)
 check("방금 무장한 후보는 is_armed_now=True", st.is_armed_now("CAND"))
 for _i in range(2):   # 버스트까지 만들어야 최종 선정된다
-    st.phase1b.trade_flow.add_tick("CAND", 10_000, "buy", 3_000, now=_n - _i * 0.3)
+    st.phase1b.trade_flow.add_tick("CAND", 10_000, "buy", _BURST_VOL, now=_n - _i * 0.3)
 got = _SR2.find_replacement_candidate(st, 1.0)
 check("무장+버스트면 후보로 선정됨", got is not None and got[0] == "CAND", str(got))
 
@@ -635,7 +640,7 @@ def burst_ready(st, code, now=None):
     """후보를 무장 + 버스트 성립 상태로 만든다(3천만원 x2건)."""
     now = now or _tm.time()
     for i in range(2):
-        st.phase1b.trade_flow.add_tick(code, 10_000, "buy", 3_000, now=now - i * 0.3)
+        st.phase1b.trade_flow.add_tick(code, 10_000, "buy", _BURST_VOL, now=now - i * 0.3)
 
 
 def full_slots(st, n=None):

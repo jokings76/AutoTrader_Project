@@ -146,7 +146,10 @@ def ob(strat, code, thick=True):
         now=time.time())
 
 
-def burst(strat, code, at, n=2, value=30_000_000):
+def burst(strat, code, at, n=2, value=None):
+    # 문턱 상수를 따라가게 한다 (08-04: 3천만->4천만). 수치를 박으면 상수를
+    # 올릴 때마다 픽스처가 조용히 미달이 되어 "매수 안 됨"으로 무더기 실패한다.
+    value = SM.PHASE1A_BURST_TRADE_VALUE if value is None else value
     price = 10_000
     vol = max(1, int(value // price))
     for i in range(n):
@@ -345,10 +348,10 @@ s3b, _ = build(datetime(2026, 8, 3, 12, 0, 0))
 s3b.on_condition_hit("N002", "점심정상", cond_name="주도주상위")
 ob(s3b, "N002")
 tick(s3b, "N002", 130.0, T0 + 70)
-burst(s3b, "N002", T0 + 73.5, n=2, value=30_000_000)
+burst(s3b, "N002", T0 + 73.5, n=2)   # 문턱 상수 그대로 (하드코딩 금지)
 tick(s3b, "N002", 130.0, T0 + 73.5)
 tick(s3b, "N002", 130.0, T0 + 74.5, price=9_940, side="sell")  # 되돌림 체결
-check("점심에도 3천만원 x2건이면 정상 매수",
+check("점심에도 문턱 x2건이면 정상 매수(완화도 강화도 없음)",
       "N002" in s3b.holdings, f"holdings={list(s3b.holdings)}")
 
 s4, clk4 = build(datetime(2026, 8, 3, 9, 30, 0))
@@ -357,7 +360,7 @@ ob(s4, "M001")
 tick(s4, "M001", 130.0, T0 + 70)
 burst(s4, "M001", T0 + 73.5, n=2, value=20_000_000)
 tick(s4, "M001", 130.0, T0 + 73.5)
-check("같은 2천만원 x2건이 오전엔 탈락(계수 1.00 -> 문턱 3,000만)",
+check("같은 2천만원 x2건이 오전에도 탈락(계수 1.00)",
       "M001" not in s4.holdings)
 
 # ═════════════════════════════════════════════════════════
@@ -938,10 +941,10 @@ sS.on_price_update("ST1", 9_600)   # -4%
 check("워밍업 중에도 손절 발동", "ST1" not in sS.holdings)
 
 # (5) 점심 시간대 문턱이 원기준(3천만원) 유지
-check("12:00 버스트 문턱 = 3천만원(완화 제거)",
+check("12:00 버스트 문턱이 원기준 그대로(완화 제거) — 금액 하드코딩 금지",
       abs(SM.PHASE1A_BURST_TRADE_VALUE
           * sN.burst_time_multiplier(datetime(2026, 8, 3, 12, 0, 0))
-          - 30_000_000) < 1)
+          - SM.PHASE1A_BURST_TRADE_VALUE) < 1)
 
 # (6) 1A는 09:10 이후 기본캡 4.0%로 넓어진다(개장초반과 구분되는지)
 sL, _ = build(datetime(2026, 8, 3, 11, 0, 0))

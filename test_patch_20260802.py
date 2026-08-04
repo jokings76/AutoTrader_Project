@@ -261,8 +261,11 @@ check("13:30 -> 0.80", tmul(13, 30) == 0.80, str(tmul(13, 30)))
 check("14:30 -> 0.95 (마감 전 회복)", tmul(14, 30) == 0.95, str(tmul(14, 30)))
 check("점심은 더 이상 최저가 아님(구버전 0.65 회귀 방지)",
       tmul(12, 0) == 1.00 and tmul(12, 0) > tmul(13, 30))
-check("점심 임계값이 원기준 3천만원 그대로",
-      abs(SM.PHASE1A_BURST_TRADE_VALUE * tmul(12, 0) - 30_000_000) < 1)
+# 수치를 박지 말 것 — 문턱을 바꾸면(08-04: 3천만->4천만) 테스트가 거짓말을 한다.
+# 검증할 것은 "점심에 완화되지 않는다"이지 특정 금액이 아니다.
+check("점심 임계값이 원기준 그대로(완화 없음)",
+      abs(SM.PHASE1A_BURST_TRADE_VALUE * tmul(12, 0)
+          - SM.PHASE1A_BURST_TRADE_VALUE) < 1)
 check("어떤 시간대도 원기준보다 느슨해지지 않음",
       all(v <= 1.0 for _, v in SM.TICK_BURST_TIME_MULT))
 
@@ -273,13 +276,13 @@ print("\n[4] 대량체결 버스트 3경로")
 # 경로 ① 절대: 3천만원 x 2건
 s = build_strat(datetime(2026, 8, 3, 9, 30, 0))
 setup_candidate(s, "BA")
-feed(s.phase1b.trade_flow, "BA", 2, 30_000_000, now=t0, span=1.0)
+feed(s.phase1b.trade_flow, "BA", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0, span=1.0)
 ok, d = s.check_burst("BA", now=t0)
 check("절대경로: 3천만원 x2건 통과", ok and d.get("burst_path") == "절대", str(d.get("burst_path")))
 
 s = build_strat(datetime(2026, 8, 3, 9, 30, 0))
 setup_candidate(s, "BA1")
-feed(s.phase1b.trade_flow, "BA1", 1, 30_000_000, now=t0, span=1.0)
+feed(s.phase1b.trade_flow, "BA1", 1, SM.PHASE1A_BURST_TRADE_VALUE, now=t0, span=1.0)
 ok, d = s.check_burst("BA1", now=t0)
 check("절대경로: 1건만으로는 탈락(2건 요구)", not ok, str(d.get("reason", ""))[:60])
 
@@ -326,7 +329,8 @@ ok_morn, _ = s_morn.check_burst("BN", now=t0, now_dt=s_morn._now())
 check("2천만원 x2건은 오전·점심 모두 탈락(점심 완화 제거)",
       (not ok_morn) and (not ok_noon), f"오전={ok_morn} 점심={ok_noon}")
 check("점심 문턱이 오전과 동일해짐",
-      d_noon.get("burst_min") == 30_000_000, str(d_noon.get("burst_min")))
+      d_noon.get("burst_min") == SM.PHASE1A_BURST_TRADE_VALUE,
+      str(d_noon.get("burst_min")))
 
 s = build_strat()
 setup_candidate(s, "BE")
@@ -342,7 +346,7 @@ check("phase1b 미연결이면 안전하게 탈락(예외 안 던짐)",
 # 5초 창 밖의 대량체결은 안 세는지
 s = build_strat(datetime(2026, 8, 3, 9, 30, 0))
 setup_candidate(s, "BW")
-feed(s.phase1b.trade_flow, "BW", 2, 30_000_000, now=t0 - 20, span=1.0)
+feed(s.phase1b.trade_flow, "BW", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 - 20, span=1.0)
 ok, d = s.check_burst("BW", now=t0)
 check("5초 창 밖의 대량체결은 무시됨", not ok, f"burst_count={d.get('burst_count')}")
 
@@ -354,11 +358,11 @@ s = build_strat(datetime(2026, 8, 3, 9, 30, 0))
 setup_candidate(s, "T1")
 tick(s, "T1", 130.0, t0)
 check("강도 첫 틱: 타이머만 시작", "T1" in s._strength_since and "T1" not in s._armed_at)
-feed(s.phase1b.trade_flow, "T1", 2, 30_000_000, now=t0 + 1, span=0.5)
+feed(s.phase1b.trade_flow, "T1", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 1, span=0.5)
 tick(s, "T1", 130.0, t0 + 1)
 check("무장 전(1초)엔 버스트가 있어도 매수 안 함", "T1" not in s.holdings)
 
-feed(s.phase1b.trade_flow, "T1", 2, 30_000_000, now=t0 + 3.5, span=0.5)
+feed(s.phase1b.trade_flow, "T1", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5, span=0.5)
 tick(s, "T1", 130.0, t0 + 3.5)
 pullback_fill(s, "T1", t0 + 4.5)   # -0.5% 되돌림 체결 (2026-08-04)
 check("무장(3초) + 버스트 -> 그 틱에서 즉시 매수", "T1" in s.holdings)
@@ -403,7 +407,7 @@ print("\n[6] 틱 구동 진입 — Pullback도 동일 트리거")
 s = build_strat(datetime(2026, 8, 3, 10, 0, 0))
 setup_candidate(s, "P1", cond="눌림목자동")
 tick(s, "P1", 130.0, t0)
-feed(s.phase1b.trade_flow, "P1", 2, 30_000_000, now=t0 + 3.5, span=0.5)
+feed(s.phase1b.trade_flow, "P1", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5, span=0.5)
 tick(s, "P1", 130.0, t0 + 3.5)
 pullback_fill(s, "P1", t0 + 4.5)   # -0.5% 되돌림 체결 (2026-08-04)
 check("눌림목자동도 같은 트리거로 매수", "P1" in s.holdings)
@@ -418,7 +422,7 @@ check("Pullback 진입에 분봉 REST를 쓰지 않음 (구버전은 2콜)",
 s = build_strat(datetime(2026, 8, 3, 9, 10, 0))
 setup_candidate(s, "P2", cond="눌림목자동")
 tick(s, "P2", 130.0, t0)
-feed(s.phase1b.trade_flow, "P2", 2, 30_000_000, now=t0 + 3.5, span=0.5)
+feed(s.phase1b.trade_flow, "P2", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5, span=0.5)
 tick(s, "P2", 130.0, t0 + 3.5)
 pullback_fill(s, "P2", t0 + 4.5)   # -0.5% 되돌림 체결 (2026-08-04)
 check("눌림목이 09:10에도 매수됨 (구버전은 09:25까지 대기)",
@@ -430,7 +434,7 @@ check("매수 전략이 눌림으로 라우팅됨",
 s = build_strat(datetime(2026, 8, 3, 9, 10, 0))
 setup_candidate(s, "P3", cond="주도주상위")
 tick(s, "P3", 130.0, t0)
-feed(s.phase1b.trade_flow, "P3", 2, 30_000_000, now=t0 + 3.5, span=0.5)
+feed(s.phase1b.trade_flow, "P3", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5, span=0.5)
 tick(s, "P3", 130.0, t0 + 3.5)
 pullback_fill(s, "P3", t0 + 4.5)   # -0.5% 되돌림 체결 (2026-08-04)
 check("1A는 09:10에도 매수 가능", "P3" in s.holdings)
@@ -439,7 +443,7 @@ check("1A는 09:10에도 매수 가능", "P3" in s.holdings)
 s = build_strat(datetime(2026, 8, 3, 14, 55, 0))
 setup_candidate(s, "P4", cond="주도주상위")
 tick(s, "P4", 130.0, t0)
-feed(s.phase1b.trade_flow, "P4", 2, 30_000_000, now=t0 + 3.5, span=0.5)
+feed(s.phase1b.trade_flow, "P4", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5, span=0.5)
 tick(s, "P4", 130.0, t0 + 3.5)
 check("14:50 이후엔 틱 경로도 매수 안 함", "P4" not in s.holdings)
 
@@ -447,7 +451,7 @@ check("14:50 이후엔 틱 경로도 매수 안 함", "P4" not in s.holdings)
 s = build_strat(datetime(2026, 8, 3, 10, 0, 0))
 setup_candidate(s, "D1", cond="주도주상위+눌림목자동")
 tick(s, "D1", 130.0, t0)
-feed(s.phase1b.trade_flow, "D1", 2, 30_000_000, now=t0 + 3.5, span=0.5)
+feed(s.phase1b.trade_flow, "D1", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5, span=0.5)
 tick(s, "D1", 130.0, t0 + 3.5)
 pullback_fill(s, "D1", t0 + 4.5)   # -0.5% 되돌림 체결 (2026-08-04)
 check("중복 편입 10:00 -> 1A로 매수",
@@ -457,7 +461,7 @@ check("중복 편입 10:00 -> 1A로 매수",
 s = build_strat(datetime(2026, 8, 3, 11, 0, 0))
 setup_candidate(s, "D2", cond="주도주상위+눌림목자동")
 tick(s, "D2", 130.0, t0)
-feed(s.phase1b.trade_flow, "D2", 2, 30_000_000, now=t0 + 3.5, span=0.5)
+feed(s.phase1b.trade_flow, "D2", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5, span=0.5)
 tick(s, "D2", 130.0, t0 + 3.5)
 pullback_fill(s, "D2", t0 + 4.5)   # -0.5% 되돌림 체결 (2026-08-04)
 check("중복 편입 11:00 -> Pullback으로 매수",
@@ -473,7 +477,7 @@ s = build_strat(datetime(2026, 8, 3, 9, 30, 0))
 setup_candidate(s, "S1")
 s._opening_prices["S1"] = 9_000            # 현재가 10,000 -> +11%
 tick(s, "S1", 130.0, t0)
-feed(s.phase1b.trade_flow, "S1", 2, 30_000_000, now=t0 + 3.5, span=0.5)
+feed(s.phase1b.trade_flow, "S1", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5, span=0.5)
 tick(s, "S1", 130.0, t0 + 3.5)
 check("1A: 시가대비 +5% 이상이면 매수 보류", "S1" not in s.holdings)
 
@@ -481,7 +485,7 @@ s = build_strat(datetime(2026, 8, 3, 10, 0, 0))
 setup_candidate(s, "S2", cond="눌림목자동")
 s._opening_prices["S2"] = 9_000
 tick(s, "S2", 130.0, t0)
-feed(s.phase1b.trade_flow, "S2", 2, 30_000_000, now=t0 + 3.5, span=0.5)
+feed(s.phase1b.trade_flow, "S2", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5, span=0.5)
 tick(s, "S2", 130.0, t0 + 3.5)
 pullback_fill(s, "S2", t0 + 4.5)   # -0.5% 되돌림 체결 (2026-08-04)
 check("눌림목엔 시가대비 보류를 적용하지 않음(되돌림을 사는 전략)",
@@ -492,7 +496,7 @@ s = build_strat(datetime(2026, 8, 3, 9, 30, 0))
 setup_candidate(s, "H1")
 s._get_market_defense_mode = lambda: "HALT"
 tick(s, "H1", 130.0, t0)
-feed(s.phase1b.trade_flow, "H1", 2, 30_000_000, now=t0 + 3.5, span=0.5)
+feed(s.phase1b.trade_flow, "H1", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5, span=0.5)
 tick(s, "H1", 130.0, t0 + 3.5)
 check("지수 HALT면 틱 경로도 매수 안 함", "H1" not in s.holdings)
 
@@ -501,7 +505,7 @@ s = build_strat(datetime(2026, 8, 3, 9, 30, 0))
 setup_candidate(s, "R1")
 s._stoploss_blocked.add("R1")
 tick(s, "R1", 130.0, t0)
-feed(s.phase1b.trade_flow, "R1", 2, 30_000_000, now=t0 + 3.5, span=0.5)
+feed(s.phase1b.trade_flow, "R1", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5, span=0.5)
 tick(s, "R1", 130.0, t0 + 3.5)
 check("손실차단 종목은 틱 경로에서도 재매수 안 됨", "R1" not in s.holdings)
 
@@ -515,7 +519,7 @@ for i in range(SM.MAX_HOLDINGS):
     }
 setup_candidate(s, "SL1")
 tick(s, "SL1", 130.0, t0)
-feed(s.phase1b.trade_flow, "SL1", 2, 30_000_000, now=t0 + 3.5, span=0.5)
+feed(s.phase1b.trade_flow, "SL1", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5, span=0.5)
 tick(s, "SL1", 130.0, t0 + 3.5)
 check("슬롯 만석이면 틱 경로도 매수 안 함", "SL1" not in s.holdings)
 
@@ -628,7 +632,7 @@ check("강도 임계값 100", SM.TICK_STRENGTH_MIN == 100.0)
 s = build_strat(datetime(2026, 8, 3, 9, 30, 0))
 setup_candidate(s, "RG1")
 tick(s, "RG1", 130.0, t0)
-feed(s.phase1b.trade_flow, "RG1", 2, 30_000_000, now=t0 + 3.5, span=0.5)
+feed(s.phase1b.trade_flow, "RG1", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5, span=0.5)
 tick(s, "RG1", 130.0, t0 + 3.5)
 pullback_fill(s, "RG1", t0 + 4.5)   # -0.5% 되돌림 체결 (2026-08-04)
 check("구버전은 여기서 0건(폴링 대기) — 지금은 틱에서 즉시 매수",
@@ -637,7 +641,7 @@ check("구버전은 여기서 0건(폴링 대기) — 지금은 틱에서 즉시
 # 구버전: compute_strength 중립값(100)이 임계값 100을 그냥 통과했다
 s = build_strat(datetime(2026, 8, 3, 9, 30, 0))
 setup_candidate(s, "RG2")
-feed(s.phase1b.trade_flow, "RG2", 2, 30_000_000, now=t0, span=0.5)
+feed(s.phase1b.trade_flow, "RG2", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0, span=0.5)
 ok, info = s.evaluate_tick_entry("RG2", "1A", 10_000, now=t0)
 check("체결강도 정보가 전혀 없으면(무장 0초) 버스트가 있어도 탈락",
       not ok and "미무장" in info.get("reason", ""), str(info.get("reason"))[:60])
@@ -659,7 +663,7 @@ setup_candidate(s, "LK1")
 s._opening_prices["LK1"] = 10_000
 s.api.get_stock_change_rate = lambda c: 50.0      # 전일종가대비 +50% -> 상한 초과
 tick(s, "LK1", 130.0, t0)
-feed(s.phase1b.trade_flow, "LK1", 2, 30_000_000, now=t0 + 3.5, span=0.5)
+feed(s.phase1b.trade_flow, "LK1", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5, span=0.5)
 tick(s, "LK1", 130.0, t0 + 3.5)
 check("등락률 상한 초과로 매수 무산돼도 pending이 남지 않음",
       "LK1" not in s.pending, str(s.pending))
@@ -669,7 +673,7 @@ s = build_strat(datetime(2026, 8, 3, 14, 30, 0))
 setup_candidate(s, "LK2")
 s._now = lambda: datetime(2026, 8, 3, 15, 30, 0)   # 하드컷오프 이후
 tick(s, "LK2", 130.0, t0)
-feed(s.phase1b.trade_flow, "LK2", 2, 30_000_000, now=t0 + 3.5, span=0.5)
+feed(s.phase1b.trade_flow, "LK2", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5, span=0.5)
 tick(s, "LK2", 130.0, t0 + 3.5)
 check("하드컷오프 경로에서도 pending 누수 없음", "LK2" not in s.pending, str(s.pending))
 
@@ -677,7 +681,7 @@ check("하드컷오프 경로에서도 pending 누수 없음", "LK2" not in s.pe
 s = build_strat(datetime(2026, 8, 3, 9, 30, 0))
 setup_candidate(s, "DG1")
 tick(s, "DG1", 130.0, t0)
-feed(s.phase1b.trade_flow, "DG1", 2, 30_000_000, now=t0 + 3.5, span=0.5)
+feed(s.phase1b.trade_flow, "DG1", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5, span=0.5)
 tick(s, "DG1", 130.0, t0 + 3.5)
 pullback_fill(s, "DG1", t0 + 4.5)   # -0.5% 되돌림 체결 (2026-08-04)
 st = s._tick_entry_stats

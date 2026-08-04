@@ -20,6 +20,11 @@ from core.strategy.orderbook import OrderbookTracker
 
 PASS, FAIL = [], []
 
+# 버스트 1건이 성립하는 수량 — 문턱 상수를 따라간다 (08-04: 3천만->4천만).
+# 수치를 박으면 문턱을 올릴 때마다 픽스처가 조용히 미달이 된다.
+_BURST_VOL = int(SM.PHASE1A_BURST_TRADE_VALUE // 10_000) + 1
+
+
 
 def check(name, cond, detail=""):
     (PASS if cond else FAIL).append(name)
@@ -318,12 +323,12 @@ ok, info = eval_1a(lambda tf: feed(tf, "X", 10, 5_000_000))   # 500만 x10 = 누
 check("누적 거래대금만 크고 대량체결 없으면 탈락(구버전은 통과)",
       not ok and "대량체결 부족" in info["reason"], info.get("reason", ""))
 
-ok, info = eval_1a(lambda tf: feed(tf, "X", 3, 30_000_000))
+ok, info = eval_1a(lambda tf: feed(tf, "X", 3, SM.PHASE1A_BURST_TRADE_VALUE))
 check("3천만 x3건 -> 통과", ok, info.get("reason", ""))
 check("통과 info에 score/score_threshold 포함(확장슬롯·슬롯교체용)",
       info.get("score") is not None and info.get("score_threshold"), str(info.get("score")))
 
-ok, info = eval_1a(lambda tf: feed(tf, "X", 2, 30_000_000))
+ok, info = eval_1a(lambda tf: feed(tf, "X", 2, SM.PHASE1A_BURST_TRADE_VALUE))
 check("3천만 x2건(3건 미달) -> 탈락", not ok, info.get("reason", ""))
 
 def _single(tf):
@@ -334,7 +339,7 @@ check("단일 1억 체결 1건 -> 통과(OR 조건)", ok, info.get("reason", "")
 check("통과 사유에 단일체결 트리거 명시", "단일체결" in info.get("reason", ""))
 
 def _sell(tf):
-    feed(tf, "X", 3, 30_000_000, side="sell")
+    feed(tf, "X", 3, SM.PHASE1A_BURST_TRADE_VALUE, side="sell")
 ok, info = eval_1a(_sell)
 check("대량체결이 전부 매도우세면 강도 미달로 탈락",
       not ok and "체결강도 미달" in info["reason"], info.get("reason", ""))
@@ -345,20 +350,20 @@ ok, info = eval_1a(_thin)
 check("단일 1억이어도 틱 3개 미만이면 강도 판단불가로 탈락",
       not ok and "체결틱 부족" in info["reason"], info.get("reason", ""))
 
-ok, info = eval_1a(lambda tf: feed(tf, "X", 3, 30_000_000), open_px=10_000, px=10_600)
+ok, info = eval_1a(lambda tf: feed(tf, "X", 3, SM.PHASE1A_BURST_TRADE_VALUE), open_px=10_000, px=10_600)
 check("주도주상위 시가대비 +6% -> 매수보류", not ok and "시가대비" in info["reason"],
       info.get("reason", ""))
-ok, info = eval_1a(lambda tf: feed(tf, "X", 3, 30_000_000), open_px=10_000, px=10_400)
+ok, info = eval_1a(lambda tf: feed(tf, "X", 3, SM.PHASE1A_BURST_TRADE_VALUE), open_px=10_000, px=10_400)
 check("시가대비 +4%는 통과", ok, info.get("reason", ""))
-ok, info = eval_1a(lambda tf: feed(tf, "X", 3, 30_000_000), cond="돌파자동매매용",
+ok, info = eval_1a(lambda tf: feed(tf, "X", 3, SM.PHASE1A_BURST_TRADE_VALUE), cond="돌파자동매매용",
                    open_px=10_000, px=10_600)
 check("시가급등 +5% 필터가 돌파자동매매용에도 적용됨 (2026-08-01 확대)",
       not ok and "시가대비" in info["reason"], info.get("reason", ""))
-ok, info = eval_1a(lambda tf: feed(tf, "X", 3, 30_000_000), cond="기타",
+ok, info = eval_1a(lambda tf: feed(tf, "X", 3, SM.PHASE1A_BURST_TRADE_VALUE), cond="기타",
                    open_px=10_000, px=10_600)
 check("cond_name이 '기타'로 뭉개져도 필터가 꺼지지 않음",
       not ok and "시가대비" in info["reason"], info.get("reason", ""))
-ok, info = eval_1a(lambda tf: feed(tf, "X", 3, 30_000_000), cond="돌파자동매매용",
+ok, info = eval_1a(lambda tf: feed(tf, "X", 3, SM.PHASE1A_BURST_TRADE_VALUE), cond="돌파자동매매용",
                    open_px=0.0, px=10_600)
 check("당일 시가를 모르면(0) 필터는 건너뜀 — 모르는 값으로 막지 않음", ok)
 
@@ -557,7 +562,7 @@ for _c in ("C1", "C2"):
     s._strength_since[_c] = _t_now - (SM.TICK_STRENGTH_SUSTAIN_SEC + 1)
     # (2026-08-03) 버스트까지 성립해야 대체후보 자격이 생긴다
     for _j in range(2):
-        s.phase1b.trade_flow.add_tick(_c, 10_000, "buy", 3_000, now=_t_now - _j * 0.3)
+        s.phase1b.trade_flow.add_tick(_c, 10_000, "buy", _BURST_VOL, now=_t_now - _j * 0.3)
 check("무장 상태 준비 확인", s.is_armed_now("C1") and s.is_armed_now("C2"))
 cand = find_replacement_candidate(s, 1.0)
 check("교체 후보는 1.2배 이상만(1.1 탈락, 1.4 선택)", cand == ("C2", 1.4), str(cand))
@@ -711,7 +716,7 @@ s.on_trade({"stock_code": "INT1", "price": 10_000, "side": "buy",
 check("1.6초에 무장 성립(구버전 2.0초였다면 미무장)", "INT1" in s._armed_at)
 
 # 3.5초 경과 + 그 틱 자체가 대량체결(3천만원 x 2건)
-feed(s.phase1b.trade_flow, "INT1", 2, 30_000_000, now=t0 + 3.5, span=1.0)
+feed(s.phase1b.trade_flow, "INT1", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5, span=1.0)
 s.on_trade({"stock_code": "INT1", "price": 10_000, "side": "buy",
             "volume": 3_000, "strength": 130.0}, now=t0 + 3.5)
 check("3초 연속 유지 -> 무장 성립", "INT1" in s._armed_at)
@@ -759,7 +764,7 @@ s2.on_trade({"stock_code": "RST1", "price": 10_000, "side": "sell",
              "volume": 10, "strength": 88.0}, now=t0 + 1.0)
 check("강도가 100 밑으로 떨어지면 연속 타이머 리셋",
       "RST1" not in s2._strength_since)
-feed(s2.phase1b.trade_flow, "RST1", 2, 30_000_000, now=t0 + 4.0, span=1.0)
+feed(s2.phase1b.trade_flow, "RST1", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 4.0, span=1.0)
 s2.on_trade({"stock_code": "RST1", "price": 10_000, "side": "buy",
              "volume": 3_000, "strength": 130.0}, now=t0 + 4.0)
 check("리셋 후엔 버스트가 와도 매수 안 됨(3초 다시 채워야 함)",
@@ -838,7 +843,7 @@ s4.phase1b.orderbook.update("FAST", {"ask_prices": [10_000, 10_010, 10_020],
 _t = time.time()
 # 무장만 시켜두고(버스트는 아직) 슬롯이 꽉 찼다가 풀린 상황을 가정
 s4._strength_since["FAST"] = _t - 5.0
-feed(s4.phase1b.trade_flow, "FAST", 2, 30_000_000, now=_t, span=1.0)
+feed(s4.phase1b.trade_flow, "FAST", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=_t, span=1.0)
 s4.api.calls.clear()
 n = try_watchlist_reentry(s4, s4._now())
 check("무장된 종목은 재진입 스캔(백스톱)에서도 매수 성립",
@@ -852,7 +857,7 @@ s5._cond_names["NOARM"] = "주도주상위"
 s5._stock_names["NOARM"] = "NOARM"
 s5._opening_prices["NOARM"] = 10_000
 s5.phase1b.start_watching("NOARM")
-feed(s5.phase1b.trade_flow, "NOARM", 3, 30_000_000)
+feed(s5.phase1b.trade_flow, "NOARM", 3, SM.PHASE1A_BURST_TRADE_VALUE)
 n5 = try_watchlist_reentry(s5, s5._now())
 check("무장 안 된 종목은 버스트가 있어도 재진입 스캔에서 매수 안 됨",
       n5 == 0 and "NOARM" not in s5.holdings, f"n={n5}")
@@ -948,7 +953,7 @@ s.candidate_tier = lambda c: (tier_calls.append(c), orig_tier(c))[1]
 s.phase1b.start_watching("FREE")
 s.phase1b.orderbook.update("FREE", {"ask_prices": [10_000, 10_010, 10_020],
                                     "ask_volumes": [3_000, 3_000, 3_000]}, now=now)
-feed(s.phase1b.trade_flow, "FREE", 3, 30_000_000)
+feed(s.phase1b.trade_flow, "FREE", 3, SM.PHASE1A_BURST_TRADE_VALUE)
 s._cond_names["FREE"] = "주도주상위"
 # (2026-08-02) 무장(강도 100+ 3초 연속)이 진입의 선행조건 — 버스트만으로는 안 산다.
 s._strength_since["FREE"] = time.time() - 5.0
@@ -967,7 +972,7 @@ s.phase1b.start_watching("HOT")
 for i in range(20):
     s.phase1b.trade_flow.add_tick("HOT", 10_000, "sell", 10, now=time.time() - 30 - i * 4.5)
 for i in range(10):
-    s.phase1b.trade_flow.add_tick("HOT", 10_000, "buy", 3_000, now=time.time() - i * 3)
+    s.phase1b.trade_flow.add_tick("HOT", 10_000, "buy", _BURST_VOL, now=time.time() - i * 3)
 before = len(s.holdings)
 swapped = s._try_1a_priority_upgrade("HOT", s.candidate_tier("HOT"))
 check("만석 + 정체 보유 -> 더 강한 후보로 교체 성립", swapped and len(s.holdings) == before - 1,
@@ -983,7 +988,7 @@ s.phase1b.start_watching("HOT2")
 for i in range(20):
     s.phase1b.trade_flow.add_tick("HOT2", 10_000, "sell", 10, now=time.time() - 30 - i * 4.5)
 for i in range(10):
-    s.phase1b.trade_flow.add_tick("HOT2", 10_000, "buy", 3_000, now=time.time() - i * 3)
+    s.phase1b.trade_flow.add_tick("HOT2", 10_000, "buy", _BURST_VOL, now=time.time() - i * 3)
 swapped = s._try_1a_priority_upgrade("HOT2", s.candidate_tier("HOT2"))
 check("수익 중인 포지션은 tier가 낮아도 절대 교체 대상 아님", not swapped)
 
@@ -1069,11 +1074,11 @@ def tier_with(single_value, n=12):
     return st.candidate_tier("S"), accel * stg / 100.0
 
 tier_plain, base_plain = tier_with(1_000_000)      # 최대 단일 100만
-tier_burst, base_burst = tier_with(30_000_000)     # 최대 단일 3천만
+tier_burst, base_burst = tier_with(SM.PHASE1A_BURST_TRADE_VALUE)  # 최대 단일 = 문턱
 tier_big, base_big = tier_with(100_000_000)        # 최대 단일 1억
 check("단일체결 작으면 가중 없음 (x1.0)",
       abs(tier_plain - base_plain) < 1e-6, f"{tier_plain:.3f} vs {base_plain:.3f}")
-check("3천만+ 단일체결 -> x1.2 가중",
+check("버스트 문턱+ 단일체결 -> x1.2 가중",
       abs(tier_burst - base_burst * SM.PHASE1A_TIER_BURST_MULT) < 1e-6,
       f"{tier_burst:.3f} vs {base_burst * 1.2:.3f}")
 check("1억+ 단일체결 -> x1.5 가중",
@@ -1096,7 +1101,7 @@ def thr_for(cond, losses=None):
         for v in losses:
             st.perf.record(SM.StrategyManager.cond_perf_key(cond), v)
     st.phase1b.start_watching("T")
-    feed(st.phase1b.trade_flow, "T", 3, 30_000_000)
+    feed(st.phase1b.trade_flow, "T", 3, SM.PHASE1A_BURST_TRADE_VALUE)
     ok, info = st.evaluate_1a_leading_strength("T", 10_000, 0.0, cond)
     return info.get("strength_threshold", 0)
 
