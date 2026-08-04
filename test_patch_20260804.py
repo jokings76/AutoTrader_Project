@@ -341,6 +341,42 @@ check("사유가 손절(트레일 아님)",
       str([r.get("exit_reason") for r in _Repo.sells])[:70])
 
 # ═════════════════════════════════════════════════════════
+print("\n[10-b] 회귀 방지 — 폴링 경로가 되돌림 대기를 덮어쓰지 않는다")
+# ═════════════════════════════════════════════════════════
+# 08-04 실거래로 발견한 실제 결함: 되돌림 대기를 틱 경로에만 붙였더니
+# on_condition_hit / watchlist_reentry 폴링이 _execute_buy를 직접 불러
+# 계획이 열린 직후 즉시 매수해버렸다. 036930은 트리거 133,100원에 대기
+# (목표 132,434)를 걸고 46초 뒤 폴링이 **133,600원**에 샀다 — 기다린 것보다
+# 더 비싸게 산 셈이고 계획은 0/2 트랜치로 시간초과됐다.
+s8 = build()
+setup(s8, "V1")
+trigger(s8, "V1", T)                     # 틱 경로가 계획을 연다
+check("[사전] 계획 존재, 미매수", "V1" in s8._entry_plans and "V1" not in s8.holdings)
+# 폴링 경로가 같은 종목을 평가 — 즉시 매수하면 안 된다
+s8._strength_since["V1"] = T - 5.0
+s8._evaluate_1a_pullback_entry(
+    "V1", "V1", 1, None, 10_000, 9_800, s8._now().time())
+check("폴링 경로가 대기 중 종목을 즉시 매수하지 않음", "V1" not in s8.holdings,
+      f"holdings={list(s8.holdings)}")
+check("계획은 그대로 유지됨(폴링이 지우지도 않음)", "V1" in s8._entry_plans)
+
+# 틱 경로가 아직 계획을 못 연 상태에서 폴링이 먼저 와도 즉시 매수는 안 된다
+s9 = build()
+setup(s9, "V2")
+s9._strength_since["V2"] = T - 5.0
+feed(s9.phase1b.trade_flow, "V2", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=T)
+s9._evaluate_1a_pullback_entry(
+    "V2", "V2", 1, None, 10_000, 9_800, s9._now().time())
+check("폴링이 먼저 와도 즉시매수가 아니라 대기 계획을 연다",
+      "V2" in s9._entry_plans and "V2" not in s9.holdings,
+      f"plans={list(s9._entry_plans)} holdings={list(s9.holdings)}")
+# 그 계획도 정상적으로 체결된다(경로가 달라도 진입 방식은 동일해야 한다)
+s9.phase1b.orderbook.update("V2", {"ask_prices": [9_950, 9_960, 9_970],
+                                   "ask_volumes": [3_000, 3_000, 3_000]})
+tick(s9, "V2", 128.0, T + 5.0, price=9_950, side="sell")
+check("폴링이 연 계획도 되돌림 도달 시 체결됨", "V2" in s9.holdings)
+
+# ═════════════════════════════════════════════════════════
 print("\n[11] 회귀 방지 — 청산 시 계획도 함께 정리")
 # ═════════════════════════════════════════════════════════
 s7 = build()

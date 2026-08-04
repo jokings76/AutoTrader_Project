@@ -846,8 +846,13 @@ s4._strength_since["FAST"] = _t - 5.0
 feed(s4.phase1b.trade_flow, "FAST", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=_t, span=1.0)
 s4.api.calls.clear()
 n = try_watchlist_reentry(s4, s4._now())
-check("무장된 종목은 재진입 스캔(백스톱)에서도 매수 성립",
-      n == 1 and "FAST" in s4.holdings, f"n={n}")
+# (2026-08-04) 폴링 경로도 즉시 사지 않고 **되돌림 대기 계획**을 연다.
+# 예전엔 여기서 바로 샀는데, 그러면 틱 경로가 걸어둔 대기를 폴링이
+# 덮어써서 대기가 통째로 무력화된다(08-04 실거래로 확인: 036930이
+# 트리거 133,100원에 대기를 걸고 46초 뒤 폴링이 133,600원에 매수).
+check("무장된 종목은 재진입 스캔(백스톱)에서도 진입 절차 진입(되돌림 대기)",
+      "FAST" in s4._entry_plans and "FAST" not in s4.holdings,
+      f"n={n} plans={list(s4._entry_plans)}")
 check("그 경로에서도 분봉 조회 없음",
       len([c for c in s4.api.calls if c[0] == "candles"]) == 0, str(s4.api.calls))
 
@@ -959,10 +964,11 @@ s._cond_names["FREE"] = "주도주상위"
 s._strength_since["FREE"] = time.time() - 5.0
 s._evaluate_1a_pullback_entry("FREE", "FREE", 1, None, 10_000, 9_800,
                               datetime(2026, 8, 3, 9, 30, 0).time())
-check("슬롯 여유 시 매수 성립", "FREE" in s.holdings)
+# (2026-08-04) 즉시매수 -> 되돌림 대기 계획 생성으로 바뀌었다.
+check("슬롯 여유 시 진입 절차 성립(되돌림 대기)", "FREE" in s._entry_plans)
 check("슬롯 여유 시 우선순위(tier) 계산을 아예 하지 않음 = 진입 지연 0",
-      tier_calls == ["FREE"], f"tier 호출: {tier_calls}")
-# ↑ entry_tier 기록용 1회만 (매수 확정 후), 판정용 호출은 0회
+      tier_calls == [], f"tier 호출: {tier_calls}")
+# ↑ 대기 단계에서는 tier를 조회할 이유가 없다(매수 확정 시점에 1회만 쓴다)
 
 # (b) 슬롯 만석 + 보유가 정체 상태 -> 교체
 s = build_strat(datetime(2026, 8, 3, 9, 30, 0))

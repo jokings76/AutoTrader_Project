@@ -2067,6 +2067,29 @@ class StrategyManager:
             self._note_reject(stock_code, self._entry_block_reason() or slot_msg)
             return False
 
+        # ── 되돌림 대기 계획이 살아 있으면 그쪽에 양보한다 (2026-08-04 수정) ──
+        # 이 경로(on_condition_hit / watchlist_reentry 폴링)는 틱 경로와 별개로
+        # 돌면서 _execute_buy를 직접 부른다. 되돌림 대기를 틱 경로에만 붙였더니
+        # **계획이 열린 직후 이 폴링이 즉시 매수해버려 대기가 통째로 무력화**됐다.
+        # 08-04 실거래로 확인: 036930은 트리거 133,100원에 계획(목표 132,434)을
+        # 걸어놓고 46초 뒤 폴링이 133,600원에 샀다 — 기다린 것보다 **더 비싸게**
+        # 산 것이고, 계획은 0/2 트랜치로 시간초과됐다. 004710도 동일 패턴.
+        if stock_code in self._entry_plans:
+            self._note_reject(stock_code, "되돌림 대기 중(계획 우선)")
+            return False
+
+        # 틱 경로가 아직 계획을 못 연 상태에서 여기로 먼저 들어올 수도 있다.
+        # 그 경우에도 즉시 사지 않고 동일하게 대기 계획을 연다 — 진입 방식이
+        # 경로에 따라 달라지면 사후 분석에서 원인 분리가 불가능해진다.
+        if ENTRY_PULLBACK_ENABLED and ENTRY_PULLBACK_TRANCHES:
+            px = info.get("current_price") or current_price
+            if px and px > 0:
+                self._open_entry_plan(
+                    stock_code, stock_name, phase, info, sub_strategy,
+                    self._cond_names.get(stock_code, ""), trigger_price=px,
+                )
+                return False
+
         self._execute_buy(stock_code, stock_name, phase, info, sub_strategy=sub_strategy)
         return True
 
