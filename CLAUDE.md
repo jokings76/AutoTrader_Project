@@ -1990,6 +1990,41 @@ claude --remote-control
   - 구문오류 0 / `import main` OK / 태스크 정의 20 = gather 등록 20 /
     STOP_SIGNAL 없음 / 스케줄러 08-05 08:59 Ready.
 
+- 2026-08-05 (08:30, **기동 29분 전 — 조건검색 거래소구분 치명 버그**) —
+  사용자가 HTS [0156] 조건검색식 **'대상'을 KRX -> 통합으로 변경**한 뒤
+  "문제 없는지 봐달라"고 요청. 그대로 기동했으면 **하루 종일 매수 0건**이었다.
+
+  - **원인**: `api/kiwoom_ws.py`의 조건검색 요청이 `stex_tp="K"`(KRX)로
+    하드코딩돼 있었다(`subscribe_condition` / `fetch_condition_snapshot` 2곳).
+    HTS에서 대상을 통합으로 바꾸면 조건식 자체가 통합 기준이 되는데,
+    KRX로 요청하면 **에러 없이 `return_code=0` + 0종목**이 돌아온다.
+    로그에 아무 오류도 안 남아 원인을 찾기가 매우 어려운 부류다.
+  - **실측 (08:33, 장 시작 전, HTS 대상=통합)**:
+    ```
+    seq=1 주도주상위   K -> 0종목 / N -> 0종목 / A -> 1종목 ['218410']  <- HTS 일치
+    seq=3 눌림목자동   K -> 0종목 / N -> 0종목 / A -> 1종목 ['336260']  <- HTS 일치
+    seq=4 종가베팅     K -> 0종목 / N -> 0종목 / A -> 2종목
+    ("0"/"1"/"2"/"3" 숫자값은 전부 0종목 — 이 API는 문자 코드를 쓴다)
+    ```
+  - **수정**: 모듈 상수 `CONDITION_STEX_TP = "A"` 신설, 두 함수의 기본값을
+    `None`으로 바꿔 이 상수를 참조하게 했다(한쪽만 고치는 사고 방지).
+    **HTS 대상을 KRX로 되돌리면 이 값도 `"K"`로 같이 되돌릴 것.**
+  - **주문/잔고는 건드리지 않았다** — 조건검색의 `stex_tp`와 주문의
+    `dmst_stex_tp`는 독립이다. 실측(08:35) `kt00018` 잔고조회는
+    `KRX`/`NXT` 둘 다 동일한 2종목을 반환했고 `SOR`은 rc=20(거래소구분 오류)이라
+    **`"KRX"` 유지가 안전**하다. 주문 4곳(`매수/매도/취소/잔고`)도 그대로 둔다.
+    ※ NXT까지 최선호가로 라우팅하려면 `SOR`을 검토할 수 있으나,
+      **실전 개장 직전에 주문 경로를 바꾸는 건 금지** — 검증 후로 이월.
+  - **[발견, 미수정] `kiwoom_ws.py:229`가 `item["jmcode"]`를 쓰는데 실제
+    응답 키는 `'9001'`이라 `ConditionManager.update_snapshot()`이 한 번도
+    호출된 적이 없다**(로그의 `스냅샷 매핑 처리 실패: 'jmcode'`가 그것).
+    try/except 안이라 스냅샷 자체는 정상 반환되고, `ConditionManager`의
+    상태를 읽는 코드가 **어디에도 없어** 사실상 죽은 코드다. 고치면 한 번도
+    실행된 적 없는 경로가 처음 돌게 되므로 개장 직전 수정은 보류했다.
+  - [검증] `test_live_20260805.py`에 **섹션 11 신설**(58 -> 63건) —
+    상수값/두 경로 공통 참조/주문측 KRX 유지를 못박는다.
+    7개 스위트 **814건 통과**(1건은 이관 플래그, 정상).
+
 \## 세션 이관 체크리스트 (2026-08-01 신설)
 
 새 세션(PC 터미널 / 모바일 원격 / 새 대화창 어디서든)이 이 프로젝트를
@@ -2421,6 +2456,7 @@ python -c "from config import settings as s; import core.strategy_manager as SM;
 
 | 대상 | 방법 |
 |---|---|
+| **조건검색 0종목** | HTS [0156]의 '대상'(KRX/통합)과 `kiwoom_ws.CONDITION_STEX_TP`가<br>**반드시 일치**해야 한다. 통합=`"A"` / KRX=`"K"`.<br>어긋나면 **에러 없이 0종목**이라 매수가 하루 종일 0건이 된다 |
 | **실전 -> 모의 복귀** | `config.ini`의 `IS_MOCK = true` + **모의 APP_KEY/SECRET_KEY로 교체**<br>(실전 키로는 모의 서버 토큰이 안 나온다). 백업: `AutoTrader_Project_backups/config.ini.mock.bak` |
 | **매수금액** | **3곳을 같이** 고칠 것 — `portfolio_optimizer.DEFAULT_BASE_AMOUNT`(실지배값) /<br>`config/phase_settings.py: position_amount` / `order_manager.BUY_AMOUNT_PER_STOCK`.<br>모의 원값은 `2_000_000` |
 | 예수금 필드 | `kiwoom_rest.get_orderable_amount`의 폴백 체인 첫 항목.<br>⚠️ `20/30/40/50/60stk_ord_alow_amt`는 **미수**라 절대 쓰지 말 것 |

@@ -36,6 +36,24 @@ REG_INTERVAL_SEC = 0.3
 # half-open(좀비 연결) 감지: 이 시간(초) 동안 무수신이면 연결 점검 → 재연결
 IDLE_TIMEOUT = 60
 
+# ─────────────────────────────────────────
+# 조건검색 거래소구분 (2026-08-05 신설)
+# ─────────────────────────────────────────
+# HTS [0156] 조건검색 화면의 '대상' 설정과 **반드시 일치해야 한다.**
+# 사용자가 대상을 KRX -> 통합으로 바꾸면 조건식 자체가 통합 기준이 되고,
+# 그 상태에서 stex_tp="K"(KRX)로 요청하면 **에러 없이 0종목**이 돌아온다.
+# 즉 조건검색이 하루 종일 빈 결과를 주고 매수가 0건이 되는데, 로그에는
+# 아무 오류도 안 남아 원인을 찾기가 매우 어렵다.
+#
+# 2026-08-05 08:33 실측 (HTS 대상=통합, 장 시작 전):
+#     seq=1 주도주상위  K/N -> 0종목  |  A -> 1종목 ['218410']  <- HTS와 일치
+#     seq=3 눌림목자동  K/N -> 0종목  |  A -> 1종목 ['336260']  <- HTS와 일치
+#     seq=4 종가베팅    K/N -> 0종목  |  A -> 2종목
+#   ("0"/"1"/"2"/"3" 같은 숫자값은 전부 0종목 — 이 API는 문자 코드를 쓴다)
+#
+# HTS 대상을 KRX로 되돌리면 이 값도 "K"로 같이 되돌릴 것.
+CONDITION_STEX_TP = "A"   # "A"=통합(KRX+NXT) / "K"=KRX / "N"=NXT
+
 
 class KiwoomWS:
     MOCK_URL = "wss://mockapi.kiwoom.com:10000/api/dostk/websocket"
@@ -142,11 +160,12 @@ class KiwoomWS:
     # ─────────────────────────────────────────
     # 3. 조건식 실시간 등록/해제
     # ─────────────────────────────────────────
-    async def subscribe_condition(self, seq: str, stex_tp: str = "K"):
+    async def subscribe_condition(self, seq: str, stex_tp: str = None):
         seq = str(seq)
         msg = {
             "trnm": "CNSRREQ", "seq": seq, "search_type": "1",
-            "stex_tp": stex_tp, "cont_yn": "N", "next_key": "",
+            "stex_tp": stex_tp or CONDITION_STEX_TP,
+            "cont_yn": "N", "next_key": "",
         }
         await self._send(msg)
         if seq not in self._subscribed_seqs:
@@ -165,7 +184,7 @@ class KiwoomWS:
     # 조건식 즉시 검색 (현재 진입 종목 스냅샷)
     # ─────────────────────────────────────────
     async def fetch_condition_snapshot(
-        self, seq: str, stex_tp: str = "K", timeout: int = 10, _retry: bool = True,
+        self, seq: str, stex_tp: str = None, timeout: int = 10, _retry: bool = True,
     ) -> list[str]:
         """조건식 즉시검색(search_type=0) 스냅샷 조회.
 
@@ -178,6 +197,7 @@ class KiwoomWS:
         return_code만 보고 return_msg는 확인하지 않아 이 실패를 조용히
         '0종목'으로 취급했다."""
         seq = str(seq)
+        stex_tp = stex_tp or CONDITION_STEX_TP
         await self._send({
             "trnm": "CNSRREQ", "seq": seq, "search_type": "0",
             "stex_tp": stex_tp, "cont_yn": "N", "next_key": "",

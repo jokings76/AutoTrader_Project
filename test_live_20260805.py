@@ -416,6 +416,36 @@ check("정의된 태스크가 전부 gather에 등록됨",
       f"정의 {len(defined)} / 등록 {len(registered)} / 차이 {defined ^ registered or '없음'}")
 
 # ═════════════════════════════════════════════════════════
+print("\n[11] 조건검색 거래소구분 — HTS '대상' 설정과 일치하는가")
+# ═════════════════════════════════════════════════════════
+# 2026-08-05: HTS 대상을 KRX -> 통합으로 바꾸자 stex_tp="K"가 **에러 없이
+# 0종목**을 반환했다. 그대로 기동했으면 하루 종일 매수 0건이었다.
+# 실측(08:33): seq=1/3/4 모두 K,N -> 0종목 / A -> HTS와 동일.
+from api.kiwoom_ws import CONDITION_STEX_TP
+import inspect as _insp
+
+check("CONDITION_STEX_TP가 통합('A')", CONDITION_STEX_TP == "A",
+      f"{CONDITION_STEX_TP!r} (HTS 대상=통합이면 'A', KRX면 'K')")
+
+_src_sub = _insp.getsource(KiwoomWS.subscribe_condition)
+_src_snap = _insp.getsource(KiwoomWS.fetch_condition_snapshot)
+check("실시간 등록이 상수를 쓴다 (KRX 하드코딩 아님)",
+      "CONDITION_STEX_TP" in _src_sub and '"K"' not in _src_sub)
+check("스냅샷 조회도 상수를 쓴다",
+      "CONDITION_STEX_TP" in _src_snap and 'stex_tp: str = "K"' not in _src_snap)
+check("두 경로가 같은 상수를 본다 (한쪽만 바뀌는 사고 방지)",
+      _src_sub.count("CONDITION_STEX_TP") >= 1
+      and _src_snap.count("CONDITION_STEX_TP") >= 1)
+
+# 주문/잔고의 거래소구분은 조건검색과 **독립**이다. 실측(08:35):
+#   kt00018 잔고조회 dmst_stex_tp=KRX/NXT 둘 다 동일한 2종목 반환,
+#   SOR은 rc=20(거래소구분 오류). 따라서 "KRX" 유지가 안전하다.
+_src_rest = open("api/kiwoom_rest.py", encoding="utf-8").read()
+check("주문/잔고는 dmst_stex_tp='KRX' 유지 (조건검색과 독립)",
+      _src_rest.count('"dmst_stex_tp": "KRX"') == 4,
+      f'{_src_rest.count(chr(34) + "dmst_stex_tp" + chr(34) + ": " + chr(34) + "KRX" + chr(34))}곳')
+
+# ═════════════════════════════════════════════════════════
 print("\n" + "=" * 62)
 print(f"통과 {len(PASS)}건 / 실패 {len(FAIL)}건   ({time.time() - T0:.1f}초)")
 if FAIL:
