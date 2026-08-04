@@ -42,6 +42,7 @@ def check(name, cond, detail=""):
 class _Repo:
     rows = []
     sells = []
+    updates = []
     @classmethod
     def find_holdings(cls): return []
     @classmethod
@@ -50,6 +51,9 @@ class _Repo:
     def insert_buy(cls, **kw): cls.rows.append(kw); return len(cls.rows)
     @classmethod
     def update_sell(cls, **kw): cls.sells.append(kw); return True
+    @classmethod
+    def update(cls, row_id, data):   # 분할매수 2차 평단가 갱신 (2026-08-04)
+        cls.updates.append({"id": row_id, **data}); return True
     @classmethod
     def add(cls, **kw): cls.rows.append(kw); return len(cls.rows)
     @classmethod
@@ -196,7 +200,13 @@ check("1.0초: 여전히 무장 아님(요구 1.5초)", "A001" not in s._armed_a
 
 burst(s, "A001", T0 + 3.5)
 tick(s, "A001", 135.0, T0 + 3.5)
-check("3초 연속 + 버스트 -> 매수 체결", "A001" in s.holdings)
+# (2026-08-04) 무장+버스트는 즉시매수가 아니라 **되돌림 대기 계획**을 연다.
+check("3초 연속 + 버스트 -> 되돌림 대기 계획 생성", "A001" in s._entry_plans)
+check("아직 매수 전(트리거는 국소 고점이므로 기다린다)", "A001" not in s.holdings)
+check("대기 중에도 슬롯 점유", s.occupied_slots() >= 1)
+# -0.5% 되돌림 도달 -> 1차 트랜치(50%) 체결
+tick(s, "A001", 130.0, T0 + 5.0, price=9_940, side="sell")
+check("-0.5% 되돌림 -> 1차 트랜치 매수 체결", "A001" in s.holdings)
 check("sub_strategy=1A", s.holdings["A001"]["sub_strategy"] == "1A")
 check("호가 두툼 -> 시장가 주문", s.order_manager.orders[-1]["style"] == "market")
 check("entry_strength 기록됨(청산 로직 전제)", s.holdings["A001"]["entry_strength"] > 0)
@@ -245,6 +255,8 @@ ob(s, "A002")
 tick(s, "A002", 130.0, T0 + 20)
 burst(s, "A002", T0 + 23.5)
 tick(s, "A002", 130.0, T0 + 23.5)
+# 되돌림 대기(2026-08-04) — -0.5% 닿아야 1차가 체결된다
+tick(s, "A002", 130.0, T0 + 24.5, price=9_940, side="sell")
 check("A002 매수됨", "A002" in s.holdings)
 s.holdings["A002"]["warmup_until"] = s._now() - timedelta(seconds=1)
 s._execute_sell("A002", 9_600, "손절")
@@ -272,6 +284,8 @@ check("08:59:30 — 장 시작 전이라 매수 안 됨", "P001" not in s.holdin
 clock.set(9, 0, 5)
 burst(s, "P001", T0 + 50)
 tick(s, "P001", 130.0, T0 + 50)
+check("09:00 직후 — 눌림목도 되돌림 대기 계획 생성", "P001" in s._entry_plans)
+tick(s, "P001", 130.0, T0 + 51, price=9_940, side="sell")
 check("09:00 직후 — 눌림목 매수 성립(구버전은 09:25까지 대기)",
       "P001" in s.holdings, f"holdings={list(s.holdings)}")
 check("1A와 시간창이 동일해짐", SM.PULLBACK_START == SM.GROUP_A_START)
@@ -306,6 +320,7 @@ ob(s2, "D001")
 tick(s2, "D001", 130.0, T0 + 60)
 burst(s2, "D001", T0 + 63.5)
 tick(s2, "D001", 130.0, T0 + 63.5)
+tick(s2, "D001", 130.0, T0 + 64.5, price=9_940, side="sell")  # 되돌림 체결
 check("10:30 이후 매수는 눌림 슬롯으로 들어감",
       s2.holdings.get("D001", {}).get("sub_strategy") == "1A_눌림",
       str(s2.holdings.get("D001", {}).get("sub_strategy")))
@@ -332,6 +347,7 @@ ob(s3b, "N002")
 tick(s3b, "N002", 130.0, T0 + 70)
 burst(s3b, "N002", T0 + 73.5, n=2, value=30_000_000)
 tick(s3b, "N002", 130.0, T0 + 73.5)
+tick(s3b, "N002", 130.0, T0 + 74.5, price=9_940, side="sell")  # 되돌림 체결
 check("점심에도 3천만원 x2건이면 정상 매수",
       "N002" in s3b.holdings, f"holdings={list(s3b.holdings)}")
 
@@ -353,6 +369,7 @@ ob(s5, "L001")
 tick(s5, "L001", 130.0, T0 + 80)
 burst(s5, "L001", T0 + 83.5)
 tick(s5, "L001", 130.0, T0 + 83.5)
+tick(s5, "L001", 130.0, T0 + 84.5, price=9_940, side="sell")  # 되돌림 체결
 check("14:45 — 아직 매수 가능", "L001" in s5.holdings)
 
 clk5.set(14, 51, 0)
@@ -407,6 +424,7 @@ ob(s5b, "L003")
 tick(s5b, "L003", 130.0, T0 + 95)
 burst(s5b, "L003", T0 + 98.5)
 tick(s5b, "L003", 130.0, T0 + 98.5)
+tick(s5b, "L003", 130.0, T0 + 99.5, price=9_940, side="sell")  # 되돌림 체결
 check("L003 매수됨(사전조건)", "L003" in s5b.holdings)
 clk5b.set(15, 10, 0)
 s5b.holdings["L003"]["warmup_until"] = s5b._now() - timedelta(seconds=1)
@@ -501,6 +519,7 @@ tick(s10, "E004", 130.0, T0 + 130)
 burst(s10, "E004", T0 + 133.5)
 try:
     tick(s10, "E004", 130.0, T0 + 133.5)
+    tick(s10, "E004", 130.0, T0 + 134.5, price=9_940, side="sell")  # 되돌림 체결
     ok_db = True
 except Exception:
     ok_db = False
@@ -556,6 +575,7 @@ for i in range(10):                       # 상한(6)보다 많이 시도
     tick(s13, c, 130.0, T0 + 400 + i * 10)
     burst(s13, c, T0 + 403.5 + i * 10)
     tick(s13, c, 130.0, T0 + 403.5 + i * 10)
+    tick(s13, c, 130.0, T0 + 404.5 + i * 10, price=9_940, side="sell")  # 되돌림 체결
     if c in s13.holdings:
         bought.append(c)
 check("공유 상한(MAX_HOLDINGS=6)을 넘겨 사지 않음",
@@ -872,8 +892,8 @@ check("[동기] 백테스트 강제청산", _DB.FORCE_CLOSE_HHMM == _FCT.replace
 
 # ═════════════════════════════════════════════════════════
 print("\n[21] 08-04 설정 조합 통합 — 바뀐 값들이 함께 굴러가는지")
-# 오늘 바꾼 것: PB창 09:00 / 무장 2초 / 본전스톱 OFF / 캡 4.0·2.5·6.0 /
-#              손절 워밍업 중 작동 / 점심계수 1.00
+# 오늘 바꾼 것: PB창 09:00 / 무장 1.5초 / 본전스톱 ON(2026-08-04 재활성화) /
+#              캡 4.0·2.5·6.0 / 손절 워밍업 중 작동 / 점심계수 1.00
 # 개별 검증은 test_patch_20260803.py가 하고, 여기선 **동시에** 태운다.
 
 # (1) 09:00 직후 눌림목 — 새 창 + 2초 무장으로 매수까지
@@ -886,6 +906,7 @@ tick(sN, "PB1", 130.0, TN + 1.0)
 check("1.0초에는 무장 전(요구 1.5초)", "PB1" not in sN._armed_at)
 burst(sN, "PB1", TN + 2.2)
 tick(sN, "PB1", 130.0, TN + 2.2)
+tick(sN, "PB1", 130.0, TN + 3.2, price=9_940, side="sell")  # 되돌림 체결
 check("09:02 눌림목이 1.5초 무장 + 버스트로 매수 (구버전: 창밖+3초 미달로 둘 다 불가)",
       "PB1" in sN.holdings, f"holdings={list(sN.holdings)}")
 check("눌림 전략으로 라우팅", sN.holdings["PB1"]["sub_strategy"] == "1A_눌림")
@@ -895,15 +916,15 @@ capN, lblN = sN._take_profit_cap(sN.holdings["PB1"])
 check("09:02 매수분 캡 = 개장초반 2.5%",
       abs(capN - SM.TAKE_PROFIT_CAP_EARLY) < 1e-9, f"{capN} ({lblN})")
 
-# (3) 본전스톱 OFF — +1% 찍고 되돌려도 팔지 않는다
+# (3) 본전스톱 ON(2026-08-04 재활성화) — +1% 찍고 되돌리면 본전에서 청산
 buyN = sN.holdings["PB1"]["buy_price"]
 armN = int(buyN * (1 + SM.BREAKEVEN_TRIGGER + SM.ROUND_TRIP_COST)) + 1
 cN.set(9, 5, 0)
 sN.holdings["PB1"]["warmup_until"] = cN.dt - timedelta(seconds=1)
 sN.on_price_update("PB1", armN)
-check("본전스톱 OFF — 무장 안 함", not sN.holdings["PB1"].get("breakeven_armed"))
+check("본전스톱 ON — 무장됨", sN.holdings["PB1"].get("breakeven_armed") is True)
 sN.on_price_update("PB1", buyN)
-check("본전스톱 OFF — 본전 복귀에도 보유 유지", "PB1" in sN.holdings)
+check("본전스톱 ON — 본전 복귀 시 청산", "PB1" not in sN.holdings)
 
 # (4) 손절은 워밍업 중에도 작동 (별도 포지션으로)
 sS, cS = build(datetime(2026, 8, 3, 9, 3, 0))

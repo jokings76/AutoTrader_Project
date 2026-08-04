@@ -151,6 +151,17 @@ def tick(strat, code, strength, at, price=10_000, side="buy", volume=10):
                     "volume": volume, "strength": strength}, now=at)
 
 
+def pullback_fill(strat, code, at, strength=130.0, base=10_000, depth=0.006):
+    """되돌림 대기 체결 (2026-08-04 신규 사양).
+
+    무장+버스트는 이제 즉시 매수가 아니라 '되돌림 대기 계획'만 연다.
+    트리거가 대비 -0.5%(1차)에 닿아야 실제 매수가 나가므로, 매수를 기대하는
+    테스트는 이 헬퍼로 되돌림 틱을 한 번 더 넣어줘야 한다.
+    """
+    strat.on_trade({"stock_code": code, "price": int(base * (1 - depth)),
+                    "side": "sell", "volume": 10, "strength": strength}, now=at)
+
+
 # ═════════════════════════════════════════════════════════
 print("\n[1] 평균 1틱 체결금액 (avg_trade_value)")
 # ═════════════════════════════════════════════════════════
@@ -349,6 +360,7 @@ check("무장 전(1초)엔 버스트가 있어도 매수 안 함", "T1" not in s
 
 feed(s.phase1b.trade_flow, "T1", 2, 30_000_000, now=t0 + 3.5, span=0.5)
 tick(s, "T1", 130.0, t0 + 3.5)
+pullback_fill(s, "T1", t0 + 4.5)   # -0.5% 되돌림 체결 (2026-08-04)
 check("무장(3초) + 버스트 -> 그 틱에서 즉시 매수", "T1" in s.holdings)
 check("진입 사유에 '틱즉시진입' 기록",
       "틱즉시진입" in (_Repo.rows[-1].get("entry_reason", "") if _Repo.rows else ""),
@@ -393,6 +405,7 @@ setup_candidate(s, "P1", cond="눌림목자동")
 tick(s, "P1", 130.0, t0)
 feed(s.phase1b.trade_flow, "P1", 2, 30_000_000, now=t0 + 3.5, span=0.5)
 tick(s, "P1", 130.0, t0 + 3.5)
+pullback_fill(s, "P1", t0 + 4.5)   # -0.5% 되돌림 체결 (2026-08-04)
 check("눌림목자동도 같은 트리거로 매수", "P1" in s.holdings)
 check("sub_strategy가 1A_눌림으로 기록",
       s.holdings.get("P1", {}).get("sub_strategy") == "1A_눌림",
@@ -407,6 +420,7 @@ setup_candidate(s, "P2", cond="눌림목자동")
 tick(s, "P2", 130.0, t0)
 feed(s.phase1b.trade_flow, "P2", 2, 30_000_000, now=t0 + 3.5, span=0.5)
 tick(s, "P2", 130.0, t0 + 3.5)
+pullback_fill(s, "P2", t0 + 4.5)   # -0.5% 되돌림 체결 (2026-08-04)
 check("눌림목이 09:10에도 매수됨 (구버전은 09:25까지 대기)",
       "P2" in s.holdings, f"holdings={list(s.holdings)}")
 check("매수 전략이 눌림으로 라우팅됨",
@@ -418,6 +432,7 @@ setup_candidate(s, "P3", cond="주도주상위")
 tick(s, "P3", 130.0, t0)
 feed(s.phase1b.trade_flow, "P3", 2, 30_000_000, now=t0 + 3.5, span=0.5)
 tick(s, "P3", 130.0, t0 + 3.5)
+pullback_fill(s, "P3", t0 + 4.5)   # -0.5% 되돌림 체결 (2026-08-04)
 check("1A는 09:10에도 매수 가능", "P3" in s.holdings)
 
 # 14:50 이후엔 둘 다 정지
@@ -434,6 +449,7 @@ setup_candidate(s, "D1", cond="주도주상위+눌림목자동")
 tick(s, "D1", 130.0, t0)
 feed(s.phase1b.trade_flow, "D1", 2, 30_000_000, now=t0 + 3.5, span=0.5)
 tick(s, "D1", 130.0, t0 + 3.5)
+pullback_fill(s, "D1", t0 + 4.5)   # -0.5% 되돌림 체결 (2026-08-04)
 check("중복 편입 10:00 -> 1A로 매수",
       s.holdings.get("D1", {}).get("sub_strategy") == "1A",
       str(s.holdings.get("D1", {}).get("sub_strategy")))
@@ -443,6 +459,7 @@ setup_candidate(s, "D2", cond="주도주상위+눌림목자동")
 tick(s, "D2", 130.0, t0)
 feed(s.phase1b.trade_flow, "D2", 2, 30_000_000, now=t0 + 3.5, span=0.5)
 tick(s, "D2", 130.0, t0 + 3.5)
+pullback_fill(s, "D2", t0 + 4.5)   # -0.5% 되돌림 체결 (2026-08-04)
 check("중복 편입 11:00 -> Pullback으로 매수",
       s.holdings.get("D2", {}).get("sub_strategy") == "1A_눌림",
       str(s.holdings.get("D2", {}).get("sub_strategy")))
@@ -466,6 +483,7 @@ s._opening_prices["S2"] = 9_000
 tick(s, "S2", 130.0, t0)
 feed(s.phase1b.trade_flow, "S2", 2, 30_000_000, now=t0 + 3.5, span=0.5)
 tick(s, "S2", 130.0, t0 + 3.5)
+pullback_fill(s, "S2", t0 + 4.5)   # -0.5% 되돌림 체결 (2026-08-04)
 check("눌림목엔 시가대비 보류를 적용하지 않음(되돌림을 사는 전략)",
       "S2" in s.holdings)
 
@@ -612,6 +630,7 @@ setup_candidate(s, "RG1")
 tick(s, "RG1", 130.0, t0)
 feed(s.phase1b.trade_flow, "RG1", 2, 30_000_000, now=t0 + 3.5, span=0.5)
 tick(s, "RG1", 130.0, t0 + 3.5)
+pullback_fill(s, "RG1", t0 + 4.5)   # -0.5% 되돌림 체결 (2026-08-04)
 check("구버전은 여기서 0건(폴링 대기) — 지금은 틱에서 즉시 매수",
       "RG1" in s.holdings)
 
@@ -660,6 +679,7 @@ setup_candidate(s, "DG1")
 tick(s, "DG1", 130.0, t0)
 feed(s.phase1b.trade_flow, "DG1", 2, 30_000_000, now=t0 + 3.5, span=0.5)
 tick(s, "DG1", 130.0, t0 + 3.5)
+pullback_fill(s, "DG1", t0 + 4.5)   # -0.5% 되돌림 체결 (2026-08-04)
 st = s._tick_entry_stats
 check("진단 카운터가 단계별로 집계됨",
       st["ticks"] >= 2 and st["armed"] == 1 and st["bought"] == 1, str(st))

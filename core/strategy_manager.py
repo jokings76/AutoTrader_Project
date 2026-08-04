@@ -543,9 +543,54 @@ TP_CAP_UPGRADED_MAX = 0.060         # 상향 시 목표 캡 (2026-08-03, 2.5% ->
 # 수치를 그대로 믿을 수는 없다. 모의투자로 실험한다는 사용자 판단에 따라
 # 우선 끄고, 켠 상태와 비교할 데이터를 모은다.
 # 되살리려면 이 플래그만 True로 바꾸면 된다(나머지 로직은 그대로 살아있다).
-BREAKEVEN_STOP_ENABLED = False
+# (2026-08-04 재활성화) 08-04 오전 실거래 대조 분석 결과, 조기확정 폐지로
+# 비워진 중간 안전판 자리를 아무것도 대신하지 못해 손절(-3%)까지 그대로
+# 밀리는 포지션이 급증(같은 09:00~09:40 창 기준 순손익 +165,345원 -> -427,200원,
+# 손절 0건 -> 5건). 사용자 지정으로 재활성화.
+BREAKEVEN_STOP_ENABLED = True
 BREAKEVEN_TRIGGER = 0.010           # 순 +1.0% 도달 시 무장
 BREAKEVEN_FLOOR = 0.000             # 무장 후 순수익이 이 값 아래로 떨어지면 청산
+
+# ── 되돌림 대기 분할매수 (2026-08-04 신규, 사용자 지정) ──────────
+# 08-04 틱 재생으로 확인된 사실: **버스트 트리거 시점은 국소 고점이다.**
+# 측정한 6건 전부가 트리거 후 60초 안에 되돌림을 겪었다(-0.45% ~ -1.78%).
+# 버스트는 정의상 "그 순간 열기가 가장 뜨거운 지점"이라 거기서 사면 구조적으로
+# 가장 비싸게 산다(동적캡 분석에서 진입강도가 300 상한으로 포화됐던 것과 같은 현상).
+#
+# 그래서 트리거 즉시 사지 않고 **되돌림을 기다렸다 산다.** 실측 비교:
+#   즉시매수     : +5분 -0.44% / +10분 +0.97%
+#   -0.5% 대기   : +5분 +0.03% / +10분 +1.64%  ← 6건 전부 체결(스킵 0건)
+#   -1.0% 대기   : +5분 +0.38% / +10분 +2.05%  (1건 스킵)
+# -0.5%를 1차로 쓰는 이유는 **표본이 전혀 안 바뀌는데(스킵 0) 진입가만 평균
+# +0.74% 개선**되기 때문이다 — 선택 편향이 없는 순수 개선이라 근거가 가장 깨끗하다.
+# 손실 거래도 같이 개선된다(빛과전자 -3.41%->-1.74%, 원익홀딩스 -3.33%->-2.63%):
+# 진입가가 낮아지면 -3% 손절선까지의 거리가 그만큼 늘어나기 때문.
+#
+# 2단 분할인 이유: -1.0%가 성과는 더 좋지만 6건 중 1건을 놓쳤다. 절반을 -0.5%에
+# 확보해 "안 오면 못 산다"를 없애고, 더 깊이 밀리면 나머지 절반이 평단가를 낮춘다.
+# ⚠️ 이 표본은 09:00~09:15 틱 아카이브 6건뿐이다. **되돌림 없이 그대로 솟는
+#    진짜 폭등을 놓칠 위험**은 이 표본(6/6 체결)으로는 측정되지 않았다.
+ENTRY_PULLBACK_ENABLED = True
+# (트리거가 대비 되돌림폭, 그 트랜치에 배정할 비중) — 비중 합은 1.0
+ENTRY_PULLBACK_TRANCHES = ((0.005, 0.5), (0.010, 0.5))
+ENTRY_PULLBACK_TIMEOUT_SEC = 120.0   # 이 시간 안에 안 오면 남은 트랜치는 포기
+
+# ── 분할매도 (2026-08-04 신규, 사용자 지정) ──────────────────
+# 체결강도 하락 신호의 예측 지평을 틱으로 실측한 결과:
+#   +1분 평균 -0.91% (6건 전부 음수 — 신호가 맞다)
+#   +3분 평균 +0.24% / +5분 평균 +0.22% (부호가 갈린다. 037070은 +6.5%)
+# 즉 이 신호가 잡아내는 건 **일시적 눌림이지 추세 종료가 아니다.** 그런데 기존
+# 코드는 이 1분짜리 신호로 포지션을 100% 영구청산했다 — 시간지평 불일치다.
+# 실제 손해: 매드업 +1.95%에 전량청산했으나 6분 뒤 +3.62%(MFE +4.39%),
+#            037070 +1.14%에 청산했으나 MFE +13.29% — 가용 수익의 44%/9%만 챙겼다.
+# 대응: 신호의 1분 정확도는 **절반을 좋은 가격에 빼는 데** 쓰고, 3~5분 불확실성은
+#       **절반을 남겨** 회복을 탄다. 어느 집단인지 미리 맞힐 필요가 없어진다.
+# 트레일 3%인 이유: '고점 도달 전 되돌림'을 실측하니 매드업 2.03% / 037070 3.90%였다.
+#       이보다 좁은 트레일은 본 상승 전에 반드시 털린다(08-03에 -0.5~1.0% 트레일이
+#       현행보다 나빴던 이유가 이것으로 설명된다).
+PARTIAL_EXIT_ENABLED = True
+PARTIAL_EXIT_FRACTION = 0.5      # 신호 시 이 비중만 먼저 매도
+PARTIAL_EXIT_TRAIL = 0.030       # 잔량은 고점 대비 이만큼 밀리면 청산
 
 # ── 손실 반등 하이브리드 매도 (2026-07-31 사용자 지정) ──────────
 # 손실 중인 종목이 저점에서 한 번 반등했는데 그 반등이 체결강도·거래량 어느
@@ -742,6 +787,13 @@ class StrategyManager:
         # 매수보류" 필터를 건너뛴다 — 모르는 값으로 매수를 막지 않는다.
         # 편입 시 _prearm_candidate()가 미리 채워준다.
 
+        # 되돌림 대기 분할매수 계획 (2026-08-04).
+        # {code: {"trigger_price","targets":[(price,frac),...],"deadline",
+        #         "sub_strategy","info","cond_name","phase","stock_name","filled"}}
+        # ⚠️ 이 dict에 있는 종목은 **슬롯을 점유한 것으로 센다**(occupied_slots).
+        #    안 그러면 대기하는 동안 다른 종목이 그 자리를 가져가, 되돌림이 와도
+        #    살 자리가 없어진다 — 대기 설계 자체가 무의미해진다.
+        self._entry_plans: dict[str, dict] = {}
         # 종목별 당일 매수 횟수(익절 후 재매수 상한용) + 동적캡 거래량확인 throttle
         self._buy_count_today: dict[str, int] = {}
         self._tp_vol_checked_at: dict[str, datetime] = {}
@@ -1055,6 +1107,14 @@ class StrategyManager:
     def tick(self):
         now = self._now()
 
+        # 되돌림 대기 계획 만료 회수 (2026-08-04).
+        # HALT 반환보다 **위**에 둔다 — 지수 HALT로 루프가 멈춰도 계획이 남아
+        # 슬롯을 영구 점유하면 안 된다. 만료 처리는 매수를 유발하지 않는다.
+        try:
+            self.expire_entry_plans()
+        except Exception:
+            logger.exception("되돌림 대기 계획 만료 처리 실패")
+
         # 지수 방어막 HALT면 루프 전체 정지
         if self._get_market_defense_mode() == "HALT":
             return
@@ -1322,8 +1382,12 @@ class StrategyManager:
         터지면 두 스레드가 같은 '마지막 한 칸'을 동시에 통과해 상한을 넘겨
         매수할 수 있다 — 여러 종목이 한꺼번에 터지는 상황이 바로 우선순위가
         필요한 상황이라, 순위 로직을 넣기 전에 이것부터 막아야 한다.
+
+        (2026-08-04) 되돌림 대기 중인 종목(_entry_plans)도 센다. 대기는 최대
+        ENTRY_PULLBACK_TIMEOUT_SEC(120초)이고 그 동안 자리를 비워두면 되돌림이
+        왔을 때 살 슬롯이 없다.
         """
-        return len(set(self.holdings) | self.pending)
+        return len(set(self.holdings) | self.pending | set(self._entry_plans))
 
     def count_holdings_by_strategy(self, sub: str) -> int:
         """해당 전략의 점유 슬롯 수 (보유 + 매수 진행중).
@@ -1383,6 +1447,12 @@ class StrategyManager:
         # ⚠️ 라벨에 초 수를 박지 말 것 — 상수를 바꿔도 안 따라와서 진단 알림이
         #    거짓말을 하게 된다(실제로 3.0->1.5초 변경 때 "3초 미달"로 남았다).
         ("강도 미무장(요구시간 미달)", ("미무장",)),
+        # (2026-08-04) 되돌림 대기 진입의 미체결 — 트리거는 걸렸는데 대기 시간
+        # 안에 목표 되돌림이 안 왔다는 뜻이다. '신호가 없다'와 전혀 다른 상태라
+        # 반드시 분리해야 한다: 이게 많으면 되돌림 폭이 과하거나 대기가 짧다는
+        # 신호이므로 ENTRY_PULLBACK_TRANCHES/TIMEOUT을 조정할 근거가 된다.
+        # ⚠️ 라벨에 수치를 박지 말 것(상수를 바꿔도 안 따라온다).
+        ("되돌림 미도달(대기 만료)", ("되돌림 미도달",)),
         ("체결강도 미달", ("체결강도 미달", "체결강도 지속 미달")),
         ("시가급등 보류", ("시가대비",)),
         ("저유동성 보류", ("저유동성",)),
@@ -2028,6 +2098,15 @@ class StrategyManager:
             price = parsed_trade.get("price")
             if price:
                 self.on_price_update(code, price)
+            # 분할매수 2차가 남아 있으면 여기서 끝내면 안 된다 (2026-08-04).
+            # 1차 트랜치가 체결되는 순간 종목은 holdings에 들어가는데, 그대로
+            # return하면 더 깊은 되돌림이 와도 2차가 영영 체결되지 않는다.
+            # (청산 판정은 위 on_price_update가 이미 수행했다.)
+            if code in self._entry_plans:
+                try:
+                    self._try_fill_entry_plan(code, price, now=now)
+                except Exception:
+                    logger.exception("[%s] 분할매수 2차 처리 실패", code)
             return
 
         # ── 틱 구동 진입 평가 (2026-08-02 신설) ────────────────────────
@@ -2343,6 +2422,10 @@ class StrategyManager:
         self._strength_since.pop(stock_code, None)
         self._armed_at.pop(stock_code, None)
         self._tick_entry_last.pop(stock_code, None)
+        # 되돌림 대기 계획도 같이 지운다 (2026-08-04) — 청산·감시해제된 종목의
+        # 계획이 남아 있으면 슬롯을 계속 점유하고, 나중에 되돌림이 닿으면
+        # 재매수차단을 우회해 매수가 나갈 수 있다.
+        self._entry_plans.pop(stock_code, None)
 
     def check_burst(self, stock_code: str, now: float = None,
                     now_dt: datetime = None) -> tuple[bool, dict]:
@@ -2533,6 +2616,13 @@ class StrategyManager:
         now = now if now is not None else _time_mod.time()
         self._tick_entry_stats["ticks"] += 1
 
+        # ── ⓪ 되돌림 대기 계획 처리 (2026-08-04) ──────────────────
+        # **아래 ① 게이트보다 먼저** 봐야 한다. 1차 트랜치가 체결되면 그 종목은
+        # holdings에 들어가는데, ①이 먼저 걸리면 2차 트랜치가 영영 체결되지 않는다.
+        if stock_code in self._entry_plans:
+            px = parsed_trade.get("price") or self._fresh_tick_price(stock_code)
+            return self._try_fill_entry_plan(stock_code, px, now=now)
+
         # ── ① 살 수 없는 상태면 즉시 종료 ─────────────────────────
         if stock_code in self.holdings or stock_code in self.pending:
             return False
@@ -2657,6 +2747,16 @@ class StrategyManager:
                 "[%s] %s ⚡ 틱 진입 트리거 [%s] — %s",
                 stock_code, stock_name, sub_strategy, info.get("reason", ""),
             )
+            # (2026-08-04) 트리거 시점은 국소 고점이다(실측 6/6이 60초 내 되돌림).
+            # 즉시 사지 않고 되돌림 대기 계획을 건다. 슬롯은 계획이 잡고 있으므로
+            # finally에서 pending을 놓아도 안전하다 — occupied_slots()가
+            # _entry_plans를 함께 센다.
+            if ENTRY_PULLBACK_ENABLED and ENTRY_PULLBACK_TRANCHES:
+                self._open_entry_plan(
+                    stock_code, stock_name, phase, info, sub_strategy,
+                    cond_name, trigger_price=current_price, now=now,
+                )
+                return False
             self._execute_buy(
                 stock_code, stock_name, phase, info, sub_strategy=sub_strategy
             )
@@ -2676,6 +2776,137 @@ class StrategyManager:
             # 여기서 반드시 회수한다(이미 지워졌으면 discard는 무해).
             self.pending.discard(stock_code)
             self._pending_strategy.pop(stock_code, None)
+
+    # ========================================
+    # 되돌림 대기 분할매수 (2026-08-04)
+    # ========================================
+    def _open_entry_plan(self, stock_code, stock_name, phase, info, sub_strategy,
+                         cond_name, trigger_price, now=None):
+        """트리거 시점에 '되돌림 대기' 계획을 건다(즉시 매수하지 않는다)."""
+        if stock_code in self._entry_plans or stock_code in self.holdings:
+            return
+
+        # 살 수 없는 종목에 계획을 걸면 그 슬롯이 ENTRY_PULLBACK_TIMEOUT_SEC
+        # 동안 묶인다(구버전은 _execute_buy 안에서 즉시 걸러져 pending이 바로
+        # 회수됐다). 진입 자체를 막는 값싼 게이트는 **계획 생성 전에** 본다.
+        entry_cap = self._entry_change_cap(sub_strategy)
+        try:
+            prev_close = self._get_prev_close(stock_code, trigger_price)
+        except Exception:
+            prev_close = None
+        if prev_close:
+            change_pct = (trigger_price - prev_close) / prev_close * 100
+            if change_pct > entry_cap:
+                self._note_reject(
+                    stock_code,
+                    f"등락률 상한 초과 (전일종가대비 +{change_pct:.1f}% > +{entry_cap:.0f}%)",
+                )
+                logger.info(
+                    "[%s] %s 되돌림 대기 생략: 전일종가대비 +%.1f%% (상한 +%.0f%%)",
+                    stock_code, stock_name, change_pct, entry_cap,
+                )
+                return
+
+        now = now if now is not None else _time_mod.time()
+        targets = []
+        for depth, frac in ENTRY_PULLBACK_TRANCHES:
+            targets.append({
+                "price": trigger_price * (1.0 - depth),
+                "frac": frac,
+                "depth": depth,
+                "filled": False,
+            })
+        self._entry_plans[stock_code] = {
+            "trigger_price": trigger_price,
+            "targets": targets,
+            "deadline": now + ENTRY_PULLBACK_TIMEOUT_SEC,
+            "sub_strategy": sub_strategy,
+            "info": dict(info),
+            "cond_name": cond_name,
+            "phase": phase,
+            "stock_name": stock_name,
+        }
+        logger.info(
+            "[%s] %s ⏳ 되돌림 대기 진입 — 트리거 %s원 / 목표 %s / %.0f초 내",
+            stock_code, stock_name, f"{trigger_price:,.0f}",
+            " · ".join(
+                f"-{t['depth']*100:.1f}%={t['price']:,.0f}({t['frac']*100:.0f}%)"
+                for t in targets
+            ),
+            ENTRY_PULLBACK_TIMEOUT_SEC,
+        )
+
+    def _try_fill_entry_plan(self, stock_code, price, now=None) -> bool:
+        """체결 틱마다 호출 — 목표가에 닿은 트랜치를 집행한다.
+
+        되돌림이 깊으면 한 틱에 두 트랜치가 같이 체결될 수 있다(정상).
+        """
+        plan = self._entry_plans.get(stock_code)
+        if not plan or not price or price <= 0:
+            return False
+        now = now if now is not None else _time_mod.time()
+
+        if now >= plan["deadline"]:
+            self._close_entry_plan(stock_code, "시간초과")
+            return False
+
+        filled_any = False
+        for t in plan["targets"]:
+            if t["filled"] or price > t["price"]:
+                continue
+            t["filled"] = True
+            already = stock_code in self.holdings
+            info = dict(plan["info"])
+            info["current_price"] = price
+            try:
+                self._execute_buy(
+                    stock_code, plan["stock_name"], plan["phase"], info,
+                    sub_strategy=plan["sub_strategy"],
+                    size_frac=t["frac"], add_to_position=already,
+                )
+            except Exception:
+                logger.exception("[%s] 분할매수 트랜치 체결 실패", stock_code)
+            if stock_code in self.holdings:
+                filled_any = True
+                self._tick_entry_stats["bought"] += 1
+            elif not already:
+                # 1차가 거부됐다(_execute_buy의 내부 게이트: 하드컷오프, 전략
+                # 불일치, 수량 0, 주문 실패...). 계획을 유지하면 살 수도 없는
+                # 종목이 슬롯을 타임아웃까지 붙잡는다 — 즉시 회수한다.
+                self._close_entry_plan(stock_code, "1차 매수 거부")
+                return False
+
+        if all(t["filled"] for t in plan["targets"]):
+            self._close_entry_plan(stock_code, "전량 체결")
+        return filled_any
+
+    def _close_entry_plan(self, stock_code, why=""):
+        plan = self._entry_plans.pop(stock_code, None)
+        if not plan:
+            return
+        done = sum(1 for t in plan["targets"] if t["filled"])
+        total = len(plan["targets"])
+        if done == 0:
+            # 되돌림이 안 와서 한 주도 못 샀다 — 놓친 것이므로 진단에 남긴다.
+            self._note_reject(
+                stock_code,
+                f"되돌림 미도달 ({ENTRY_PULLBACK_TIMEOUT_SEC:.0f}초 내 "
+                f"-{ENTRY_PULLBACK_TRANCHES[0][0]*100:.1f}% 미달)",
+            )
+        logger.info(
+            "[%s] ⏳ 되돌림 대기 종료(%s) — %d/%d 트랜치 체결",
+            stock_code, why, done, total,
+        )
+
+    def expire_entry_plans(self, now=None):
+        """틱이 끊긴 종목의 계획을 회수한다 — tick()에서 주기 호출.
+
+        _try_fill_entry_plan은 **그 종목의 틱이 와야** 돌기 때문에, 체결이
+        멈춘 종목의 계획은 여기서 정리하지 않으면 슬롯을 영구 점유한다.
+        """
+        now = now if now is not None else _time_mod.time()
+        for code in [c for c, p in self._entry_plans.items() if now >= p["deadline"]]:
+            self._close_entry_plan(code, "시간초과")
 
     def evaluate_1a_leading_strength(
         self, stock_code: str, current_price: float,
@@ -3288,7 +3519,16 @@ class StrategyManager:
         except Exception:
             return None
 
-    def _execute_buy(self, stock_code, stock_name, phase, info, sub_strategy):
+    def _execute_buy(self, stock_code, stock_name, phase, info, sub_strategy,
+                     size_frac: float = 1.0, add_to_position: bool = False):
+        """매수 실행.
+
+        size_frac: 이번에 살 비중(분할매수 트랜치). 1.0이면 기존과 동일.
+        add_to_position: True면 **이미 보유 중인 종목에 추가매수**해서 평단가를
+            갱신한다(분할매수 2차). False인데 이미 보유 중이면 호출부 실수이므로
+            아무것도 하지 않는다 — 예전 코드는 holdings[code]를 통째로 덮어써서
+            1차 매수분의 수량·평단가가 조용히 사라졌다.
+        """
         current_price = info["current_price"]
         # 실시간 체결가가 있으면 그걸 기준가로 쓴다 (2026-08-01) — info의
         # current_price는 1분봉 종가라 최대 1분 지연이고, 그 값으로 수량/
@@ -3394,9 +3634,20 @@ class StrategyManager:
         position_amount, opt_info = self._resolve_position_amount(
             stock_code, sub_strategy, tier=entry_tier
         )
+        # 분할매수 트랜치 — 전체 금액의 일부만 집행한다 (2026-08-04).
+        if size_frac != 1.0:
+            position_amount = position_amount * size_frac
         quantity = int(position_amount // current_price)
         if quantity < 1:
             logger.warning("[%s] %s 수량 0 -> skip", stock_code, stock_name)
+            return
+        if add_to_position and stock_code not in self.holdings:
+            # 1차가 실패했거나 이미 청산된 뒤 2차가 도착한 경우 —
+            # 신규 진입으로 취급하면 계획에 없던 매수가 된다.
+            logger.info("[%s] 분할 2차인데 보유 없음 -> skip", stock_code)
+            return
+        if not add_to_position and stock_code in self.holdings:
+            logger.warning("[%s] 이미 보유 중인데 신규매수 호출 -> skip", stock_code)
             return
 
         if opt_info:
@@ -3518,6 +3769,58 @@ class StrategyManager:
             # 길이를 안전하게 잘라서 그 클래스의 사고를 원천 차단한다.
             entry_reason = entry_reason[:250]
 
+            # ── 분할매수 2차: 기존 포지션에 합산 (2026-08-04) ──
+            # 새 trades 행을 만들지 않고 기존 행의 수량·평단가를 갱신한다.
+            # 행 하나 = 한 왕복이라는 규약을 유지해야 손익 집계가 어긋나지 않는다.
+            if add_to_position:
+                prev = self.holdings.get(stock_code)
+                if not prev:
+                    logger.warning("[%s] 2차 체결했으나 포지션 소실 -> 보정 불가", stock_code)
+                    return
+                prev_qty = int(prev.get("qty", prev.get("buy_quantity")) or 0)
+                new_qty = prev_qty + quantity
+                new_avg = (
+                    (prev["buy_price"] * prev_qty + fill_price * quantity) / new_qty
+                    if new_qty else fill_price
+                )
+                prev["buy_price"] = new_avg
+                prev["buy_quantity"] = new_qty
+                prev["qty"] = new_qty
+                prev["tranches_filled"] = int(prev.get("tranches_filled", 1)) + 1
+                # 저점/고점 추적 기준도 새 평단가에 맞춰 재설정하지 않는다 —
+                # 이 값들은 '가격' 이력이지 손익 기준이 아니다.
+                if prev.get("trade_id") is not None:
+                    try:
+                        TradeRepository.update(prev["trade_id"], {
+                            "buy_price": new_avg,
+                            "buy_quantity": new_qty,
+                            "buy_amount": new_avg * new_qty,
+                        })
+                    except Exception as e:
+                        logger.exception(
+                            "[%s] 분할 2차 DB 갱신 실패 (포지션은 정상): %s", stock_code, e
+                        )
+                logger.info(
+                    "BUY(분할 %d차) [%s] %s %d주 @ %s원 -> 평단 %s원 / 총 %d주",
+                    prev["tranches_filled"], stock_code, stock_name, quantity,
+                    f"{fill_price:,}", f"{new_avg:,.0f}", new_qty,
+                )
+                SystemEventRepository.log(
+                    "BUY_ADD",
+                    f"{stock_code} {stock_name} +{quantity}주 @ {fill_price:,}원 "
+                    f"-> 평단 {new_avg:,.0f}원 총 {new_qty}주",
+                    "INFO",
+                )
+                _notify(
+                    f"분할 매수 {prev['tranches_filled']}차 [{sub_strategy}]\n"
+                    f"종목: {stock_name} ({stock_code})\n"
+                    f"수량: +{quantity}주 @ {fill_price:,}원\n"
+                    f"평단: {new_avg:,.0f}원 / 총 {new_qty}주",
+                    target="order",
+                )
+                self._last_buy_at = self._now()
+                return
+
             # 매수 주문은 이미 체결됨 — DB 기록이 실패해도 포지션 추적(self.holdings)은
             # 반드시 이어져야 하므로 insert_buy 예외가 위로 전파되지 않게 막는다.
             try:
@@ -3543,6 +3846,10 @@ class StrategyManager:
                 "trade_id": trade_id,
                 "buy_price": fill_price,
                 "buy_quantity": quantity,
+                # qty = 현재 잔량. 부분매도(2026-08-04)가 이 값을 줄인다.
+                # buy_quantity는 '총 매수량'으로 남겨 손익 기준을 유지한다.
+                "qty": quantity,
+                "tranches_filled": 1,
                 "buy_time": self._now(),
                 "stock_name": stock_name,
                 "strategy_phase": phase,
@@ -3766,6 +4073,28 @@ class StrategyManager:
                         f"본전스톱 (고점 순+{pos.get('breakeven_peak', 0.0)*100:.2f}% "
                         f"-> 현재 순{net_rate*100:+.2f}%)"
                     )
+
+        # 1-c) 분할매도 잔량 트레일 (2026-08-04) — 동적캡 1차(50%)가 나간
+        # 포지션만 대상. 폭이 PARTIAL_EXIT_TRAIL(3%)로 넓은 이유는 '고점 도달 전
+        # 되돌림'을 실측했더니 매드업 2.03% / 037070 3.90%였기 때문이다 —
+        # 이보다 좁으면 본 상승 전에 털린다(08-03에 -0.5~1.0% 트레일이 현행보다
+        # 나빴던 원인). 고점은 계속 올라가므로 오르는 동안엔 절대 발동하지 않는다.
+        if (
+            exit_reason is None
+            and pos.get("partial_exited")
+            and PARTIAL_EXIT_TRAIL > 0
+        ):
+            peak = max(
+                float(pos.get("trail_peak") or 0.0),
+                float(pos.get("highest_price") or 0.0),
+                float(current_price),
+            )
+            pos["trail_peak"] = peak
+            if peak > 0 and (peak - current_price) / peak >= PARTIAL_EXIT_TRAIL:
+                exit_reason = (
+                    f"분할 잔량 트레일 (고점 {peak:,.0f} 대비 "
+                    f"-{(peak - current_price) / peak * 100:.2f}%, 순 {net_rate*100:+.2f}%)"
+                )
 
         # 2) 익절 — 전 전략 flat 익절캡. (2026-08-02) 트레일링 분기는 1L
         # 전용이었고 1L 삭제로 도달 불가가 되어 함께 제거했다.
@@ -4038,11 +4367,42 @@ class StrategyManager:
                     f"체결강도 {entry_s:.0f}->{cur_s:.0f}, 거래량 x{vol_ratio:.2f}, "
                     f"순 {net_rate:+.2f}% — 손절 대기 대신 손실 축소)"
                 )
-            else:
-                reason = (
-                    f"동적캡 즉시매도 (체결강도 {entry_s:.0f}->{cur_s:.0f}, "
-                    f"거래량 x{vol_ratio:.2f}, 순 {net_rate:+.2f}%)"
-                )
+                # 손실반등은 **전량** 청산 유지 (2026-08-04).
+                # 분할은 '익절을 놓치지 않기' 위한 장치인데, 이 경로는 애초에
+                # 손실을 -3% 손절 전에 줄이려는 리스크 장치다. 절반을 남기면
+                # 그 방어가 절반으로 약해진다 — 성격이 반대라 적용하지 않는다.
+                self._execute_sell(code, price, reason)
+                continue
+
+            # ── 동적캡(익절) 경로: 분할매도 (2026-08-04 사용자 지정) ──
+            # 신호는 +1분 예측력만 검증됐다(6건 전부 음수, 평균 -0.91%).
+            # 3~5분 뒤엔 부호가 갈리므로(037070 +6.5%) 전량청산은 과잉대응이다.
+            # 절반은 지금 좋은 가격에 빼고, 절반은 트레일에 맡겨 추세를 남긴다.
+            reason = (
+                f"동적캡 즉시매도 (체결강도 {entry_s:.0f}->{cur_s:.0f}, "
+                f"거래량 x{vol_ratio:.2f}, 순 {net_rate:+.2f}%)"
+            )
+            remaining = int(pos.get("qty", pos.get("buy_quantity")) or 0)
+            if (
+                PARTIAL_EXIT_ENABLED
+                and not pos.get("partial_exited")
+                and remaining >= 2          # 1주는 쪼갤 수 없다
+            ):
+                half = max(1, int(remaining * PARTIAL_EXIT_FRACTION))
+                if half < remaining:        # 반올림으로 전량이 되면 의미가 없다
+                    self._execute_sell(
+                        code, price,
+                        reason + f" — 분할 1차 {int(PARTIAL_EXIT_FRACTION*100)}%"
+                        f" (잔량은 고점대비 {PARTIAL_EXIT_TRAIL*100:.1f}% 트레일)",
+                        sell_qty=half,
+                    )
+                    # 잔량 트레일 기준 고점을 지금 시점으로 고정한다.
+                    p = self.holdings.get(code)
+                    if p is not None:
+                        p["trail_peak"] = max(
+                            float(p.get("highest_price") or price), float(price)
+                        )
+                    continue
             self._execute_sell(code, price, reason)
 
     def _is_loss_rebound_exit(self, pos: dict, price: float, now_dt) -> bool:
@@ -4101,24 +4461,48 @@ class StrategyManager:
             return TAKE_PROFIT_CAP_PULLBACK, "눌림"
         return TAKE_PROFIT_CAP, "기본"
 
-    def _execute_sell(self, stock_code, current_price, exit_reason):
+    def _execute_sell(self, stock_code, current_price, exit_reason, sell_qty=None):
+        """포지션 청산. sell_qty를 주면 **부분매도**(2026-08-04 신규).
+
+        부분매도 설계 — DB 정합성이 핵심이다:
+          trades 행 하나가 곧 '한 번의 왕복'이다. 부분매도마다 update_sell을
+          부르면 status가 'closed'로 바뀌고 남은 수량이 어느 행에도 안 남는다.
+          그래서 **중간 매도는 메모리에만 누적**하고(pos["_realized_*"]),
+          포지션이 완전히 닫히는 순간 한 번만 update_sell을 부른다 —
+          이때 수량은 원래 전량, 가격은 **수량가중 평균 매도가**를 넘긴다.
+          결과적으로 행 하나에 그 포지션의 총 손익이 정확히 남고,
+          update_sell의 matched_buy_amount 계산(2026-07-30 수정분)과도 어긋나지 않는다.
+          CLAUDE.md 이월과제 18번(부분매도 시 buy_quantity 미반영)도 이 방식이면
+          애초에 발생하지 않는다 — buy_quantity를 건드리지 않기 때문이다.
+        """
         pos = self.holdings.get(stock_code)
         if not pos or stock_code in self.pending:
             return
         if stock_code in self.sell_blocked:
             return
 
+        remaining = int(pos.get("qty", pos.get("buy_quantity")) or 0)
+        if remaining <= 0:
+            return
+        if sell_qty is None:
+            quantity = remaining
+        else:
+            quantity = max(0, min(int(sell_qty), remaining))
+            if quantity <= 0:
+                return
+        is_partial = quantity < remaining
+
         logger.info(
-            "청산 트리거 [%s] %s | 사유: %s | 현재가 %s",
+            "청산 트리거 [%s] %s | 사유: %s | 현재가 %s%s",
             stock_code,
             pos.get("stock_name", ""),
             exit_reason,
             f"{current_price:,}",
+            f" | 부분매도 {quantity}/{remaining}주" if is_partial else "",
         )
 
         self.pending.add(stock_code)
         try:
-            quantity = pos.get("qty", pos.get("buy_quantity"))
             # 매도는 시장가 (2026-08-01) — 지정가 미체결 시 포지션이 봇의 관리
             # 대상에서 영구 이탈하는 구멍이 있었다(order_manager.sell 주석 참고).
             # 시장가가 거부되면 검증된 지정가로 1회 폴백해서, 새 주문 방식 때문에
@@ -4173,14 +4557,58 @@ class StrategyManager:
             self.sell_fail_count.pop(stock_code, None)
             self.sold_at[stock_code] = self._now()
 
+            # 부분매도 누적 (2026-08-04) — DB에는 아직 쓰지 않는다.
+            pos["_realized_qty"] = int(pos.get("_realized_qty", 0)) + quantity
+            pos["_realized_amount"] = (
+                float(pos.get("_realized_amount", 0.0)) + current_price * quantity
+            )
+
+            if is_partial:
+                # 포지션을 유지한 채 수량만 줄인다. DB 갱신은 완전 청산 시 1회.
+                pos["qty"] = remaining - quantity
+                pos["partial_exited"] = True
+                net_profit_part = self._net_profit(
+                    pos["buy_price"], current_price, quantity
+                )
+                self._daily_realized += net_profit_part
+                net_rate_part = self._net_rate(pos["buy_price"], current_price) * 100
+                logger.info(
+                    "SELL(부분) [%s] %s %d주 @ %s원 -> %s | 순손익 %s원 (순 %.2f%%) "
+                    "| 잔량 %d주",
+                    stock_code, pos.get("stock_name", ""), quantity,
+                    f"{current_price:,}", exit_reason,
+                    f"{net_profit_part:+,.0f}", net_rate_part, pos["qty"],
+                )
+                SystemEventRepository.log(
+                    "SELL_PARTIAL",
+                    f"{stock_code} {quantity}주 @ {current_price:,}원 | {exit_reason} "
+                    f"| 잔량 {pos['qty']}주",
+                    "INFO",
+                )
+                _notify(
+                    f"부분 매도 [{pos.get('sub_strategy', '?')}]\n"
+                    f"종목: {pos.get('stock_name', '')} ({stock_code})\n"
+                    f"수량: {quantity}주 @ {current_price:,}원 (잔량 {pos['qty']}주)\n"
+                    f"순손익: {net_profit_part:+,.0f}원 (순 {net_rate_part:+.2f}%)\n"
+                    f"사유: {exit_reason}",
+                    target="order",
+                )
+                return
+
+            # ── 여기부터는 완전 청산 ──
+            # DB에는 이 포지션의 **전체 왕복**을 한 행으로 남긴다.
+            # 부분매도가 있었으면 수량가중 평균 매도가로 환산해야 손익이 맞다.
+            total_qty = int(pos["_realized_qty"])
+            avg_sell_price = pos["_realized_amount"] / total_qty if total_qty else current_price
+
             # 매도 주문은 이미 체결됨 — DB 기록이 실패(또는 trade_id 없음)해도
             # 아래 포지션 정리(self.holdings 제거)는 반드시 이어져야 한다.
             if pos.get("trade_id") is not None:
                 try:
                     TradeRepository.update_sell(
                         trade_id=pos["trade_id"],
-                        sell_price=current_price,
-                        sell_quantity=quantity,
+                        sell_price=avg_sell_price,
+                        sell_quantity=total_qty,
                         exit_reason=exit_reason,
                     )
                 except Exception as e:
@@ -4196,13 +4624,22 @@ class StrategyManager:
                     stock_code,
                 )
 
-            # 순손익 (수수료/세금 차감)
-            net_profit = self._net_profit(pos["buy_price"], current_price, quantity)
-            self._daily_realized += net_profit  # MDD 누적
-            gross_rate = self._gross_rate(pos["buy_price"], current_price) * 100
-            net_rate = self._net_rate(pos["buy_price"], current_price) * 100
+            # 순손익 (수수료/세금 차감).
+            # 이번에 판 수량만 MDD에 더한다 — 앞선 부분매도분은 그때 이미 더했다.
+            net_profit_last = self._net_profit(
+                pos["buy_price"], current_price, quantity
+            )
+            self._daily_realized += net_profit_last  # MDD 누적(이번 체결분만)
+            # 표시/성과기록은 **포지션 전체**(부분매도 포함) 기준이어야
+            # 사후 분석과 전략성과 축소추정이 왜곡되지 않는다.
+            net_profit = self._net_profit(
+                pos["buy_price"], avg_sell_price, total_qty
+            )
+            gross_rate = self._gross_rate(pos["buy_price"], avg_sell_price) * 100
+            net_rate = self._net_rate(pos["buy_price"], avg_sell_price) * 100
             stock_name = pos["stock_name"]
             sub = pos.get("sub_strategy", "?")
+            was_partial = bool(pos.get("partial_exited"))
             del self.holdings[stock_code]
             # 틱 진입 상태 초기화 (2026-08-02) — 이걸 빼먹으면 매수 전에 켜둔
             # 강도 타이머가 그대로 남아, 재매수 가능해진 순간 "연속 유지"가
@@ -4258,8 +4695,12 @@ class StrategyManager:
             emoji = "+" if net_profit > 0 else "-"
             _notify(
                 f"매도 체결 [{sub}] ({emoji})\n종목: {stock_name} ({stock_code})\n"
-                f"수량: {quantity}주 @ {current_price:,}원\n"
-                f"순손익: {net_profit:+,.0f}원 (순 {net_rate:+.2f}%, 가격 {gross_rate:+.2f}%)\n"
+                f"수량: {quantity}주 @ {current_price:,}원"
+                + (
+                    f"\n(분할매도 합산 {total_qty}주, 평균 매도가 {avg_sell_price:,.0f}원)"
+                    if was_partial else ""
+                )
+                + f"\n순손익: {net_profit:+,.0f}원 (순 {net_rate:+.2f}%, 가격 {gross_rate:+.2f}%)\n"
                 f"사유: {exit_reason}\n재매수 차단: {int(REBUY_COOLDOWN.total_seconds()/60)}분"
             )
         finally:

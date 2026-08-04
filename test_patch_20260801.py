@@ -715,13 +715,40 @@ feed(s.phase1b.trade_flow, "INT1", 2, 30_000_000, now=t0 + 3.5, span=1.0)
 s.on_trade({"stock_code": "INT1", "price": 10_000, "side": "buy",
             "volume": 3_000, "strength": 130.0}, now=t0 + 3.5)
 check("3초 연속 유지 -> 무장 성립", "INT1" in s._armed_at)
-check("무장 + 버스트 -> 그 틱에서 즉시 매수(폴링 대기 없음)",
-      "INT1" in s.holdings, f"holdings={list(s.holdings)}")
+# (2026-08-04) 무장+버스트는 이제 **즉시 매수가 아니라 되돌림 대기 계획**을 연다.
+# 트리거 시점이 국소 고점이라는 실측(6/6이 60초 내 되돌림) 때문이다.
+check("무장 + 버스트 -> 되돌림 대기 계획 생성(즉시매수 아님)",
+      "INT1" in s._entry_plans and "INT1" not in s.holdings,
+      f"plans={list(s._entry_plans)} holdings={list(s.holdings)}")
+check("대기 중에도 슬롯은 점유(다른 종목이 자리를 뺏지 못함)",
+      s.occupied_slots() >= 1)
+# -0.5% 되돌림이 오면 1차 트랜치(50%)가 체결된다
+s.on_trade({"stock_code": "INT1", "price": 9_940, "side": "sell",
+            "volume": 10, "strength": 120.0}, now=t0 + 5.0)
+check("-0.5% 도달 -> 1차 트랜치 체결", "INT1" in s.holdings,
+      f"holdings={list(s.holdings)}")
+check("1차는 절반만 — tranches_filled=1",
+      s.holdings["INT1"].get("tranches_filled") == 1)
 check("매수 방식이 호가 두께에 따라 시장가로 선택됨",
       s.order_manager.orders[-1]["style"] == "market")
 check("sub_strategy가 1A로 기록", s.holdings["INT1"]["sub_strategy"] == "1A")
 check("entry_strength 기록(동적캡/슬롯교체 전제조건)",
       s.holdings["INT1"]["entry_strength"] > 0)
+# -1.0%까지 더 밀리면 2차가 붙어 평단가가 낮아진다.
+# 호가창도 같이 내려야 실제와 같다 — 체결가(ref_price)는 매도1호가에서 오므로,
+# 호가를 그대로 두면 2차도 같은 값에 체결돼 평단 변화를 관측할 수 없다.
+_avg1 = s.holdings["INT1"]["buy_price"]
+_q1 = s.holdings["INT1"]["qty"]
+s.phase1b.orderbook.update("INT1", {"ask_prices": [9_890, 9_900, 9_910],
+                                    "ask_volumes": [500, 500, 500]})
+s.on_trade({"stock_code": "INT1", "price": 9_890, "side": "sell",
+            "volume": 10, "strength": 118.0}, now=t0 + 6.0)
+check("-1.0% 도달 -> 2차 트랜치 체결(추가매수)",
+      s.holdings["INT1"].get("tranches_filled") == 2)
+check("2차 체결로 수량이 늘어남", s.holdings["INT1"]["qty"] > _q1)
+check("평단가가 1차보다 낮아짐", s.holdings["INT1"]["buy_price"] < _avg1,
+      f"{_avg1} -> {s.holdings['INT1']['buy_price']}")
+check("전량 체결되면 계획이 닫힘", "INT1" not in s._entry_plans)
 
 # 강도가 100 밑으로 떨어지면 타이머가 리셋되는지 (별도 종목으로 확인)
 s2 = build_strat(datetime(2026, 8, 3, 9, 7, 0))

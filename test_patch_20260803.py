@@ -142,53 +142,53 @@ check("상향 목표캡 6.0% (구 2.5%)", abs(SM.TP_CAP_UPGRADED_MAX - 0.060) < 
 check("기본캡 != 상향캡 (같으면 결함 ① 재발)",
       abs(SM.TAKE_PROFIT_CAP - SM.TP_CAP_UPGRADED_MAX) > 1e-9)
 
-print("\n[2] 본전스톱 — 현재 OFF (2026-08-03 저녁, 백테스트 근거로 비활성)")
-# 도입 당일 저녁 재생 결과 개장 구간에서 오히려 손해였다(끔 -0.177% vs
-# +1.0% -0.325%). 다만 시뮬레이션 진입에 무장 게이트가 빠져 있어 수치를 그대로
-# 믿을 수는 없다 -> 플래그로 끄고 로직은 보존한다.
-# 이 섹션은 (a) 기본값이 OFF인지 (b) **켰을 때 로직이 여전히 정상인지**를
+print("\n[2] 본전스톱 — 현재 ON (2026-08-04 재활성화)")
+# 도입 당일 저녁엔 재생 결과(무장 게이트 없는 약식 시뮬레이션)가 나빠서 껐었다.
+# 08-04 오전 실거래 대조 분석(같은 09:00~09:40 창) 결과 조기확정 폐지로
+# 비워진 중간 안전판을 아무것도 대신하지 못해 순손익 +165,345원 -> -427,200원,
+# 손절 0건 -> 5건으로 악화 — 사용자 지정으로 재활성화.
+# 이 섹션은 (a) 기본값이 ON인지 (b) **껐을 때도 로직이 여전히 정상인지**를
 # 둘 다 확인한다. 로직이 썩으면 되살릴 때 조용히 깨지기 때문이다.
-check("본전스톱 기본값 OFF", SM.BREAKEVEN_STOP_ENABLED is False)
+check("본전스톱 기본값 ON", SM.BREAKEVEN_STOP_ENABLED is True)
 check("무장 지점 상수는 보존(순 +1.0%)", abs(SM.BREAKEVEN_TRIGGER - 0.010) < 1e-9)
 check("바닥 상수도 보존(본전 0%)", abs(SM.BREAKEVEN_FLOOR - 0.0) < 1e-9)
 
 px_arm = int(10_000 * (1 + SM.BREAKEVEN_TRIGGER + SM.ROUND_TRIP_COST)) + 1
 
-# --- OFF 상태: +1% 찍고 되돌려도 본전스톱으로 팔지 않는다 ---
+# --- ON 상태(기본값): +1% 찍고 되돌리면 본전스톱으로 청산 ---
 s = build()
 pos = put_pos(s)
 s.on_price_update("000001", px_arm)
-check("OFF면 무장 자체를 하지 않음", not pos.get("breakeven_armed"))
+check("ON이면 순+1% 도달 시 무장", pos.get("breakeven_armed") is True)
 s.on_price_update("000001", 10_000)
-check("OFF면 본전 이탈에도 청산 안 함", not sold(s))
+check("ON이면 본전 이탈 시 청산", sold(s))
+check("청산 사유가 본전스톱",
+      any("본전스톱" in (r.get("exit_reason") or "") for r in _Repo.sells),
+      str([r.get("exit_reason") for r in _Repo.sells])[:70])
 
-# 구버전 '익절 조기확정'은 플래그와 무관하게 완전히 제거돼야 한다.
-check("구버전의 '조기확정 매도'가 더 이상 없음", not sold(s))
+# 구버전 '익절 조기확정' 문자열은 플래그와 무관하게 코드에서 완전히 제거돼야 한다.
 check("조기확정 문자열이 코드에서 제거됨",
       "익절 조기확정" not in open(
           "core/strategy_manager.py", encoding="utf-8").read().split(
               "# (2026-08-03) rising is False")[0].split("exit_reason = (")[-1])
 
-# --- ON으로 되돌렸을 때 로직이 살아있는지 (플래그만 임시 전환) ---
-SM.BREAKEVEN_STOP_ENABLED = True
+# --- OFF로 껐을 때도 로직이 살아있는지 (플래그만 임시 전환) ---
+SM.BREAKEVEN_STOP_ENABLED = False
 try:
     s2 = build()
     p2 = put_pos(s2, code="000002")
     s2.on_price_update("000002", px_arm)
-    check("[ON] 순 +1% 도달 시 무장 (매도 안 함)",
-          p2.get("breakeven_armed") is True and not sold(s2, "000002"))
+    check("[OFF] 무장 자체를 하지 않음", not p2.get("breakeven_armed"))
     s2.on_price_update("000002", 10_000)
-    check("[ON] 무장 후 본전 이탈 시 청산", sold(s2, "000002"))
-    check("[ON] 청산 사유가 본전스톱",
-          any("본전스톱" in (r.get("exit_reason") or "") for r in _Repo.sells),
-          str([r.get("exit_reason") for r in _Repo.sells])[:70])
-    # 무장 전에는 발동하지 않는다(진입 직후 흔들림에 잘리면 안 됨)
+    check("[OFF] 본전 이탈에도 청산 안 함", not sold(s2, "000002"))
+    # 무장 전에는 발동하지 않는다(진입 직후 흔들림에 잘리면 안 됨) — ON 상태로 확인
+    SM.BREAKEVEN_STOP_ENABLED = True
     s3 = build()
     put_pos(s3, code="000003b")
     s3.on_price_update("000003b", 9_990)
     check("[ON] 무장 전에는 본전스톱 미발동", not sold(s3, "000003b"))
 finally:
-    SM.BREAKEVEN_STOP_ENABLED = False   # 원상복구 — 이후 섹션에 영향 주지 않게
+    SM.BREAKEVEN_STOP_ENABLED = True    # 원상복구 — 실제 기본값(ON)으로
 
 print("\n[3] 결함 ① — 동적캡 즉시매도가 모든 1A에 걸리던 문제")
 s3 = build()
@@ -242,8 +242,8 @@ s5._update_dynamic_caps()
 check("손실 구간에서는 동적캡 즉시매도 안 함", not sold(s5, "000005"))
 
 print("\n[6] 청산 우선순위 — 손절이 본전스톱보다 먼저")
-# 본전스톱이 켜져 있어도 손절이 우선이어야 한다(순서가 뒤집히면 -4% 급락을
-# '본전스톱'으로 기록해 사후 분석이 어긋난다). 플래그를 임시로 켜서 검증한다.
+# 본전스톱이 켜져 있어도(현재 기본값) 손절이 우선이어야 한다(순서가 뒤집히면
+# -4% 급락을 '본전스톱'으로 기록해 사후 분석이 어긋난다).
 SM.BREAKEVEN_STOP_ENABLED = True
 try:
     s6 = build()
@@ -253,7 +253,7 @@ try:
     s6.on_price_update("000006", 9_600)           # -4% 급락
     check("급락 시 손절로 청산", sold(s6, "000006"))
 finally:
-    SM.BREAKEVEN_STOP_ENABLED = False
+    SM.BREAKEVEN_STOP_ENABLED = True   # 원상복구 — 실제 기본값(ON)으로
 check("사유가 손절(본전스톱 아님)",
       any("손절" in (r.get("exit_reason") or "") for r in _Repo.sells),
       str([r.get("exit_reason") for r in _Repo.sells])[:70])
