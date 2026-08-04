@@ -11,7 +11,13 @@ strategy_manager.py를 직접 수정할 필요가 없습니다.
 # 공통 설정 (모든 전략에 적용)
 # -------------------------------------------------
 COMMON = {
-    "position_amount": 2_000_000,       # 기본 매수 금액
+    # 기본 매수 금액. 2026-08-04 실전 전환: 200만 -> 50만원(모의 대비 1/4).
+    # ⚠️ 같은 값이 3곳에 있다 — 하나만 고치면 조용히 어긋난다:
+    #    ① 여기(POSITION_AMOUNT) — _resolve_position_amount의 fallback
+    #    ② portfolio_optimizer.DEFAULT_BASE_AMOUNT — **실제로 이게 우선 적용된다**
+    #       (main.py가 PortfolioOptimizer(rest_api=...)로 base_amount를 안 넘김)
+    #    ③ order_manager.BUY_AMOUNT_PER_STOCK — 레거시 경로
+    "position_amount": 500_000,
     "max_holdings": 6,                  # 평상시 상한 (1A/Pullback/1B/1L 공유)
     "max_holdings_hard": 8,             # 확장 포함 절대 상한 (2026-07-31)
                                         # 평소엔 6개만 쓰고, 점수가 컷라인을 크게

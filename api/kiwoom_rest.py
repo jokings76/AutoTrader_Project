@@ -334,11 +334,44 @@ class KiwoomREST:
                              {"qry_tp": "3"})
 
     def get_orderable_amount(self) -> int:
-        """주문가능금액"""
+        """주문가능금액 (미수 없이 = 증거금 100% 기준).
+
+        ⚠️ 2026-08-04 실전 전환 시 수정. 예전엔 `ord_alow_amt`를 썼는데
+        이 필드는 **D+0 현금**만 센다. 한국 주식은 매도대금이 D+2 결제라도
+        그 대금으로 당일 재매수가 되므로, 매도 직후엔 실제 매수여력을
+        심하게 과소평가한다.
+
+        실측(2026-08-04 실전계좌):
+            entr / ord_alow_amt      =    100,818  <- 옛 값
+            d2_entra                 = 10,835,698  (HTS '추정예수금 D+2')
+            100stk_ord_alow_amt      = 10,835,694  <- 실제 주문가능
+            repl_amt(대용금)         =  1,681,620  (미포함이 맞음)
+            20stk_ord_alow_amt       = 62,578,465  (미수 사용분 — 절대 금지)
+
+        이 과소평가는 매수 자체보다 **MDD 기준자본**에서 치명적이었다.
+        `_ensure_base_capital`이 이 값을 기준자본으로 삼는데, 100,818원이면
+        일손실 한도 -3%가 겨우 -3,025원이라 거래 한 건에 그날 매수가
+        전면 차단된다.
+
+        `100stk_ord_alow_amt`(증거금률 100% 종목 주문가능금액)를 쓰는 이유는
+        **미수가 원천적으로 발생하지 않는 금액**이기 때문이다. 20/30/40/50/60
+        계열은 증거금률이 낮은 종목 기준이라 미수(반대매매 위험)가 섞인다 —
+        어떤 경우에도 그 필드를 쓰면 안 된다.
+
+        폴백 순서는 안전한 쪽에서 보수적인 쪽으로: 100stk -> d2_pymn_alow_amt
+        -> ord_alow_amt. 모의투자 응답에 100stk가 없을 수 있어 체인을 둔다.
+        """
         result = self.get_deposit()
         if result.get("return_code") != 0:
             return 0
-        return self._safe_int(result.get("ord_alow_amt", "0"))
+        for key in ("100stk_ord_alow_amt", "d2_pymn_alow_amt", "ord_alow_amt"):
+            raw = result.get(key)
+            if raw is None or str(raw).strip() == "":
+                continue
+            amt = self._safe_int(raw)
+            if amt > 0:
+                return amt
+        return 0
 
     def get_balance(self) -> dict:
         """계좌평가잔고내역 (kt00018)"""

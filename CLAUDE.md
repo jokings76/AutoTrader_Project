@@ -4,7 +4,11 @@
 
 \## 기본 정보
 
-\- 환경: 모의투자(IS\_MOCK), 왕복수수료 0.23%
+\- 환경: ⚠️ **실전투자 (2026-08-05부터, `IS_MOCK=false`)**. 왕복수수료 0.23%
+&#x20; — 실전 위탁계좌(번호는 `config.ini` 참조, git 미추적), 종목당 매수 50만원(모의의 1/4).
+&#x20; **이 계좌에는 봇과 무관한 사용자 보유 종목이 있다**(우리기술/엑스게이트) —
+&#x20; 봇은 DB 기반으로만 청산하므로 건드리지 않지만, 잔고를 볼 때 헷갈리지 말 것.
+&#x20; 상세는 히스토리 "2026-08-05 실전투자 전환" 참고.
 
 \- 구조: asyncio + PostgreSQL (Docker `analytics\_pg` 컨테이너, 자동재시작 설정됨)
 
@@ -1896,6 +1900,96 @@ claude --remote-control
     로직 무관). 지금은 `on_trade`에서 받아 쓰고 버린다. 며칠 쌓이면 [B]를
     실물 강도로 재검증할 수 있다.
 
+- 2026-08-05 (화, **모의 -> 실전투자 전환**) — 사용자 지정으로 실전 위탁계좌에
+  연결했다. **전략 로직은 하나도 안 바꿨다** — 08-04 마감 설정 그대로다.
+  바꾼 것은 접속 대상과 자금 규모뿐이다.
+
+  [전환 내용]
+  - `config.ini`(git 미추적): 실전 APP_KEY/SECRET_KEY, 실전 ACCOUNT_NO, `IS_MOCK=false`.
+  - **매수금액 200만 -> 50만원**(모의 대비 1/4, 사용자 지정). 슬롯(4/4/6/8),
+    tier 배수(1.5), MDD(-3%), 시간창, 캡은 **전부 모의와 동일**하게 유지 —
+    변수를 하나만 바꿔야 실전/모의 결과를 같은 축에서 비교할 수 있다.
+
+  [🔴 치명 — 이것 없이는 08:59에 기동 즉시 죽었다]
+  - **`api/auth.py`의 토큰 발급 URL이 `mockapi.kiwoom.com`으로 하드코딩**돼
+    있었다. `IS_MOCK`을 보지 않으므로 실전 앱키로 모의 서버에 요청 ->
+    발급 실패 -> `main.setup`이 `RuntimeError("토큰 발급 실패")`로 종료.
+    무인 기동이라 아무도 모른 채 하루가 사라진다. `IS_MOCK` 분기로 수정.
+    전 `.py`를 훑어 다른 하드코딩은 없음을 확인했다(REST/WS/tick_archive는
+    원래 분기가 있었다).
+
+  [🔴 예수금 필드가 틀려 MDD가 1/100로 잡히고 있었다]
+  - `get_orderable_amount()`가 `ord_alow_amt`를 썼는데 이건 **D+0 현금**이다.
+    한국 주식은 매도대금이 D+2 결제라도 그 대금으로 **당일 재매수가 되므로**,
+    매도 직후엔 매수여력을 심하게 과소평가한다. 실측:
+    ```
+    ord_alow_amt          =    100,818   <- 옛 값
+    d2_entra              = 10,835,698   (HTS '추정예수금 D+2')
+    100stk_ord_alow_amt   = 10,835,694   <- 정답 (증거금100% = 미수 없음)
+    20stk_ord_alow_amt    = 62,578,465   <- 미수. 절대 쓰면 안 된다
+    repl_amt(대용금)      =  1,681,620   <- 포함하면 안 된다
+    ```
+  - 매수 자체보다 **MDD 기준자본**에서 치명적이었다. `_ensure_base_capital`이
+    이 값을 기준자본으로 삼는데 100,818원이면 일손실 한도 -3%가 **-3,025원** —
+    거래 한 건에 그날 매수가 전면 차단된다. 수정 후 **-325,071원**으로 정상화.
+  - 폴백 체인 `100stk -> d2_pymn_alow_amt -> ord_alow_amt` (모의서버 호환).
+    ⚠️ **20/30/40/50/60stk 계열은 어떤 경우에도 쓰지 말 것** — 미수(반대매매)다.
+
+  [🔴 매수금액이 3곳에 흩어져 있었다 — 처음 고친 곳은 라이브 경로가 아니었다]
+  - `order_manager.BUY_AMOUNT_PER_STOCK`만 고쳤는데 라이브는 그걸 안 쓴다.
+    실제 지배값은 **`portfolio_optimizer.DEFAULT_BASE_AMOUNT`** 다
+    (main.py가 `PortfolioOptimizer(rest_api=self.rest)`로만 생성해 기본값 사용).
+    `config/phase_settings.py`의 `position_amount`는 optimizer 실패 시 fallback.
+    셋 다 50만원으로 맞추고 각 파일에 "3곳이 같이 움직여야 한다" 주석을 박았다.
+    **이 코드베이스의 반복 사고 패턴(같은 규칙 분산)이 또 나온 사례.**
+
+  [실측 — 실제로 얼마씩 사는가]
+  - `final_weight`는 **0.90**이다(Kelly가 손실 기대라 하한 0.3 x 변동성 상한 3.0).
+    -> 종목당 **449,000원**, 되돌림 1차 트랜치 **224,500원**.
+  - `target_volatility=0.02`(일일 2%)를 **1분봉 ATR**(실측 0.22~0.59%)과 비교하는
+    구조라 변동성 배수는 사실상 항상 상한 3.0에 붙는다. 즉 비중을 실질적으로
+    결정하는 건 Kelly 쪽이다.
+  - **0주 스킵 위험은 실무상 없다**: 조건검색식 주가 상한이 150,000원인데
+    트랜치가 224,500원이라 최고가 종목도 1주 이상(심텍 97,100원 -> 2주).
+    이론상 `final_weight`가 하한 0.3까지 내려가면 트랜치 75,000원이 되어
+    75,000원 초과 종목이 0주가 되지만, 그러려면 **1분봉 ATR >= 6.67%**가
+    필요해 도달하지 않는다.
+  - 노출: 평상시 슬롯 6 만석 = 269만원(**자본의 24.9%**). 최대비중 x 확장슬롯 8은
+    이론상 1,200만원(111%)으로 자본을 넘지만, 초과분은 키움이 거부할 뿐
+    오주문이 아니다(실측 동시보유 최대 2/6이라 도달 가능성도 낮다).
+
+  [🟢 실전 계좌의 기존 보유 종목 — 봇이 건드리지 않는다 (코드로 확인)]
+  - 계좌에 **우리기술(032820) 271주 -30.36%** / **엑스게이트(356680) 2주 -23.02%**
+    가 있다. 봇이 이걸 자기 포지션으로 잡으면 -3% 손절로 **즉시 전량 시장가
+    매도**되는 사고가 난다. 확인 결과 **안전하다**:
+    - `strategy_mgr.holdings`는 서버 잔고가 아니라 **DB(`TradeRepository.find_holdings()`)**
+      에서 복원된다. 현재 DB의 open 포지션은 0건.
+    - 손절/익절/정체정리/**15:10 강제청산**이 전부 `holdings`를 순회하므로 대상 밖.
+      (`task_force_close_watcher`는 `self.strategy_mgr.holdings.keys()`를 돈다)
+    - `_detect_orphan_positions`는 **감지해서 알리기만** 하고 자동 편입하지 않는다.
+  - -> **08-05 아침에 "⚠️ 미관리 잔고 감지" 알림 2건이 오는 것이 정상이다.**
+    놀라지 말 것. 봇 성과와 계좌 잔고가 다른 이유도 이 2종목 때문이다.
+
+  [확인만 하고 둔 것 — 정상]
+  - 조건검색식 4개가 실전 계정에서도 **같은 이름·같은 seq**로 조회됨
+    (주도주상위=1 / 돌파자동매매용=2 / 눌림목자동=3 / 종가베팅=4). 유사 이름
+    오탐도 없음. 종가베팅은 매매 라우팅과 분리 유지.
+  - `ACCOUNT_NO`는 **코드에서 한 번도 쓰이지 않는다**(settings.py에서 읽기만 함).
+    실제 주문 계좌는 앱키에 묶인 계좌로 결정된다 — 기록용이다.
+  - 수수료: `ROUND_TRIP_COST=0.23%`는 실전 기준(편도 0.015% + 세금)에 가깝다.
+    모의는 편도 0.3%라 **지금까지의 성과 분석은 오히려 비용을 과소평가**하고
+    있었다 — 실전에서 이 가정이 정확해진다.
+
+  [검증]
+  - `test_live_20260805.py` **58건 신설** 전원 통과(10개 섹션: 모의 하드코딩 /
+    예수금 필드·폴백 / **기존 보유 불가침** / 매수금액 3곳 / 노출한도 /
+    매수경로 2곳 되돌림 / 손절 우선순위 / 상수 불변식 / 백테스트 동기 / 배선).
+  - 기존 6개 스위트 **757건 중 756건 통과**(1건은 `NEW_SESSION_REQUESTED`
+    존재 검사로 이관 직후 정상). **총 815건.**
+  - `daily_backtest` 실제 실행 검증: 08-04 유니버스 47종목 -> 5건 재현, 예외 0.
+  - 구문오류 0 / `import main` OK / 태스크 정의 20 = gather 등록 20 /
+    STOP_SIGNAL 없음 / 스케줄러 08-05 08:59 Ready.
+
 \## 세션 이관 체크리스트 (2026-08-01 신설)
 
 새 세션(PC 터미널 / 모바일 원격 / 새 대화창 어디서든)이 이 프로젝트를
@@ -1921,10 +2015,11 @@ claude --remote-control
 | 5 | `python test_patch_20260804.py` | **63건 전원 통과** (되돌림 대기 분할매수 + 분할매도 + 폴링 우회 회귀방지) |
 | 6 | `python test_live_dryrun_20260803.py` | **164건 전원 통과** (종일 통합 + 기동 인프라 + 상수 불변식 + 설정조합 + 전면차단 교차감사) |
 | 7 | `python test_closing_bet_routing.py` | **24건 전원 통과** (종가베팅 분리 라우팅) |
-| 8 | `git log --oneline -5` | 최신 커밋이 `2fa4a2d` 이후인지 |
-| 9 | `git status --short` | 비어 있어야 정상(작업 중이면 예외) |
+| 8 | `python test_live_20260805.py` | **58건 전원 통과** (⚠️ 실전 전환 감사 — 모의 하드코딩/예수금 필드/**기존 보유 불가침**/매수금액 3곳 정합/노출한도) |
+| 9 | `git log --oneline -5` | 최신 커밋이 `fbd5946` 이후인지 |
+| 10 | `git status --short` | 비어 있어야 정상(작업 중이면 예외) |
 
-**합계 757건**(294 + 86 + 126 + 63 + 164 + 24). 하나라도 실패하면 그 지점부터 원인 추적.
+**합계 815건**(294 + 86 + 126 + 63 + 164 + 24 + 58). 하나라도 실패하면 그 지점부터 원인 추적.
 
 - ⚠️ 5번의 `이관 플래그가 남아있지 않음`은 **코드 결함이 아니라 환경 상태** 검사다.
   프로젝트 루트에 `NEW_SESSION_REQUESTED`가 있으면 실패로 뜬다 — 이관작업 직후엔
@@ -1946,7 +2041,7 @@ claude --remote-control
 ```
 python -c "import core.strategy_manager as s; from core.order_manager import FORCE_CLOSE_TIME; print('1A', s.GROUP_A_START, '~', s.PHASE1A_END); print('PB', s.PULLBACK_START, '~', s.PULLBACK_END); print('중복전환', s.DUAL_SOURCE_PULLBACK_FROM); print('청산', FORCE_CLOSE_TIME); print('슬롯', s.PHASE1A_MAX_SLOTS, s.PULLBACK_MAX_SLOTS, s.MAX_HOLDINGS, s.MAX_HOLDINGS_HARD); print('무장', s.TICK_STRENGTH_MIN, s.TICK_STRENGTH_SUSTAIN_SEC); print('버스트', s.PHASE1A_BURST_TRADE_VALUE, s.PHASE1A_BURST_TRADE_COUNT, s.PHASE1A_SINGLE_TRADE_VALUE); print('시간계수', sorted(set(v for _,v in s.TICK_BURST_TIME_MULT))); print('되돌림', s.ENTRY_PULLBACK_ENABLED, s.ENTRY_PULLBACK_TRANCHES, s.ENTRY_PULLBACK_TIMEOUT_SEC); print('분할매도', s.PARTIAL_EXIT_ENABLED, s.PARTIAL_EXIT_FRACTION, s.PARTIAL_EXIT_TRAIL); print('지수가드', s.INDEX_GUARD_THRESHOLD, s.INDEX_GUARD_FROM, s.INDEX_GUARD_BREAKEVEN_UNTIL, s.INDEX_GUARD_FORCE_CLOSE); print('캡', s.TAKE_PROFIT_CAP, s.TAKE_PROFIT_CAP_PULLBACK, s.TAKE_PROFIT_CAP_EARLY, s.TP_CAP_UPGRADED_MAX); print('본전스톱', s.BREAKEVEN_STOP_ENABLED); print('1B잔재', hasattr(s, 'PHASE1B_ENABLED')); print('틱구동', s.TICK_ENTRY_ENABLED)"
 ```
-기대값(**2026-08-04 마감 기준** — 08-05는 이 설정으로 돈다):
+기대값(**2026-08-05 실전 전환 기준**):
 ```
 1A 09:00:00 ~ 14:50:00        PB 09:00:00 ~ 14:50:00        중복전환 10:30:00
 청산 15:10                    슬롯 4 4 6 8                  무장 100.0 1.5
@@ -1956,6 +2051,16 @@ python -c "import core.strategy_manager as s; from core.order_manager import FOR
 지수가드 -5.0 11:00:00 11:30:00 14:50:00
 캡 0.04 0.025 0.025 0.06      본전스톱 True   1B잔재 False   틱구동 True
 ```
+**실전 전환 전용 확인 (2026-08-05 신설)** — 위 명령과 별도로 반드시 같이 볼 것:
+```bash
+python -c "from config import settings as s; import core.strategy_manager as SM; from core.strategy.portfolio_optimizer import DEFAULT_BASE_AMOUNT as D; from core.order_manager import BUY_AMOUNT_PER_STOCK as B; print('IS_MOCK', s.IS_MOCK); print('매수금액 3곳', SM.POSITION_AMOUNT, D, B, '일치' if SM.POSITION_AMOUNT==D==B else '!!!불일치!!!')"
+```
+기대값: `IS_MOCK False` / `매수금액 3곳 500000 500000 500000 일치`
+- `IS_MOCK True`면 모의로 돌아간 것.
+- **매수금액이 3곳에 흩어져 있다**. 실제로 지배하는 값은 `DEFAULT_BASE_AMOUNT`
+  (main.py가 `PortfolioOptimizer(rest_api=...)`로 base_amount를 안 넘김).
+  `POSITION_AMOUNT`는 optimizer 실패 시 fallback, `BUY_AMOUNT_PER_STOCK`은 레거시.
+  **하나만 고치면 조용히 어긋난다.**
 - `시간계수 [1.0]`에 1.0 외의 값이 섞여 있으면 **오후 완화가 되살아난 것**
   (2026-08-04에 0.85/0.80/0.95를 전부 제거했다).
 - `버스트`가 30000000이면 08-04 상향 전으로 돌아간 것.
@@ -1988,7 +2093,13 @@ python -c "import core.strategy_manager as s; from core.order_manager import FOR
 - 모바일 확인 1~3번 통과(특히 3번 — 맥락 복원이 이관의 본질)
 - 위 둘 중 하나라도 실패하면 **아직 이관 안 된 것**이다.
 
-\## 현재 전략 요약 (**2026-08-04 마감 기준** — 08-05부터 이 설정으로 돈다)
+\## 현재 전략 요약 (**2026-08-05 실전투자 기준**)
+
+> ⚠️ **실전투자다.** 전략 로직은 08-04 마감 상태 그대로이고, 08-05에 바뀐 것은
+> ① 접속 대상(실전 서버) ② **종목당 매수금액 200만 -> 50만원**(모의의 1/4)
+> ③ 예수금 조회 필드(D+2 반영) 세 가지뿐이다. 슬롯·캡·시간창·문턱은 모두 동일.
+> 실제 매수금액은 optimizer 비중 0.90이 곱해져 **종목당 약 449,000원**,
+> 되돌림 1차 트랜치 **224,500원**이다.
 
 > **⚡ 08-04에 바뀐 것 5줄 요약** (상세는 히스토리 "2026-08-04" 항목들)
 > 1. **본전스톱 ON** (순+1% 찍고 본전 이탈 시 청산) — 08-03 저녁 OFF에서 되돌림
@@ -2123,9 +2234,22 @@ python -c "import core.strategy_manager as s; from core.order_manager import FOR
 - **pre-arm (2026-08-02)** — 편입 즉시 감시 시작 + 전일종가/시가 캐시를 예열해
   둔다. 트리거 시점에 REST를 부르지 않기 위함(`prearm_candidate`).
 
-\## 다음 할 일 (**2026-08-04 마감 기준 — 08-05용**)
+\## 다음 할 일 (**2026-08-05 실전 첫날 기준**)
 
-\### ⚠️ 08-05는 "관찰의 날"이다. 아무것도 바꾸지 말 것.
+\### 🔴 실전 첫날 09:00 최우선 확인 (전략 확인보다 먼저)
+
+1. **텔레그램 기동 알림에 `모드: 실전`**이 찍히는지. `모의투자`면 `IS_MOCK`이
+   안 먹은 것 -> 즉시 봇 정지(`STOP_SIGNAL`).
+2. **`주문가능: 10,8xx,xxx원`** 인지. `100,818원`처럼 나오면 예수금 필드 수정이
+   되돌아간 것 -> MDD가 -3,025원에 걸려 그날 매수가 막힌다.
+3. **`⚠️ 미관리 잔고 감지` 알림 2건(우리기술/엑스게이트)은 정상이다.**
+   봇이 산 게 아니라 원래 계좌에 있던 종목이고, 봇은 건드리지 않는다.
+   **이 2종목에 대한 매도 로그가 뜨면 즉시 봇을 세울 것** — 설계상 나올 수 없다.
+4. **첫 매수 금액이 종목당 45만원 안팎**인지(`449,000원 x weight`). 200만원대면
+   매수금액 3곳 중 `DEFAULT_BASE_AMOUNT`가 안 바뀐 것.
+5. 매수 체결 알림의 **종목명이 실제 이름**인지(코드만 나오면 REST 폴백 실패).
+
+\### ⚠️ 그 외에는 "관찰의 날"이다. 아무것도 바꾸지 말 것.
 
 08-04 하루에만 변경이 **5건** 있었고, 그중 **되돌림 대기는 정상 작동을 하루도
 관찰하지 못했다**(폴링 우회 버그로 3건 중 1건만 제대로 돌았고, 그 버그는 14:01에야
@@ -2258,6 +2382,9 @@ python -c "import core.strategy_manager as s; from core.order_manager import FOR
 
 | 대상 | 방법 |
 |---|---|
+| **실전 -> 모의 복귀** | `config.ini`의 `IS_MOCK = true` + **모의 APP_KEY/SECRET_KEY로 교체**<br>(실전 키로는 모의 서버 토큰이 안 나온다). 백업: `AutoTrader_Project_backups/config.ini.mock.bak` |
+| **매수금액** | **3곳을 같이** 고칠 것 — `portfolio_optimizer.DEFAULT_BASE_AMOUNT`(실지배값) /<br>`config/phase_settings.py: position_amount` / `order_manager.BUY_AMOUNT_PER_STOCK`.<br>모의 원값은 `2_000_000` |
+| 예수금 필드 | `kiwoom_rest.get_orderable_amount`의 폴백 체인 첫 항목.<br>⚠️ `20/30/40/50/60stk_ord_alow_amt`는 **미수**라 절대 쓰지 말 것 |
 | 무장 시간 | `TICK_STRENGTH_SUSTAIN_SEC = 3.0` (또는 2.0) |
 | 본전스톱 끄기 | `BREAKEVEN_STOP_ENABLED = False` (2026-08-04부터 기본값 True로 변경됨) |
 | 되돌림 대기 끄기(=즉시매수 복귀) | `ENTRY_PULLBACK_ENABLED = False` |
