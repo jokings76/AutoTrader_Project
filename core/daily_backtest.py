@@ -381,11 +381,22 @@ def _simulate_stock(
     return trades
 
 
+def _today_live_trade_count() -> str:
+    """오늘 실제 체결 건수. 리포트 헤더에 대조군으로 싣는다 (2026-08-05).
+    DB가 없거나 실패해도 리포트는 나가야 하므로 조용히 '?'를 반환한다."""
+    try:
+        from db import TradeRepository
+        return str(len(TradeRepository.find_by_date(date.today())))
+    except Exception:
+        return "?"
+
+
 def _format_report(trades: list, universe_count: int, skipped: int) -> str:
     if not trades:
         return (
-            f"📊 일일 백테스트 결과 ({date.today()})\n"
-            f"대상 종목 {universe_count}개 (분봉 조회 실패 {skipped}개) — 재현된 매매 없음"
+            f"🧪 일일 백테스트 (모의 시뮬레이션 · {date.today()})\n"
+            f"⛔ 실거래가 아닙니다 — 오늘 실제 체결은 {_today_live_trade_count()}건입니다.\n"
+            f"대상 종목 {universe_count}개 (분봉 조회 실패 {skipped}개) — 가정 매매 없음"
         )
 
     total = len(trades)
@@ -393,15 +404,26 @@ def _format_report(trades: list, universe_count: int, skipped: int) -> str:
     win_rate = len(wins) / total * 100
     avg_rate = sum(t["net_rate"] for t in trades) / total * 100
 
+    # (2026-08-05) 헤더를 강화했다. 기존 문구에도 "실제 진입과 다릅니다"가
+    # 있었지만 08-05에 다윤님이 이 리포트를 실거래로 오해했다 —
+    # "매매하지도 않은 종목이 나오고, 실계좌는 +1.00%인데 -1.04%로 나온다".
+    # 원인은 문구가 약해서가 아니라 **대조군이 없어서**였다. 그래서 오늘
+    # 실제 체결 건수를 같이 실어 두 숫자가 다른 모집단임을 눈으로 보이게 한다.
     lines = [
-        f"📊 일일 백테스트 결과 ({date.today()})",
-        "⚠️ 참고: 2026-08-02부터 라이브 1A/Pullback은 **틱 구동**",
-        "(체결강도 연속유지 + 대량체결 버스트)으로 바뀌었습니다.",
-        "아래 수치는 분봉 기준 눌림목 재현이라 **실제 진입과 다릅니다** —",
-        "청산 정책 비교용으로만 보세요.",
+        f"🧪 일일 백테스트 (모의 시뮬레이션 · {date.today()})",
         "",
-        f"대상 종목 {universe_count}개 / 재현 매매 {total}건",
-        f"전체 승률 {win_rate:.1f}% | 평균수익률 {avg_rate:+.2f}%",
+        "⛔ 아래는 **실거래가 아닙니다.** 오늘 조건을 만족했다면 어땠을까를",
+        "   분봉으로 돌려본 가정 매매입니다. 실계좌 손익과 비교하지 마세요.",
+        f"   · 오늘 실제 체결: **{_today_live_trade_count()}건** (실계좌 기준)",
+        f"   · 아래 가정 매매: **{total}건** — 두 목록은 겹치지 않습니다.",
+        "",
+        "⚠️ 재현 범위: 라이브 진입은 2026-08-02부터 **틱 구동**(체결강도 연속유지",
+        "   + 대량체결 버스트)인데, 이 백테스트는 그걸 재현할 틱 데이터가 없어",
+        "   **폐지된 분봉 눌림목 규칙**으로 대신 돌립니다. 즉 진입 성과는",
+        "   의미가 없고, **청산 정책 비교용**으로만 유효합니다.",
+        "",
+        f"대상 종목 {universe_count}개 / 가정 매매 {total}건",
+        f"가정 승률 {win_rate:.1f}% | 가정 평균수익률 {avg_rate:+.2f}%",
         "",
         "[전략별 성과]",
     ]
