@@ -490,6 +490,208 @@ el = (_t.time() - t1) / 2000 * 1e6
 check(f"on_price_update 1회 < 200us (VI 추가 후)", el < 200, f"{el:.1f}us")
 
 
+# ──────────────────────────────────────────────────────────────
+section("[9] 📄 문서 ↔ 코드 정합성 (CLAUDE.md 기대값 블록)")
+# ──────────────────────────────────────────────────────────────
+# [왜 이 섹션이 있나] 이 프로젝트의 반복 사고 1위가 "값을 고치고 문서를 안
+# 고치는 것"이다. 08-05 이관 때만 해도 체크리스트 숫자 2개(#2 287 / #5 63)가
+# 실제와 어긋나 있었다. 문서가 틀리면 다음 세션이 **잘못된 값을 근거로
+# 작업하거나 "회귀가 났다"고 오판하고 멀쩡한 코드를 뒤진다.**
+# -> CLAUDE.md의 '기대값' 블록에 **라이브 값이 문자열 그대로 들어있는지**
+#    기계적으로 확인한다. 상수를 바꾸고 문서를 안 고치면 여기서 잡힌다.
+try:
+    _doc = open("CLAUDE.md", encoding="utf-8").read()
+except Exception as e:
+    _doc = ""
+    check("CLAUDE.md 읽기", False, str(e))
+
+if _doc:
+    def doc_has(label, s):
+        ok = s in _doc
+        check(f"문서에 {label} = `{s}`", ok,
+              "" if ok else "❌ 문서에 없음 -> CLAUDE.md 기대값 블록을 갱신할 것")
+
+    doc_has("시간창(1A)", f"1A {SM.GROUP_A_START} ~ {SM.PHASE1A_END}")
+    doc_has("시간창(PB)", f"PB {SM.PULLBACK_START} ~ {SM.PULLBACK_END}")
+    doc_has("중복전환", f"중복전환 {SM.DUAL_SOURCE_PULLBACK_FROM}")
+    doc_has("청산시각", f"청산 {FORCE_CLOSE_TIME}")
+    doc_has("슬롯", f"슬롯 {SM.PHASE1A_MAX_SLOTS} {SM.PULLBACK_MAX_SLOTS} "
+                   f"{SM.MAX_HOLDINGS} {SM.MAX_HOLDINGS_HARD}")
+    doc_has("무장", f"무장 {SM.TICK_STRENGTH_MIN} {SM.TICK_STRENGTH_SUSTAIN_SEC}")
+    doc_has("버스트", f"버스트 {SM.PHASE1A_BURST_TRADE_VALUE} "
+                    f"{SM.PHASE1A_BURST_TRADE_COUNT} {SM.PHASE1A_SINGLE_TRADE_VALUE}")
+    doc_has("주가계수", f"주가계수 {SM.BURST_PRICE_REF} {SM.BURST_PRICE_ALPHA} "
+                     f"{SM.BURST_PRICE_MIN} {SM.BURST_PRICE_MAX}")
+    doc_has("재매수배수", f"재매수배수 {SM.REBUY_BURST_VALUE_MULT}")
+    doc_has("되돌림", f"되돌림 {SM.ENTRY_PULLBACK_ENABLED} "
+                    f"{SM.ENTRY_PULLBACK_TRANCHES} {SM.ENTRY_PULLBACK_TIMEOUT_SEC}")
+    doc_has("분할매도", f"분할매도 {SM.PARTIAL_EXIT_ENABLED} "
+                     f"{SM.PARTIAL_EXIT_FRACTION} {SM.PARTIAL_EXIT_TRAIL}")
+    doc_has("지수가드", f"지수가드 {SM.INDEX_GUARD_THRESHOLD} {SM.INDEX_GUARD_FROM} "
+                     f"{SM.INDEX_GUARD_BREAKEVEN_UNTIL} {SM.INDEX_GUARD_FORCE_CLOSE}")
+    doc_has("캡", f"캡 {SM.TAKE_PROFIT_CAP} {SM.TAKE_PROFIT_CAP_PULLBACK} "
+                f"{SM.TAKE_PROFIT_CAP_EARLY} {SM.TP_CAP_UPGRADED_MAX}")
+    doc_has("본전스톱", f"본전스톱 {SM.BREAKEVEN_STOP_ENABLED}")
+    doc_has("매수금액", f"매수금액 3곳 {SM.POSITION_AMOUNT} "
+                     f"{DEFAULT_BASE_AMOUNT} {BUY_AMOUNT_PER_STOCK} 일치")
+
+    # 주가계수 예시표 — 문서에 적힌 배수가 실제와 같은가
+    for px in (1_000, 2_000, 10_000, 50_000, 150_000):
+        doc_has(f"계수({px:,}원)", f"{px:,}원 x{SM.burst_price_scale(px):.2f}")
+
+    # 등락률 상한 / 익절캡 — '현재 전략 요약' 표의 수치
+    check(f"문서 등락률 상한 1A = {SM.MAX_ENTRY_CHANGE_PCT:.0f}%",
+          f"**{SM.MAX_ENTRY_CHANGE_PCT:.0f}%**" in _doc)
+    check(f"문서 등락률 상한 눌림 = {SM.MAX_ENTRY_CHANGE_PCT_PULLBACK:.0f}%",
+          f"**{SM.MAX_ENTRY_CHANGE_PCT_PULLBACK:.0f}%**" in _doc)
+    check(f"문서 익절캡 1A = {SM.TAKE_PROFIT_CAP*100:.1f}%",
+          f"1A {SM.TAKE_PROFIT_CAP*100:.1f}%" in _doc)
+    check("문서 상한 클램프 시작 주가 표기",
+          f"{10_000 * SM.BURST_PRICE_MAX ** (1/SM.BURST_PRICE_ALPHA):,.0f}원" in _doc)
+    # VI 규칙이 청산 우선순위 표에 실려 있는가
+    check("문서 청산표에 VI 항목 존재", "VI 상단 확정매도" in _doc)
+    check("문서에 VI 마진 표기", f"{SM.VI_UPPER_MARGIN_PCT*100:.1f}% 이내" in _doc)
+    check("문서에 VI 기준 표기(시가 x1.10)",
+          f"시가 x{1+SM.VI_STATIC_RATIO:.2f}" in _doc)
+    # 실전 여부
+    from config import settings as _st
+    check(f"문서 IS_MOCK 기대값이 실제({_st.IS_MOCK})와 일치",
+          f"IS_MOCK {_st.IS_MOCK}" in _doc, f"실제 IS_MOCK={_st.IS_MOCK}")
+
+
+# ──────────────────────────────────────────────────────────────
+section("[10] 🔬 청산 규칙 상호 충돌 매트릭스")
+# ──────────────────────────────────────────────────────────────
+# 각 규칙을 '단독으로 성립'시키고, 다른 규칙이 끼어들어 **엉뚱한 사유로**
+# 나가지 않는지 본다. 08-03에 동적캡이 손실 구간에서 발동한 것, 08-05에
+# 시간정리가 지수가드 사양을 무력화한 것이 전부 이 부류였다.
+def one(label, expect, **kw):
+    price = kw.pop("price")
+    buy = kw.pop("buy", 10_000)
+    s, _ = build(kw.pop("now", datetime(2026, 8, 5, 10, 0, 0)))
+    p = put_pos(s, "M", buy=buy, warm=kw.pop("warm", False))
+    for k, v in kw.pop("pos", {}).items():
+        p[k] = v
+    if kw.pop("open_px", None):
+        s._opening_prices["M"] = kw.pop("_o", None)
+    for k, v in kw.items():
+        setattr(s, k, v)
+    _Repo.sells = []
+    s.on_price_update("M", price)
+    why = " | ".join(x.get("exit_reason") or "" for x in _Repo.sells) or "(보유유지)"
+    ok = (expect in why) if expect else (why == "(보유유지)")
+    check(f"{label} -> {expect or '보유유지'}", ok, why[:58])
+
+
+one("손절만 성립", "손절", price=9_700)
+one("익절캡만 성립", "익절", price=10_450)
+one("아무것도 성립 안 함", None, price=10_100)
+one("워밍업 중 + 손절", "손절", price=9_700, warm=True)
+one("워밍업 중 + 익절 구간", None, price=10_450, warm=True)
+one("손절선 1원 위", None, price=9_701)
+one("익절캡 1원 아래", None, price=10_399)
+
+# VI: 시가를 넣어야 성립 — 별도 구성
+def one_vi(label, expect, open_px, buy, price, **kw):
+    s, _ = build(kw.pop("now", datetime(2026, 8, 5, 10, 0, 0)))
+    put_pos(s, "M", buy=buy, warm=kw.pop("warm", False))
+    s._opening_prices["M"] = open_px
+    for k, v in kw.items():
+        setattr(s, k, v)
+    _Repo.sells = []
+    s.on_price_update("M", price)
+    why = " | ".join(x.get("exit_reason") or "" for x in _Repo.sells) or "(보유유지)"
+    ok = (expect in why) if expect else (why == "(보유유지)")
+    check(f"{label} -> {expect or '보유유지'}", ok, why[:58])
+
+
+one_vi("VI 근접 + 캡 미달", "VI 상단", 10_800, 11_500, 11_840)
+one_vi("VI 근접 + 손절 동시", "손절", 12_000, 13_600, 13_180)
+one_vi("VI 근접인데 순손실", None, 10_800, 12_000, 11_840)
+one_vi("VI 멀고 캡도 미달", None, 10_000, 10_000, 10_200)
+one_vi("VI 근접 + 워밍업", "VI 상단", 10_800, 11_500, 11_840, warm=True)
+
+# 지수가드가 다른 규칙을 덮는가 (익절캡보다 먼저)
+s, _ = build(datetime(2026, 8, 5, 11, 10, 0))
+put_pos(s, "M", buy=10_000)
+s._is_index_guard_active = lambda now_dt=None: True
+_Repo.sells = []
+s.on_price_update("M", 10_450)          # 익절캡도 성립하는 가격
+why = " | ".join(x.get("exit_reason") or "" for x in _Repo.sells)
+check("가드 중엔 익절캡보다 가드가 먼저", "지수 가드" in why, why[:58])
+
+# 가드 중 손실 포지션은 11:30 전엔 안 판다 (사양)
+s, _ = build(datetime(2026, 8, 5, 11, 10, 0))
+put_pos(s, "M", buy=10_000)
+s._is_index_guard_active = lambda now_dt=None: True
+_Repo.sells = []
+s.on_price_update("M", 9_900)           # 손실이지만 손절선 위
+why = " | ".join(x.get("exit_reason") or "" for x in _Repo.sells) or "(보유유지)"
+check("가드 중 손실분은 11:30 전 보유유지", why == "(보유유지)", why[:58])
+
+
+# ──────────────────────────────────────────────────────────────
+section("[11] 🔬 매수 게이트 순서 — 하나라도 빠지면 잘못된 매수")
+# ──────────────────────────────────────────────────────────────
+_src_buy = inspect.getsource(SM.StrategyManager._execute_buy)
+for label, needle in [
+    ("15:10 하드컷오프", "ENTRY_HARD_CUTOFF"),
+    ("등락률 상한", "_entry_change_cap"),
+    ("전략 라우팅 가드", "1A_눌림"),
+    ("지수 하락 가드", "_is_index_guard_active"),
+    ("pending 회수(finally)", "finally"),
+]:
+    check(f"_execute_buy에 {label} 존재", needle in _src_buy)
+
+_src_entry = inspect.getsource(SM.StrategyManager._maybe_tick_entry)
+check("_maybe_tick_entry에 무장 확인 존재", "update_strength_timer" in _src_entry)
+check("_maybe_tick_entry에 되돌림 계획 존재", "_open_entry_plan" in _src_entry)
+# ⚠️ 버스트는 evaluate_tick_entry를 **거쳐** 호출된다. 소스 문자열로 찾으면
+#    없다고 나온다(실제로 이 감사를 쓰다가 한 번 오탐을 냈다).
+#    -> 소스가 아니라 **호출이 실제로 일어나는지**로 검증한다.
+_called = {"n": 0}
+_orig = SM.StrategyManager.check_burst
+try:
+    SM.StrategyManager.check_burst = lambda self, *a, **k: (_called.__setitem__("n", _called["n"] + 1),
+                                                            (False, {"reason": "감사스텁"}))[1]
+    s_b, _ = build()
+    s_b.phase1b.start_watching("CB")
+    tfb = s_b.phase1b.trade_flow
+    nwb = _t.time()
+    for i in range(30):
+        tfb.add_tick("CB", 10_000, "buy", 5, now=nwb - 60 + i)
+    s_b._strength_since["CB"] = nwb - 10          # 무장 성립 상태로
+    s_b._armed_at["CB"] = nwb - 5
+    s_b.evaluate_tick_entry("CB", "1A", 10_000, now=nwb)
+finally:
+    SM.StrategyManager.check_burst = _orig
+check("진입 평가가 실제로 check_burst를 호출한다", _called["n"] > 0,
+      f"호출 {_called['n']}회")
+
+# 전면차단 사유 — 소스 문자열이 아니라 **반환값**으로 검증한다
+check("전면차단 판정이 _entry_block_reason 단일 창구",
+      hasattr(SM.StrategyManager, "_entry_block_reason"))
+s_g, _ = build()
+s_g._is_index_guard_active = lambda now_dt=None: True
+check("차단사유: 지수가드", "지수 하락 가드" in (s_g._entry_block_reason() or ""),
+      str(s_g._entry_block_reason()))
+s_g2, _ = build()
+s_g2.risk_can_trade = lambda: False
+check("차단사유: MDD", "MDD" in (s_g2._entry_block_reason() or ""),
+      str(s_g2._entry_block_reason()))
+s_g3, _ = build()
+s_g3.quarantine_until = s_g3._now() + timedelta(minutes=5)
+check("차단사유: WS 재연결 격리", "격리" in (s_g3._entry_block_reason() or ""),
+      str(s_g3._entry_block_reason()))
+s_g4, _ = build()
+check("정상 상태에선 차단사유 없음", s_g4._entry_block_reason() is None,
+      str(s_g4._entry_block_reason()))
+
+# 되돌림 계획이 슬롯을 점유하는가 (대기 중 자리 뺏김 방지)
+check("occupied_slots가 _entry_plans를 센다",
+      "_entry_plans" in inspect.getsource(SM.StrategyManager.occupied_slots))
+
+
 print("\n" + "=" * 66)
 print(f"통과 {len(PASS)}건 / 실패 {len(FAIL)}건   ({_t.time() - T0:.1f}초)")
 if FAIL:
