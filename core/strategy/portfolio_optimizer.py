@@ -22,13 +22,16 @@ except Exception:
 
 
 # 2026-08-04 실전 전환: 200만 -> 50만원(모의 대비 1/4).
+# 2026-08-05 장마감 후 사용자 지정: 50만 -> **200만원**으로 환원.
 # ⚠️ main.py가 PortfolioOptimizer(rest_api=self.rest)로만 생성해서 base_amount를
 #    넘기지 않는다 — 즉 **라이브 매수금액을 실제로 지배하는 값은 여기다.**
 #    config/phase_settings.py의 position_amount는 optimizer가 실패했을 때의
 #    fallback으로만 쓰인다. 둘을 항상 같이 고칠 것.
 # 최종 금액 = 이 값 x kelly_mult x vol_mult (max_weight 2.0) x tier_mult (최대 1.5)
-#           -> 종목당 상한 50만 x 2.0 x 1.5 = 150만원
-DEFAULT_BASE_AMOUNT = 500_000
+#           -> 종목당 상한 200만 x 2.0 x 1.5 = 600만원
+# 08-05 실측 final_weight는 0.90이었다(Kelly 하한 0.3 x 변동성 상한 3.0) —
+# 즉 실제 매수는 종목당 약 180만원, 되돌림 1차 트랜치 90만원이 된다.
+DEFAULT_BASE_AMOUNT = 2_000_000
 
 
 # ─────────────────────────────────────────────

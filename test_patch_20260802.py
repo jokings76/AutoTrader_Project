@@ -299,7 +299,12 @@ feed(s.phase1b.trade_flow, "BS", 1, 100_000_000, now=t0, span=1.0)
 ok, d = s.check_burst("BS", now=t0)
 check("단일경로: 1억 1건이면 통과", ok and d.get("burst_path") == "단일", str(d.get("burst_path")))
 
-# 경로 ③ 상대 (평균 1틱의 20배) — 절대기준엔 한참 못 미치는 소액
+# 경로 ③ 상대 — (2026-08-05 사양 변경) 하한이 상수 1천만원에서
+# **주가 스케일이 적용된 burst_min**으로 바뀌었다.
+# [왜] 옛 하한 1천만원은 아무 근거 없이 박힌 값이었고, 실측 결과 저가주가
+# 이 뒷문으로만 들어오고 있었다(08-03~05 실거래에서 2,500원 미만 진입 5건의
+# 경로가 100% '상대'). 이제 상대 경로는 절대보다 **헐거워질 수 없고**,
+# '그 종목 평균이 유난히 클 때 더 엄격하게'라는 원래 목적만 남는다.
 s = build_strat(datetime(2026, 8, 3, 9, 30, 0))
 setup_candidate(s, "BR")
 tfr = s.phase1b.trade_flow
@@ -307,19 +312,31 @@ for i in range(30):
     tfr.add_tick("BR", 10_000, "buy", 30, now=t0 - 100 - i)     # 평균 30만원
 feed(tfr, "BR", 2, 12_000_000, now=t0, span=1.0)                # 1,200만원 x2 = 평균의 40배
 ok, d = s.check_burst("BR", now=t0)
-check("상대경로: 절대기준 미달이어도 평균 20배면 통과",
-      ok and d.get("burst_path") == "상대", f"{d.get('burst_path')} avg={d.get('avg_tick_value')}")
-check("상대경로에도 절대 하한(1천만원)이 걸림",
-      d.get("rel_min", 0) >= SM.TICK_BURST_REL_FLOOR, str(d.get("rel_min")))
+check("[구버전 회귀방지] 평균 40배여도 절대문턱 미달이면 탈락",
+      not ok, f"{d.get('burst_path')} avg={d.get('avg_tick_value')}")
+check("상대 하한이 절대문턱 이상(뒷문 차단)",
+      d.get("rel_min", 0) >= d.get("burst_min", 0),
+      f"rel_min={d.get('rel_min')} burst_min={d.get('burst_min')}")
+
+# 평균 1틱이 유난히 큰 종목 — 상대 경로가 '더 엄격한 쪽'으로 작동하는지
+s = build_strat(datetime(2026, 8, 3, 9, 30, 0))
+setup_candidate(s, "BR3")
+tfr = s.phase1b.trade_flow
+for i in range(30):
+    tfr.add_tick("BR3", 10_000, "buy", 1000, now=t0 - 100 - i)  # 평균 1,000만원
+ok, d = s.check_burst("BR3", now=t0)
+check("평균이 크면 상대 하한이 절대문턱보다 위로 올라감",
+      d.get("rel_min", 0) > d.get("burst_min", 0),
+      f"rel_min={d.get('rel_min')} burst_min={d.get('burst_min')}")
 
 s = build_strat(datetime(2026, 8, 3, 9, 30, 0))
 setup_candidate(s, "BR2")
 tfr = s.phase1b.trade_flow
 for i in range(30):
     tfr.add_tick("BR2", 10_000, "buy", 30, now=t0 - 100 - i)
-feed(tfr, "BR2", 2, 5_000_000, now=t0, span=1.0)                 # 500만원 — 하한 미달
+feed(tfr, "BR2", 2, 5_000_000, now=t0, span=1.0)                 # 500만원
 ok, d = s.check_burst("BR2", now=t0)
-check("평균의 20배여도 1천만원 하한 미달이면 탈락", not ok, str(d.get("reason", ""))[:60])
+check("소액 다건은 여전히 탈락", not ok, str(d.get("reason", ""))[:60])
 
 # 시간대 계수가 실제로 버스트 판정을 바꾸는지
 s_noon = build_strat(datetime(2026, 8, 3, 12, 0, 0))

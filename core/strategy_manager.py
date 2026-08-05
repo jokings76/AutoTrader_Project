@@ -290,9 +290,72 @@ TICK_BURST_WINDOW_SEC = 5.0
 # 이 경로는 **시간대 보정이 자동**이라는 게 진짜 장점이다 — 점심에 시장이
 # 마르면 분모도 같이 줄어 '평균의 20배'라는 난이도가 시각과 무관하게 유지된다.
 TICK_BURST_REL_MULT = 20.0         # 평균 1틱 체결금액의 몇 배면 대량으로 볼지
-TICK_BURST_REL_FLOOR = 10_000_000  # 상대경로에도 두는 절대 하한(1천만원)
+# [미사용 / 2026-08-05 대체] 상대경로의 절대 하한이었다. 아무 근거 없이 박힌
+# 1천만원이 저가주의 뒷문이 되고 있었다(아래 BURST_PRICE_* 주석 참고) —
+# 이제 하한은 주가 스케일이 적용된 burst_min 자체다.
+TICK_BURST_REL_FLOOR = 10_000_000
 TICK_BURST_REL_WINDOW_SEC = 300.0  # 평균을 재는 구간(5분)
 TICK_BURST_REL_COUNT = 2           # 상대경로 요구 건수
+
+# ── 주가 스케일 계수 (2026-08-05 사용자 지정, 실측 기반) ─────────────
+# [문제] 버스트 문턱이 전 종목 4천만원 고정이라, 주가가 사실상 '어느 경로로
+# 진입하는가'를 결정하고 있었다. 틱 아카이브 107 종목·일(09:00~09:15)에
+# 현행 규칙을 그대로 태운 실측:
+#     주가대        절대(4천만x2건) 발생   양 경로 모두 0인 종목
+#     ~2,500원          0.05회/15분              67%
+#     2,500~5천원       0.04회                   74%
+#     5천~1만원         0.45회                   59%
+#     1만~2.5만원       4.42회                   16%
+#     2.5만원~          6.18회                   18%
+# **124배 차이**다. 5천원 미만에서 절대 경로는 죽어 있었다.
+# 실거래 56건(08-03~05)이 그대로 확인해 준다 — 2,500원 미만 진입 5건은
+# 경로가 100% '상대', 1만~2.5만은 72%가 '절대'였다. 서로 다른 규칙으로
+# 사고 있었던 셈이다.
+#
+# [왜 이런 일이] 틱 체결금액 자체가 주가를 따라 커진다. log-log 회귀 실측:
+#     평균 1틱 금액 ~ 주가^0.36 (r=0.77)  /  '같은 발생빈도' 역산 ~ 주가^0.72
+# 즉 4천만원이라는 같은 숫자가 저가주에선 비범한 사건이고 고가주에선 흔한
+# 사건이다. 그리고 상대 경로(평균1틱x20, 하한 1천만)가 저가주에 한해 이
+# 스케일링을 **의도치 않게** 대신 수행하고 있었다(실효 문턱 저가 1,175만 /
+# 고가 3,741만 = 주가^0.36). 다만 (a) 4천만에서 잘리고 (b) 분모가 실시간으로
+# 흔들려 재현·백테스트가 불가능한 형태였다.
+#
+# [해법] 그 스케일링을 명시적·결정적으로 만든다. 계수 하나를 곱할 뿐이라
+# 시간계수(tmul)와 정확히 같은 방식이고, 가격은 이미 읽고 있는 틱 버퍼에서
+# 나오므로 REST 0콜 / 지연 0ms다.
+#
+# [지수 0.55를 고른 이유] 실측 두 값(0.36 / 0.72)의 중간. 0.40으로 낮추면
+# 저가주가 여전히 아무것도 못 잡아 밴드 편차가 9.8배로 **오히려 나빠진다**
+# (시뮬 확인). 0.55에서 편차 9.3배 -> 3.5배로 줄고, 모든 밴드가 현행보다
+# 타이트해진다(가장 많이 조여지는 게 실거래 최악 밴드였던 1만~2.5만이다).
+# ⚠️ 표본은 틱 아카이브 4일치다. 되돌리려면 ALPHA=0.0으로 두면 계수가
+#    전부 1.0이 되어 현행과 완전히 같아진다.
+BURST_PRICE_REF = 10_000.0    # 이 주가에서 계수 1.0 (= 기존 값이 그대로 유지되는 지점)
+BURST_PRICE_ALPHA = 0.55      # 멱지수. 0.0이면 기능 무효화(전 종목 계수 1.0)
+BURST_PRICE_MIN = 0.30        # 하한 -> 절대문턱이 1,200만원 밑으로 내려가지 않는다
+BURST_PRICE_MAX = 2.50        # 상한 -> 약 53,000원 이상은 전부 1억/2.5억으로 수렴
+
+
+def burst_price_scale(price: float) -> float:
+    """주가에 따른 버스트 문턱 배수. 가격을 모르면 1.0(현행 동작)으로 수렴.
+
+    실제 문턱 예시 (base 4천만 / 단일 1억 기준):
+        1,000원 -> x0.30(하한)  1,200만 / 3,000만
+        2,000원 -> x0.41        1,650만 / 4,130만
+        5,000원 -> x0.68        2,730만 / 6,830만
+       10,000원 -> x1.00        4,000만 / 1.00억   <- 기준점
+       20,000원 -> x1.46        5,860만 / 1.46억
+       50,000원 -> x2.42        9,690만 / 2.42억
+       53,000원~ -> x2.50(상한) 1.00억 / 2.50억
+    """
+    try:
+        p = float(price)
+    except (TypeError, ValueError):
+        return 1.0
+    if p <= 0 or BURST_PRICE_ALPHA == 0.0:
+        return 1.0
+    return max(BURST_PRICE_MIN,
+               min(BURST_PRICE_MAX, (p / BURST_PRICE_REF) ** BURST_PRICE_ALPHA))
 
 # ── 시간대 계수 (사용자 지정: "시간이 지날수록 장이 느슨해지니 반영") ──
 # 장중 거래량은 U자 곡선이라 오전 3천만원과 점심 3천만원은 난이도가 완전히
@@ -733,7 +796,19 @@ RESCUE_ADD_OBSERVE_FLOOR = 0.045
 # 나빴다(추격매수가 됨) — 그래서 가격이 아니라 대금 조건으로 간다.
 REBUY_AFTER_LOSS_ENABLED = True
 REBUY_AFTER_LOSS_WAIT_SEC = 3600.0   # 청산 후 최소 경과(60분)
-REBUY_BURST_VALUE_MULT = 2.0         # 절대 경로 문턱 배수 (4천만 -> 8천만 x2건 = 1.6억)
+# (2026-08-05 재조정, 사용자 지정 "권장보다 좀더 엄격하게") 2.0 -> 2.5.
+# 주가 스케일 도입으로 이 배수의 의미가 바뀌었다. 예전엔 문턱이 전 종목
+# 고정이라 2.0배 = 항상 1.6억이었지만, 이제는 주가에 따라 함께 움직인다:
+#     2,000원 -> 1,650만 x2.5 = 4,130만 x2건 = 0.83억
+#    10,000원 -> 4,000만 x2.5 = 1.00억 x2건 = 2.00억
+#    50,000원~ -> 1.00억 x2.5 = 2.50억 x2건 = 5.00억
+# 2.0을 그대로 뒀다면 저가주 재매수 문턱이 1.6억 -> 0.66억으로 **완화**되는
+# 부작용이 있었다(스케일 계수가 1보다 작으므로). 2.5는 그걸 되돌리고도
+# 남는 수준이며, 일반 진입 대비 배수라 어느 주가대에서든 "평소보다 훨씬
+# 큰 돈이 다시 들어올 때만"이라는 원래 취지가 유지된다.
+# ⚠️ 근거 표본은 여전히 얇다(08-03~04 32건 중 1.6억 이상 구간은 5건).
+#    최적화값이 아니라 안전마진이다. 빡빡하면 2.0으로 되돌릴 것.
+REBUY_BURST_VALUE_MULT = 2.5
 
 # ── 분할매도 (2026-08-04 신규, 사용자 지정) ──────────────────
 # 체결강도 하락 신호의 예측 지평을 틱으로 실측한 결과:
@@ -2052,7 +2127,7 @@ class StrategyManager:
             logger.exception("[%s] 재매수 버스트 판정 실패 -> 차단 유지", stock_code)
             return False, "버스트 판정 실패"
         if not ok:
-            return False, f"대금 미달(재매수 기준 x{REBUY_BURST_VALUE_MULT:.0f})"
+            return False, f"대금 미달(재매수 기준 x{REBUY_BURST_VALUE_MULT:.1f})"
         return True, f"재매수 허용 ({det.get('path', '?')})"
 
     def _is_rebuy_blocked(self, stock_code: str) -> tuple[bool, str]:
@@ -2764,10 +2839,18 @@ class StrategyManager:
             return False, {"reason": "체결강도 데이터 소스 없음(phase1b 미연결)"}
 
         tmul = self.burst_time_multiplier(now_dt)
+        # 주가 스케일 (2026-08-05) — 시간계수와 같은 방식의 곱셈 계수.
+        # 가격은 이미 읽고 있는 틱 버퍼에서 나오므로 REST 0콜 / 지연 0ms.
+        # 가격을 모르면 1.0으로 수렴해 현행과 동일하게 동작한다.
+        try:
+            last_price = tf.get_latest_price(stock_code) or 0
+        except Exception:
+            last_price = 0
+        pmul = burst_price_scale(last_price)
         # value_mult: 재매수처럼 '더 타이트한 대금'을 요구할 때 쓰는 배수
         # (2026-08-05). 기본 1.0이라 일반 진입 동작은 그대로다.
-        burst_min = PHASE1A_BURST_TRADE_VALUE * tmul * value_mult
-        single_min = PHASE1A_SINGLE_TRADE_VALUE * tmul
+        burst_min = PHASE1A_BURST_TRADE_VALUE * tmul * pmul * value_mult
+        single_min = PHASE1A_SINGLE_TRADE_VALUE * tmul * pmul
 
         try:
             burst_count = tf.count_large_trades(
@@ -2797,7 +2880,13 @@ class StrategyManager:
         # 08-04 실측에서 3경로 중 가장 나빴다(상대 -0.67% / 절대 -0.30% /
         # 단일 +0.52%) — 이미 실패한 종목의 재진입 근거로는 부적합하다.
         if allow_relative and avg_tick > 0:
-            rel_min = max(TICK_BURST_REL_FLOOR, avg_tick * TICK_BURST_REL_MULT)
+            # (2026-08-05) 하한이 상수 1천만원이던 것을 **주가 스케일이 적용된
+            # burst_min**으로 바꿨다. 안 바꾸면 이번 변경이 저가주에서 통째로
+            # 무효가 된다 — 2,000원 종목 기준 새 절대문턱 1,650만 vs 옛 상대
+            # 실효 1,175만이라, 여전히 상대 경로가 더 헐거워 그쪽으로 들어온다.
+            # 이제 상대 경로는 절대보다 헐거워질 수 없고(=뒷문이 닫힌다),
+            # '그 종목 평균이 유난히 큰 경우 더 엄격하게'라는 원래 목적만 남는다.
+            rel_min = max(burst_min, avg_tick * TICK_BURST_REL_MULT)
             try:
                 rel_count = tf.count_large_trades(
                     stock_code, window_sec=TICK_BURST_WINDOW_SEC,
@@ -2817,6 +2906,8 @@ class StrategyManager:
             "rel_count": rel_count,
             "rel_min": rel_min,
             "time_mult": tmul,
+            "price_mult": pmul,
+            "last_price": last_price,
             "burst_min": burst_min,
             "single_min": single_min,
         }
@@ -2824,7 +2915,7 @@ class StrategyManager:
             detail["burst_path"] = "절대"
             detail["trigger"] = (
                 f"{burst_min/10000:,.0f}만원+ 체결 {burst_count}건"
-                f"(x{tmul:.2f})"
+                f"(시간x{tmul:.2f} 주가x{pmul:.2f})"
             )
         elif path_single:
             detail["burst_path"] = "단일"

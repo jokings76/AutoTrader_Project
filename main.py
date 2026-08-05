@@ -1047,7 +1047,21 @@ class TradingBot:
                 )[:10]
 
                 if not ranked:
-                    logger.info("🔔 [종가베팅] 후보 없음")
+                    # (2026-08-05) 예전엔 여기서 조용히 continue라 **아무 알림도
+                    # 안 갔다.** 그러면 다윤님 입장에서 "스캔이 안 돌았다"와
+                    # "돌았는데 후보가 없다"를 구분할 수 없다 — 이 프로젝트가
+                    # 진단 알림에서 계속 지켜온 원칙(정상 필터링 ↔ 코드 이상 분리)과
+                    # 정면으로 어긋나는 지점이었다. 08-05에 실제로 이것 때문에
+                    # "종가베팅이 왜 안 왔지?"를 로그로 파고들어야 했다.
+                    # 후보가 0건인 것도 결과이므로 퍼널을 실어 보낸다.
+                    msg = (
+                        f"🔔 종가베팅 후보 없음\n"
+                        f"유니버스 {len(target_codes)}종목 평가 완료 — 적격 0종목\n"
+                        f"({universe_src})"
+                    )
+                    logger.info(msg)
+                    if send_telegram:
+                        send_telegram(msg, target="closing_bet")
                     continue
 
                 # 헤더에 실제 건수를 쓴다 — "TOP 10"으로 고정돼 있었는데 실측

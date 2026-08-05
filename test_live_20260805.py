@@ -272,7 +272,8 @@ from core.order_manager import BUY_AMOUNT_PER_STOCK
 check("POSITION_AMOUNT == DEFAULT_BASE_AMOUNT == BUY_AMOUNT_PER_STOCK",
       SM.POSITION_AMOUNT == DEFAULT_BASE_AMOUNT == BUY_AMOUNT_PER_STOCK,
       f"{SM.POSITION_AMOUNT:,} / {DEFAULT_BASE_AMOUNT:,} / {BUY_AMOUNT_PER_STOCK:,}")
-check("모의(200만) 대비 1/4인 50만원", SM.POSITION_AMOUNT == 500_000,
+# (2026-08-05 장마감 후 사용자 지정) 50만 -> 200만원 환원.
+check("종목당 기본 매수금액 200만원", SM.POSITION_AMOUNT == 2_000_000,
       f"{SM.POSITION_AMOUNT:,}원")
 
 # 조건검색식 주가 상한(150,000원)에서도 트랜치가 1주 이상을 사는가.

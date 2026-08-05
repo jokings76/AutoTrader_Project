@@ -410,10 +410,24 @@ print("\n[10] 손실청산 후 재진입 — 더 타이트한 대금")
 from datetime import timedelta as _td
 check("재매수 완화 상수", SM.REBUY_AFTER_LOSS_ENABLED is True
       and SM.REBUY_AFTER_LOSS_WAIT_SEC == 3600.0
-      and SM.REBUY_BURST_VALUE_MULT == 2.0)
-check("재매수 문턱이 일반의 2배(1.6억)",
+      and SM.REBUY_BURST_VALUE_MULT == 2.5)
+# (2026-08-05 사양 변경) 예전엔 "항상 1.6억"이라는 절대값이었지만, 주가 스케일
+# 도입으로 재매수 문턱도 주가를 따라 움직인다. 검증할 것은 특정 금액이 아니라
+# **일반 진입 대비 배수**다(수치를 박으면 상수를 바꿀 때 테스트가 거짓말을 한다).
+check("재매수 문턱은 일반 진입의 REBUY_BURST_VALUE_MULT배",
+      abs(SM.PHASE1A_BURST_TRADE_VALUE * SM.REBUY_BURST_VALUE_MULT
+          - SM.PHASE1A_BURST_TRADE_VALUE * 2.5) < 1)
+check("재매수 배수는 1.0 초과(= 일반보다 반드시 엄격)",
+      SM.REBUY_BURST_VALUE_MULT > 1.0, str(SM.REBUY_BURST_VALUE_MULT))
+# 주가 스케일이 재매수에도 곱셈으로 합성되는지 (저가주 재매수가 조용히
+# 완화되지 않는지 — 2.0 유지 시 저가주 문턱이 1.6억 -> 0.66억이 됐다)
+_ref = SM.PHASE1A_BURST_TRADE_VALUE * SM.REBUY_BURST_VALUE_MULT
+check("재매수 문턱도 주가 스케일을 탄다(저가주가 더 낮음)",
+      _ref * SM.burst_price_scale(2_000) < _ref * SM.burst_price_scale(20_000))
+check("저가주 재매수 문턱이 구버전(2.0배 고정)보다 낮아지지 않음",
       SM.PHASE1A_BURST_TRADE_VALUE * SM.REBUY_BURST_VALUE_MULT
-      * SM.PHASE1A_BURST_TRADE_COUNT == 160_000_000)
+      * SM.burst_price_scale(2_000)
+      >= SM.PHASE1A_BURST_TRADE_VALUE * 2.0 * SM.burst_price_scale(2_000))
 
 def rb(code, minutes_ago, each_value, n=2):
     s, clock = build()
@@ -446,28 +460,93 @@ s20._rebuy_after_loss_used["K4"] = True
 b4, w4 = s20._is_rebuy_blocked("K4")
 check("종목당 1회 소진 -> 차단", b4 and "1회" in w4, w4)
 
-# 상대 경로 금지: 평균 1틱이 작아 상대 경로로는 통과하지만 절대는 미달
+# 상대 경로 금지 + (2026-08-05) 상대 하한이 절대문턱으로 올라간 뒤의 동작.
+# 일반 문턱은 통과하지만 재매수 배수에는 못 미치는 크기를 넣는다.
 s21, clock21 = build()
 s21._stoploss_blocked.add("K5")
 s21.sold_at["K5"] = clock21() - _td(minutes=90)
 s21.phase1b.start_watching("K5")
 tf21 = s21.phase1b.trade_flow
 now21 = time.time()
+_each = SM.PHASE1A_BURST_TRADE_VALUE          # 딱 일반 문턱(주가 10,000 -> 계수 1.0)
 for i in range(40):
     tf21.add_tick("K5", 10_000, "buy", 1, now=now21 - 110 + i)      # 평균 1틱 = 1만원
 for i in range(2):
-    tf21.add_tick("K5", 10_000, "buy", 3_000, now=now21 - 2 + i*0.3)  # 3천만 (상대 20배 통과)
-ok_rel, _ = s21.check_burst("K5", allow_relative=True)
-ok_norel, _ = s21.check_burst("K5", allow_relative=False,
+    tf21.add_tick("K5", 10_000, "buy", int(_each // 10_000), now=now21 - 2 + i*0.3)
+ok_norm, _ = s21.check_burst("K5", allow_relative=True)
+ok_rebuy, _ = s21.check_burst("K5", allow_relative=False,
                               value_mult=SM.REBUY_BURST_VALUE_MULT)
-check("상대 경로로는 통과하지만", ok_rel)
-check("재매수에서는 상대 경로 금지로 차단", not ok_norel)
+check("일반 진입 문턱은 통과", ok_norm)
+check("재매수 배수(x2.5)에는 미달 -> 차단", not ok_rebuy)
+# 평균 1틱이 1만원이라 상대 경로(x20 = 20만)는 원래 아주 헐거웠는데,
+# 하한이 절대문턱으로 올라간 뒤로는 상대가 절대보다 헐거울 수 없다.
+_, d21 = s21.check_burst("K5", allow_relative=True)
+check("상대 하한이 절대문턱 이상(저가주 뒷문 차단)",
+      d21.get("rel_min", 0) >= d21.get("burst_min", 0),
+      f"rel_min={d21.get('rel_min')} burst_min={d21.get('burst_min')}")
 b5, w5 = s21._is_rebuy_blocked("K5")
 check("따라서 재진입도 차단", b5, w5)
 
 check("일반 진입의 버스트 판정은 그대로(기본값 1.0/True)",
       "value_mult: float = 1.0" in _insp.getsource(SM.StrategyManager.check_burst)
       and "allow_relative: bool = True" in _insp.getsource(SM.StrategyManager.check_burst))
+
+
+# ═════════════════════════════════════════════════════════
+print("\n[11] 버스트 주가 스케일 (2026-08-05 신규)")
+# ═════════════════════════════════════════════════════════
+# [배경] 문턱이 전 종목 4천만 고정이라 주가가 사실상 진입 경로를 결정했다.
+# 틱 아카이브 107 종목·일 실측: 절대 경로 발생이 저가주 0.05회 vs 고가주
+# 6.18회(124배). 실거래 56건에서도 2,500원 미만은 100% '상대' 경로였다.
+ps = SM.burst_price_scale
+
+check("기준가(10,000원)에서 계수 1.0 — 기존 값이 그대로 유지되는 지점",
+      abs(ps(SM.BURST_PRICE_REF) - 1.0) < 1e-9, str(ps(SM.BURST_PRICE_REF)))
+check("주가가 오르면 문턱도 오른다(단조증가)",
+      all(ps(a) <= ps(b) for a, b in zip(
+          [1_000, 2_000, 5_000, 10_000, 20_000, 50_000],
+          [2_000, 5_000, 10_000, 20_000, 50_000, 150_000])))
+check("저가주는 계수 < 1 (문턱이 내려감)", ps(2_000) < 1.0, f"{ps(2_000):.3f}")
+check("고가주는 계수 > 1 (문턱이 올라감)", ps(30_000) > 1.0, f"{ps(30_000):.3f}")
+check("하한 클램프", ps(10) == SM.BURST_PRICE_MIN, str(ps(10)))
+check("상한 클램프", ps(1_000_000) == SM.BURST_PRICE_MAX, str(ps(1_000_000)))
+check("클램프 범위가 뒤집히지 않음", 0 < SM.BURST_PRICE_MIN < 1.0 < SM.BURST_PRICE_MAX)
+# 가격을 모르면 현행 동작으로 수렴 — '모름'이 매수를 막지도 열어주지도 않는다
+check("가격 0/None/문자 -> 계수 1.0 (현행 수렴)",
+      ps(0) == 1.0 and ps(None) == 1.0 and ps(-5) == 1.0 and ps("x") == 1.0)
+check("ALPHA=0이면 기능 무효화(전 종목 1.0)로 롤백 가능",
+      "BURST_PRICE_ALPHA == 0.0" in _insp.getsource(SM.burst_price_scale))
+# 하한이 '대량체결'이라 부를 수 있는 최소 금액은 되는가
+check("하한 적용 시에도 절대문턱이 1천만원 이상",
+      SM.PHASE1A_BURST_TRADE_VALUE * SM.BURST_PRICE_MIN >= 10_000_000,
+      f"{SM.PHASE1A_BURST_TRADE_VALUE * SM.BURST_PRICE_MIN:,.0f}원")
+
+# check_burst가 실제로 계수를 태우는지 (상수만 맞고 배선이 끊긴 경우 방지 —
+# 이 코드베이스에서 실제로 여러 번 났던 사고 유형이다)
+def burst_at(price, each_value, n=2):
+    s, _clk = build()
+    s.phase1b.start_watching("PX")
+    tf = s.phase1b.trade_flow
+    nw = time.time()
+    for i in range(40):
+        tf.add_tick("PX", price, "buy", max(1, int(200_000 // price)), now=nw - 110 + i)
+    for i in range(n):
+        tf.add_tick("PX", price, "buy", int(each_value // price), now=nw - 2 + i * 0.3)
+    return s.check_burst("PX", now=nw)
+
+_ok_lo, _d_lo = burst_at(2_000, SM.PHASE1A_BURST_TRADE_VALUE * 0.5)
+check("저가주(2,000원): 4천만 미달(2천만)이어도 통과 — 구버전은 탈락",
+      _ok_lo, f"burst_min={_d_lo.get('burst_min'):,.0f} pmul={_d_lo.get('price_mult')}")
+check("저가주 문턱이 실제로 내려갔는지", _d_lo.get("burst_min", 0) < SM.PHASE1A_BURST_TRADE_VALUE)
+
+_ok_hi, _d_hi = burst_at(30_000, SM.PHASE1A_BURST_TRADE_VALUE)
+check("고가주(30,000원): 4천만 딱 맞춰선 탈락 — 구버전은 통과",
+      not _ok_hi, f"burst_min={_d_hi.get('burst_min'):,.0f} pmul={_d_hi.get('price_mult')}")
+_ok_hi2, _ = burst_at(30_000, SM.PHASE1A_BURST_TRADE_VALUE * 2.0)
+check("고가주도 스케일된 문턱을 넘으면 통과", _ok_hi2)
+
+check("detail에 주가 계수가 기록돼 사후 추적 가능",
+      "price_mult" in _d_hi and "last_price" in _d_hi)
 
 print("\n" + "=" * 62)
 print(f"통과 {len(PASS)}건 / 실패 {len(FAIL)}건   ({time.time() - T0:.1f}초)")
