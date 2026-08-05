@@ -350,17 +350,23 @@ ok, info = eval_1a(_thin)
 check("단일 1억이어도 틱 3개 미만이면 강도 판단불가로 탈락",
       not ok and "체결틱 부족" in info["reason"], info.get("reason", ""))
 
-ok, info = eval_1a(lambda tf: feed(tf, "X", 3, SM.PHASE1A_BURST_TRADE_VALUE), open_px=10_000, px=10_600)
-check("주도주상위 시가대비 +6% -> 매수보류", not ok and "시가대비" in info["reason"],
+# ⚠️ (2026-08-06) 시가대비 상한이 5% -> **8%**로 완화됐다. 그래서 보류를
+#   확인하려면 8%를 넘겨야 하고(10,900 = +9%), 통과 확인은 6% 미만이어야
+#   한다(10,400 = +4%). +6~8% 구간은 보류가 아니라 **버스트 1.5배 강화**
+#   구간이라 여기선 쓰지 않는다(그쪽은 test_patch_20260805 [14]가 검증).
+_SURGE_BLOCK_PX = 10_900   # 시가 10,000 대비 +9% -> 상한(8%) 초과
+ok, info = eval_1a(lambda tf: feed(tf, "X", 3, SM.PHASE1A_BURST_TRADE_VALUE * 2),
+                   open_px=10_000, px=_SURGE_BLOCK_PX)
+check("주도주상위 시가대비 상한 초과 -> 매수보류", not ok and "시가대비" in info["reason"],
       info.get("reason", ""))
 ok, info = eval_1a(lambda tf: feed(tf, "X", 3, SM.PHASE1A_BURST_TRADE_VALUE), open_px=10_000, px=10_400)
 check("시가대비 +4%는 통과", ok, info.get("reason", ""))
-ok, info = eval_1a(lambda tf: feed(tf, "X", 3, SM.PHASE1A_BURST_TRADE_VALUE), cond="돌파자동매매용",
-                   open_px=10_000, px=10_600)
-check("시가급등 +5% 필터가 돌파자동매매용에도 적용됨 (2026-08-01 확대)",
+ok, info = eval_1a(lambda tf: feed(tf, "X", 3, SM.PHASE1A_BURST_TRADE_VALUE * 2), cond="돌파자동매매용",
+                   open_px=10_000, px=_SURGE_BLOCK_PX)
+check("시가급등 필터가 돌파자동매매용에도 적용됨 (2026-08-01 확대)",
       not ok and "시가대비" in info["reason"], info.get("reason", ""))
-ok, info = eval_1a(lambda tf: feed(tf, "X", 3, SM.PHASE1A_BURST_TRADE_VALUE), cond="기타",
-                   open_px=10_000, px=10_600)
+ok, info = eval_1a(lambda tf: feed(tf, "X", 3, SM.PHASE1A_BURST_TRADE_VALUE * 2), cond="기타",
+                   open_px=10_000, px=_SURGE_BLOCK_PX)
 check("cond_name이 '기타'로 뭉개져도 필터가 꺼지지 않음",
       not ok and "시가대비" in info["reason"], info.get("reason", ""))
 ok, info = eval_1a(lambda tf: feed(tf, "X", 3, SM.PHASE1A_BURST_TRADE_VALUE), cond="돌파자동매매용",

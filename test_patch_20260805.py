@@ -691,9 +691,16 @@ print("\n[13] VI 상단 근접 매수차단 (2026-08-06 신규)")
 # 손도 못 대고 (b) 익절 캡까지 갈 공간이 없고 (c) 매수 직후 VI 확정매도(0.5%)에
 # 걸려 수수료만 내고 되판다. -> 상단까지 3% 이하로 붙으면 매수하지 않는다.
 
-check("매수차단 상수", SM.VI_UPPER_ENTRY_BLOCK_ENABLED is True
+# ⚠️ (2026-08-06 사용자 지정) 현재는 **꺼져 있다.** 08-05 소급 결과 이 규칙이
+#   막는 2건이 하루 실현금액의 124%였고, PS일렉은 이미 VI가 발동·해제된 뒤라
+#   과잉차단이었다. 로직은 보존하고 플래그만 False — 아래 동작 테스트는
+#   플래그를 임시로 켜서 돌린다(되살릴 때를 대비해 커버리지를 유지).
+check("매수차단 현재 OFF (사용자 지정)", SM.VI_UPPER_ENTRY_BLOCK_ENABLED is False
       and SM.VI_UPPER_ENTRY_BLOCK_PCT == 0.03,
       f"{SM.VI_UPPER_ENTRY_BLOCK_ENABLED} / {SM.VI_UPPER_ENTRY_BLOCK_PCT}")
+check("OFF 상태에선 어떤 가격에도 차단하지 않는다",
+      build()[0].vi_entry_block_reason("X", 10_900) is None)
+SM.VI_UPPER_ENTRY_BLOCK_ENABLED = True     # ↓ 로직 검증용으로 임시 ON
 check("매수차단 폭 > 매도발동 폭 (밴드가 뒤집히면 사자마자 되판다)",
       SM.VI_UPPER_ENTRY_BLOCK_PCT > SM.VI_UPPER_MARGIN_PCT,
       f"매수차단 {SM.VI_UPPER_ENTRY_BLOCK_PCT} vs 매도 {SM.VI_UPPER_MARGIN_PCT}")
@@ -788,6 +795,59 @@ check("탈락 사유가 '기타'로 뭉개지지 않는다",
 check("진단 라벨에 수치를 박지 않았다",
       not any(ch.isdigit() for r in SM.StrategyManager._REJECT_RULES
               if "VI 상단 근접" in r[0] for ch in r[0]))
+SM.VI_UPPER_ENTRY_BLOCK_ENABLED = False    # 임시 ON 해제 — 실제 운영값 복원
+check("[정리] 임시 ON을 되돌렸다", SM.VI_UPPER_ENTRY_BLOCK_ENABLED is False)
+
+
+# ═════════════════════════════════════════════════════════
+print("\n[14] 시가대비 완화(8%) + 6% 이상 버스트 강화 (2026-08-06 신규)")
+# ═════════════════════════════════════════════════════════
+# [배경] 08-05 실매수 20건에 5% 컷을 소급하면 2건이 막히는데 **그 2건이 하루
+# 실현금액의 124%**였다(아진엑스텍 +12,980원). -> 8%로 완화하고, 대신 6% 이상
+# 구간은 버스트 문턱을 1.5배로 올려 "확실히 큰 손"만 통과시킨다.
+check("시가대비 상한 8%", SM.PHASE1A_LEADING_OPEN_SURGE_CAP == 8.0,
+      str(SM.PHASE1A_LEADING_OPEN_SURGE_CAP))
+check("강화 시작 6% / 배수 1.5",
+      SM.PHASE1A_OPEN_SURGE_STRICT_FROM == 6.0
+      and SM.PHASE1A_OPEN_SURGE_BURST_MULT == 1.5)
+check("강화 시작 < 매수보류 상한 (밴드가 뒤집히지 않음)",
+      SM.PHASE1A_OPEN_SURGE_STRICT_FROM < SM.PHASE1A_LEADING_OPEN_SURGE_CAP)
+check("강화 배수 > 1.0 (반드시 엄격해지는 방향)",
+      SM.PHASE1A_OPEN_SURGE_BURST_MULT > 1.0)
+
+def burst_at_open(open_px, price, each, n=2, code="OS"):
+    s, _ = build()
+    s._opening_prices[code] = open_px
+    s.phase1b.start_watching(code)
+    tf = s.phase1b.trade_flow
+    nw = time.time()
+    for i in range(40):
+        tf.add_tick(code, price, "buy", max(1, int(200_000 // price)), now=nw - 110 + i)
+    for i in range(n):
+        tf.add_tick(code, price, "buy", int(each // price), now=nw - 2 + i * 0.3)
+    return s.check_burst(code, now=nw)
+
+_base = SM.PHASE1A_BURST_TRADE_VALUE * SM.burst_price_scale(10_600) * 1.05
+_ok, _d = burst_at_open(10_000, 10_600, _base)          # 시가대비 +6% -> 강화
+check("🔴 시가대비 6%면 기본 문턱을 넘겨도 탈락(1.5배 요구)", not _ok,
+      f"급등x{_d.get('surge_mult')} 문턱 {_d.get('burst_min',0)/10000:,.0f}만")
+_ok2, _d2 = burst_at_open(10_000, 10_600,
+                          SM.PHASE1A_BURST_TRADE_VALUE
+                          * SM.burst_price_scale(10_600) * 1.6)
+check("✅ 1.5배를 넘기면 통과", _ok2, f"급등x{_d2.get('surge_mult')}")
+_ok3, _d3 = burst_at_open(10_000, 10_300, _base)        # 시가대비 +3% -> 평상
+check("✅ 대조군: 시가대비 3%는 평상 문턱(강화 없음)",
+      _ok3 and _d3.get("surge_mult") == 1.0, f"급등x{_d3.get('surge_mult')}")
+_ok4, _d4 = burst_at_open(0, 10_600, _base)             # 시가 미상
+check("🔴 시가를 모르면 강화하지 않는다(현행 수렴)",
+      _ok4 and _d4.get("surge_mult") == 1.0, f"급등x{_d4.get('surge_mult')}")
+check("detail에 급등 계수가 기록돼 사후 추적 가능", "surge_mult" in _d)
+# 경계
+_, _e1 = burst_at_open(10_000, 10_599, 1)
+_, _e2 = burst_at_open(10_000, 10_601, 1)
+check("경계: +5.99%는 평상 / +6.01%는 강화",
+      _e1.get("surge_mult") == 1.0 and _e2.get("surge_mult") == 1.5,
+      f"{_e1.get('surge_mult')} / {_e2.get('surge_mult')}")
 
 print("\n" + "=" * 62)
 print(f"통과 {len(PASS)}건 / 실패 {len(FAIL)}건   ({time.time() - T0:.1f}초)")

@@ -452,11 +452,37 @@ PHASE1A_ASK_DEPTH_LEVELS = 3
 PHASE1A_ASK_DEPTH_MIN = 10_000_000  # 1천만원
 
 # 주도주상위 시가대비 급등 매수보류 (2026-07-31, 사용자 지정) — 개장 직후
-# 시가 대비 이미 5% 이상 오른 종목은 가파른 상승 뒤 눌림(되돌림) 가능성이
-# 크다고 보고 보수적으로 매수를 보류한다. 주도주상위 소스에만 적용(사용자가
-# 그렇게 범위 지정) — 전일종가 기준 MAX_ENTRY_CHANGE_PCT(16%)와는 별개로,
-# 이건 "당일 시가 대비"라 갭상승 여부와 무관하게 장중 상승폭만 본다.
-PHASE1A_LEADING_OPEN_SURGE_CAP = 5.0
+# 시가 대비 이미 많이 오른 종목은 가파른 상승 뒤 눌림(되돌림) 가능성이
+# 크다고 보고 보수적으로 매수를 보류한다. 1A 경로에만 적용(눌림목은 애초에
+# 되돌림을 사는 전략이라 면제) — 전일종가 기준 MAX_ENTRY_CHANGE_PCT와는
+# 별개로, 이건 "당일 시가 대비"라 갭상승 여부와 무관하게 장중 상승폭만 본다.
+#
+# (2026-08-06 사용자 지정) 5.0 -> **8.0%**로 완화 + 6% 이상은 버스트 강화.
+# [근거] 08-05 실매수 20건에 5% 컷을 소급하면 **2건이 막히는데 그 2건이
+#   하루 실현금액의 124%**(아진엑스텍 +12,980원 / PS일렉 -840원)였다.
+#   즉 5%는 "가끔 걸리는데 걸리면 그날 제일 큰 종목"을 자르고 있었다.
+# ⚠️ [반드시 같이 볼 것] 08-03~05 청산 36건을 시가대비 구간별로 갈라보면
+#   **정작 나쁜 구간은 6% 위가 아니라 3~6%다**:
+#       ~3%   21건 평균 **+0.48%** 승률 52%
+#       3~6%  12건 평균 **-0.75%** 승률 33%   <- 최악. 손절 3건(-3.05~-3.10%)이 여기
+#       6~8%   1건 평균 +0.13%              <- 표본 1건, 판단 불가
+#       8%~    2건 평균 +1.79%
+#   그래서 아래 STRICT_FROM(6%)은 **데이터로 고른 값이 아니라 사용자 지정**이다.
+#   며칠 쌓아 3~6% 구간이 계속 나쁘면 STRICT_FROM을 3.0으로 내리는 게 맞다.
+PHASE1A_LEADING_OPEN_SURGE_CAP = 8.0
+
+# ── 시가대비 급등 구간 버스트 강화 (2026-08-06 사용자 지정) ──────────
+# 시가 대비 이 % 이상 오른 종목은 매수를 막지는 않되 **더 큰 대금**을 요구한다.
+# [왜] 이 구간은 (a) 되돌림 위험이 크고 (b) 정적VI 상단(시가+10%)까지 여유가
+#   2~4%밖에 없어 위로 갈 공간 자체가 좁다. 그러니 "확실히 큰 손이 들어올 때만".
+# [배수 1.5의 근거] 08-03~04 실거래 32건의 버스트 규모별 성과:
+#       0.8억 미만 19건 승률 37% / 0.8~1.5억 8건 62% / 1.5~3.0억 4건 50%
+#   기본 문턱(4천만 x2건 = 0.8억)에 1.5배를 곱하면 **1.2억**이 되어
+#   승률 37% 구간을 확실히 벗어나 62% 구간에 들어간다. 2.0배(1.6억)도 가능하나
+#   그 위 구간은 표본이 4건뿐이라 더 올릴 근거가 없다.
+# 시간계수·주가계수와 **같은 방식의 곱셈 계수**라 check_burst 한 곳에서 합성된다.
+PHASE1A_OPEN_SURGE_STRICT_FROM = 6.0   # 시가대비 이 % 이상이면
+PHASE1A_OPEN_SURGE_BURST_MULT = 1.5    # 버스트 문턱에 이 배수를 곱한다
 
 # ── 1A 개장초반 슬롯 우선순위 교체 (2026-07-31, 사용자 지정) ──────
 # "장 시작하자마자 여러 종목이 동시에 조건을 만족하면 먼저 틱이 온 놈이
@@ -668,7 +694,13 @@ VI_UPPER_MARGIN_TICKS = 2       # 또는 2호가 이내 (둘 중 하나만 맞�
 #    순간 하루 종일 매수 0건이 되는데, 그건 로그를 뒤지기 전엔 안 보인다
 #    (08-05에 시가대비 필터가 정확히 그 이유로 하루 종일 0건이었다).
 #    '모름'이 매수를 막지도 열어주지도 않게 두고, 대신 탈락 사유로 관측한다.
-VI_UPPER_ENTRY_BLOCK_ENABLED = True
+# ⚠️ (2026-08-06 사용자 지정) **일단 끈다.** 08-05 소급 결과 이 규칙이 막는
+#   2건이 하루 실현금액의 124%였고(아진엑스텍 +12,980원), 게다가 PS일렉은
+#   09:41~42에 이미 VI가 발동·해제돼 거래소 기준가가 갱신된 뒤라 **과잉차단**
+#   이었다(우리는 여전히 시가 기준으로 계산한다). 대신 시가대비 8% 컷 +
+#   6% 이상 버스트 강화로 대체하고 며칠 관측한다.
+#   로직은 그대로 보존 — 되살리려면 이 플래그만 True로 바꾸면 된다.
+VI_UPPER_ENTRY_BLOCK_ENABLED = False
 VI_UPPER_ENTRY_BLOCK_PCT = 0.03   # 상단까지 이 비율 이하면 매수 차단
 
 # ── 동적 익절캡 (2026-07-30 사용자 지정) ───────────────────────
@@ -2997,10 +3029,22 @@ class StrategyManager:
         except Exception:
             last_price = 0
         pmul = burst_price_scale(last_price)
+        # 시가대비 급등 구간 강화 (2026-08-06) — 시가 대비 많이 오른 종목은
+        # 되돌림 위험이 크고 정적VI 상단까지 여유도 좁다. 매수를 막지는 않되
+        # 더 큰 대금을 요구한다. **시가를 모르면 1.0**(현행과 동일)으로 수렴 —
+        # 모름이 문턱을 올리지도 내리지도 않게 한다.
+        smul = 1.0
+        try:
+            op = float(self._opening_prices.get(stock_code, 0.0) or 0.0)
+            if op > 0 and last_price > 0:
+                if (last_price / op - 1.0) * 100 >= PHASE1A_OPEN_SURGE_STRICT_FROM:
+                    smul = PHASE1A_OPEN_SURGE_BURST_MULT
+        except (TypeError, ValueError):
+            smul = 1.0
         # value_mult: 재매수처럼 '더 타이트한 대금'을 요구할 때 쓰는 배수
         # (2026-08-05). 기본 1.0이라 일반 진입 동작은 그대로다.
-        burst_min = PHASE1A_BURST_TRADE_VALUE * tmul * pmul * value_mult
-        single_min = PHASE1A_SINGLE_TRADE_VALUE * tmul * pmul
+        burst_min = PHASE1A_BURST_TRADE_VALUE * tmul * pmul * smul * value_mult
+        single_min = PHASE1A_SINGLE_TRADE_VALUE * tmul * pmul * smul
 
         try:
             burst_count = tf.count_large_trades(
@@ -3057,6 +3101,7 @@ class StrategyManager:
             "rel_min": rel_min,
             "time_mult": tmul,
             "price_mult": pmul,
+            "surge_mult": smul,
             "last_price": last_price,
             "burst_min": burst_min,
             "single_min": single_min,
@@ -3065,7 +3110,7 @@ class StrategyManager:
             detail["burst_path"] = "절대"
             detail["trigger"] = (
                 f"{burst_min/10000:,.0f}만원+ 체결 {burst_count}건"
-                f"(시간x{tmul:.2f} 주가x{pmul:.2f})"
+                f"(시간x{tmul:.2f} 주가x{pmul:.2f} 급등x{smul:.2f})"
             )
         elif path_single:
             detail["burst_path"] = "단일"

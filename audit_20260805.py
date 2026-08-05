@@ -157,6 +157,13 @@ check("VI 마진 < 정적VI 폭 (밴드가 뒤집히지 않음)",
 check("🔴 VI 매수차단 폭 > VI 확정매도 폭 (사자마자 되팔기 방지)",
       SM.VI_UPPER_ENTRY_BLOCK_PCT > SM.VI_UPPER_MARGIN_PCT,
       f"매수차단 {SM.VI_UPPER_ENTRY_BLOCK_PCT} vs 매도 {SM.VI_UPPER_MARGIN_PCT}")
+# (2026-08-06) 시가대비 밴드가 뒤집히면 '강화 구간'이 사라지거나 역전된다.
+check("🔴 급등강화 시작 < 시가대비 매수보류 상한",
+      SM.PHASE1A_OPEN_SURGE_STRICT_FROM < SM.PHASE1A_LEADING_OPEN_SURGE_CAP,
+      f"강화 {SM.PHASE1A_OPEN_SURGE_STRICT_FROM}% < 보류 {SM.PHASE1A_LEADING_OPEN_SURGE_CAP}%")
+check("🔴 급등강화 배수 >= 1.0 (완화 방향으로 못 간다)",
+      SM.PHASE1A_OPEN_SURGE_BURST_MULT >= 1.0,
+      str(SM.PHASE1A_OPEN_SURGE_BURST_MULT))
 check("VI 매수차단 폭 < 정적VI 폭",
       SM.VI_UPPER_ENTRY_BLOCK_PCT < SM.VI_STATIC_RATIO)
 check("추가매수 관찰 하한 > 손절선 (구조 전 더 내려갈 여지)",
@@ -543,6 +550,10 @@ if _doc:
                  f"{SM.VI_UPPER_MARGIN_PCT} {SM.VI_UPPER_MARGIN_TICKS}")
     doc_has("VI매수차단", f"VI매수차단 {SM.VI_UPPER_ENTRY_BLOCK_ENABLED} "
                        f"{SM.VI_UPPER_ENTRY_BLOCK_PCT}")
+    doc_has("시가대비/급등강화",
+            f"시가대비 {SM.PHASE1A_LEADING_OPEN_SURGE_CAP}   "
+            f"급등강화 {SM.PHASE1A_OPEN_SURGE_STRICT_FROM} "
+            f"{SM.PHASE1A_OPEN_SURGE_BURST_MULT}")
     doc_has("매수금액", f"매수금액 3곳 {SM.POSITION_AMOUNT} "
                      f"{DEFAULT_BASE_AMOUNT} {BUY_AMOUNT_PER_STOCK} 일치")
 
