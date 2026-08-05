@@ -562,15 +562,20 @@ class TradingBot:
     async def task_holdings_price_fallback(self):
         while not self._stop:
             await asyncio.sleep(POSITION_CHECK_INTERVAL)
-            try:
-                for code in list(self.strategy_mgr.holdings.keys()):
+            # (2026-08-05) try/except를 **루프 안으로** 옮겼다. 예전엔 루프
+            # 바깥이라 한 종목에서 예외가 나면 거기서 루프가 끊겨 **뒤에
+            # 남은 보유 종목들이 그 사이클을 통째로 건너뛰었다.** 이 태스크는
+            # 틱이 끊긴 종목의 손절을 받아주는 마지막 안전망이라, 한 종목의
+            # 문제가 다른 종목의 손절을 막으면 안 된다.
+            for code in list(self.strategy_mgr.holdings.keys()):
+                try:
                     candles = await asyncio.to_thread(
                         self.rest.get_minute_candles, code, interval=1, count=1
                     )
                     if candles:
                         self.strategy_mgr.on_price_update(code, candles[0]["close"])
-            except Exception:
-                logger.exception("보유 종목 가격 폴링 예외")
+                except Exception:
+                    logger.exception("[%s] 보유 종목 가격 폴링 예외 — 다음 종목 계속", code)
 
     async def task_balance_sync(self):
         while not self._stop:

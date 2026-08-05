@@ -560,6 +560,129 @@ check("고가주도 스케일된 문턱을 넘으면 통과", _ok_hi2)
 check("detail에 주가 계수가 기록돼 사후 추적 가능",
       "price_mult" in _d_hi and "last_price" in _d_hi)
 
+
+# ═════════════════════════════════════════════════════════
+print("\n[12] 정적VI 상단 근접 확정매도 (2026-08-05 신규)")
+# ═════════════════════════════════════════════════════════
+# [배경] VI 발동 시 2분간 단일가매매 -> 시장가 매도 불가. 익절 캡 미달 상태로
+# 갇히면 해제 후 밀려 나온다. 08-05 실측 4/20건이 상단 3% 이내로 근접했고
+# 마키나락스는 0.1%까지 붙었다. 반대로 **하단은 20건 중 0건** 근접(손절이
+# 항상 먼저) — 그래서 하단 로직은 만들지 않았다.
+
+def vi_setup(open_price, buy, qty=100, warm=False):
+    s, clk = build()
+    p = put_pos(s, "VI1", buy=buy, qty=qty, warm=warm)
+    s._opening_prices["VI1"] = open_price
+    return s, p
+
+# 산출 자체
+_s, _ = vi_setup(10_000, 10_400)
+check("VI 상단 = 시가 x (1+비율)",
+      abs(_s.vi_upper_price("VI1") - 10_000 * (1 + SM.VI_STATIC_RATIO)) < 1e-6,
+      f"{_s.vi_upper_price('VI1'):,.0f}")
+check("시가 캐시가 없으면 0.0 (기능이 쉰다)", _s.vi_upper_price("없는종목") == 0.0)
+_s2, _ = vi_setup(0, 10_400)
+check("시가가 0이면 0.0", _s2.vi_upper_price("VI1") == 0.0)
+# 전일종가로 폴백하지 않는지 — 갭상승 날 조기매도를 막는 핵심 가드
+_s3, _ = vi_setup(0, 10_400)
+_s3._prev_closes["VI1"] = 9_000
+check("전일종가로 폴백하지 않음(갭상승 조기매도 방지)",
+      _s3.vi_upper_price("VI1") == 0.0)
+
+# 거리 판정 밴드
+_s4, _ = vi_setup(10_000, 10_000)      # VI 상단 11,000
+g_far = _s4.vi_upper_gap("VI1", 10_500)
+g_near = _s4.vi_upper_gap("VI1", 10_960)     # 0.36% 남음
+g_over = _s4.vi_upper_gap("VI1", 11_050)     # 이미 넘음
+check("멀면 near=False", g_far and not g_far["near"], f"{g_far['gap_pct']*100:.2f}%")
+check("0.5% 이내면 near=True", g_near and g_near["near"], f"{g_near['gap_pct']*100:.2f}%")
+check("⚠️ VI선을 이미 넘었으면 None (기준가 갱신 가능성 — 놓치는 게 안전)",
+      g_over is None)
+check("가격이 0/음수/문자면 None",
+      _s4.vi_upper_gap("VI1", 0) is None and _s4.vi_upper_gap("VI1", -1) is None
+      and _s4.vi_upper_gap("VI1", "x") is None)
+# 2호가 조건은 전 가격대에서 0.5%보다 좁다 -> OR에서 항상 0.5%가 먼저 걸린다.
+# (버그가 아니라 설계 결과. pct를 0.2% 아래로 조이면 그때 호가 조건이 살아난다.)
+from utils.price_helper import add_ticks as _at
+check("[문서화] 2호가 폭은 전 가격대에서 0.5% 미만",
+      all((_at(p, SM.VI_UPPER_MARGIN_TICKS) - p) / p < SM.VI_UPPER_MARGIN_PCT
+          for p in (1500, 3000, 9000, 25000, 80000, 150000)))
+
+# 실제 매도가 나가는가 / 안 나가는가
+def vi_run(open_price, buy, price, warm=False, guard=False, loss_guard=None):
+    s, p = vi_setup(open_price, buy, warm=warm)
+    if guard:
+        s._is_index_guard_active = lambda now_dt=None: True
+    s.on_price_update("VI1", price)
+    return s
+
+_r = vi_run(10_000, 10_000, 10_960)
+check("근접 + 순이익>0 -> 확정매도 실행", "VI1" not in _r.holdings)
+check("사유에 'VI 상단 확정매도'가 남는다",
+      any("VI 상단 확정매도" in (x.get("exit_reason") or "") for x in _Repo.sells),
+      str([x.get("exit_reason") for x in _Repo.sells])[:90])
+
+# ⚠️ 손실 구간에서는 절대 발동하지 않아야 한다 (08-03 결함과 같은 원칙)
+_r = vi_run(10_000, 11_000, 10_960)          # 매수 11,000 -> 현재 10,960 = 손실
+check("🔴 순손실이면 VI 매도 안 함(손절/본전스톱 담당)", "VI1" in _r.holdings)
+# 순이익이 수수료 미만(순<=0)인 경계도 막혀야 한다
+_r = vi_run(10_000, 10_950, 10_960)          # 총 +0.09% < 수수료 0.23%
+check("🔴 순이익 0 이하(수수료 미만)면 발동 안 함", "VI1" in _r.holdings)
+
+# ⚠️ 아래 두 케이스는 **익절 캡(4.0%)이 먼저 발동**해서 포지션이 사라진다.
+#    그러니 "보유가 남아있는지"가 아니라 **"VI 사유로 나가지 않았는지"**를 봐야
+#    한다(처음엔 보유 여부로 단언했다가 이 정상 동작을 실패로 잡았다).
+def vi_reason(open_price, buy, price):
+    vi_run(open_price, buy, price)
+    return " | ".join((x.get("exit_reason") or "") for x in _Repo.sells)
+
+_why = vi_reason(10_000, 10_000, 10_500)     # VI까지 4.76% — 멀다
+check("멀면 VI 사유로 안 나간다(익절캡이 담당)",
+      "VI 상단" not in _why and "익절" in _why, _why[:70])
+_why = vi_reason(10_000, 10_000, 11_050)     # 이미 VI선 초과
+check("VI선 초과면 VI 사유로 안 나간다",
+      "VI 상단" not in _why, _why[:70])
+# 캡이 아직 멀고 VI만 가까운 조합 — 이때가 이 기능의 존재 이유다
+_why = vi_reason(10_800, 11_500, 11_840)     # 매수 11,500 / VI 11,880 / +2.96%
+check("캡(4%) 미달인데 VI만 가까우면 VI가 판다",
+      "VI 상단" in _why, _why[:80])
+
+# 워밍업 중에도 작동 (가격 기반이라 안전)
+_r = vi_run(10_000, 10_000, 10_960, warm=True)
+check("워밍업 중에도 VI 매도는 작동", "VI1" not in _r.holdings)
+
+# 우선순위: 손절 > 지수가드 > VI
+_s, _p = vi_setup(10_000, 11_500)            # VI 상단 11,000, 매수 11,500
+_s.on_price_update("VI1", 11_155)            # -3.0% 손절 & VI 0.5% 이내는 아님
+check("손절 구간에서는 손절 사유로 나간다",
+      "VI1" not in _s.holdings
+      and any("손절" in (x.get("exit_reason") or "") for x in _Repo.sells),
+      str([x.get("exit_reason") for x in _Repo.sells])[:70])
+
+_s, _p = vi_setup(10_000, 10_000)
+_s._is_index_guard_active = lambda now_dt=None: True
+_s._now = lambda: datetime(2026, 8, 5, 11, 10, 0)
+_s.on_price_update("VI1", 10_960)
+check("지수가드 발동 중엔 가드 사유가 우선",
+      "VI1" not in _s.holdings
+      and any("지수 가드" in (x.get("exit_reason") or "") for x in _Repo.sells),
+      str([x.get("exit_reason") for x in _Repo.sells])[:70])
+
+# 예외 안전성 — 판정이 터져도 매매는 계속돼야 한다
+_s, _p = vi_setup(10_000, 10_000)
+_s.vi_upper_gap = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+try:
+    _s.on_price_update("VI1", 10_400)
+    check("VI 판정 예외가 나도 on_price_update가 죽지 않음", True)
+except Exception as e:
+    check("VI 판정 예외가 나도 on_price_update가 죽지 않음", False, str(e))
+check("예외 시에는 매도하지 않음(보수적)", "VI1" in _s.holdings)
+
+# 스위치
+check("VI_UPPER_EXIT_ENABLED=False로 완전 무력화 가능",
+      "VI_UPPER_EXIT_ENABLED and net_rate > 0"
+      in _insp.getsource(SM.StrategyManager.on_price_update))
+
 print("\n" + "=" * 62)
 print(f"통과 {len(PASS)}건 / 실패 {len(FAIL)}건   ({time.time() - T0:.1f}초)")
 if FAIL:

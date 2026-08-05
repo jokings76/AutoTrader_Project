@@ -59,6 +59,7 @@ from core.program_flow import ProgramFlowTracker
 from core.history_fetcher import fetch_n_days_candles, to_trade_value_bins
 from db import TradeRepository, WatchListRepository, SystemEventRepository
 from utils.logger import logger
+from utils.price_helper import add_ticks  # 정적VI 상단 '2호가 이내' 판정용 (2026-08-05)
 
 try:
     from api.auth import send_telegram
@@ -621,6 +622,32 @@ HOLDING_TIMEOUT = timedelta(minutes=EXIT_POLICY["default"]["holding_timeout_min"
 TAKE_PROFIT_CAP_PULLBACK = 0.025
 TAKE_PROFIT_CAP_EARLY = 0.025
 EARLY_WINDOW_END = time(9, 10)  # GROUP_A_START~이 시각 사이 매수분은 이 캡
+
+# ── 정적VI 상단 근접 확정매도 (2026-08-05 사용자 지정) ─────────────
+# [왜] VI(변동성완화장치)가 발동하면 **2분간 단일가매매로 전환돼 시장가로
+# 팔 수 없다.** 익절 캡에 아직 못 미친 상태에서 갇히면, 해제 후 밀려 나오는
+# 위험을 그대로 떠안는다. 그래서 상단 VI에 닿기 직전에 이익을 확정한다.
+#
+# [실측 근거] 08-05 보유 20건을 정적VI 상단(시가x1.10)과 대조:
+#     마키나락스 27,250 / VI상단 27,280  -> **0.1% 남음**
+#     삼기       1,858 / VI상단  1,870  -> **0.6% 남음**  (결과 +6.25%)
+#     GS건설    31,200 / VI상단 32,010  -> 2.6% 남음
+#     금호건설   10,890 / VI상단 11,176  -> 2.6% 남음
+#   즉 **4/20건(20%)이 3% 이내로 근접**했고 2건은 사실상 닿았다.
+#   반대로 **하단 VI는 20건 중 0건**이 근접조차 못 했다(최근접 5.8%) —
+#   손절(-3%)이 언제나 훨씬 먼저 발동하기 때문이다. 그래서 하단은 만들지 않는다.
+#
+# [기준가] 정적VI 발동기준가격은 '직전 단일가'이고 장중엔 통상 **당일 시가**다.
+#   시가는 이미 `_opening_prices`에 캐시돼 있어 **REST 0콜**로 계산된다.
+#   ⚠️ 전일종가로 폴백하지 않는다 — 갭상승한 날 전일종가 기준이면 VI선이
+#      실제보다 낮게 잡혀 **멀쩡한 포지션을 조기 매도**한다. 시가를 모르면
+#      이 기능은 그냥 쉰다(모름이 잘못된 매도를 만들지 않게).
+#   ⚠️ VI가 한 번 발동·해제되면 거래소 기준가가 갱신돼 우리 계산이 낡는다.
+#      그래서 **이미 VI선을 넘은 가격에서는 발동하지 않는다**(아래 밴드 조건).
+VI_UPPER_EXIT_ENABLED = True
+VI_STATIC_RATIO = 0.10          # 정적VI 발동 폭 (기준가 대비 ±10%)
+VI_UPPER_MARGIN_PCT = 0.005     # 상단까지 0.5% 이내면 확정매도
+VI_UPPER_MARGIN_TICKS = 2       # 또는 2호가 이내 (둘 중 하나만 맞으면 발동)
 
 # ── 동적 익절캡 (2026-07-30 사용자 지정) ───────────────────────
 # 1.5%캡 종목이 보유 중 체결강도 상승을 보이면 캡을 2.5%로 올려 더 태우고,
@@ -1489,12 +1516,26 @@ class StrategyManager:
             and (now - self._market_rate_at).total_seconds() < 60
         ):
             return
+        # (2026-08-05) 반환값을 **숫자인지 검사한 뒤에만** 대입한다.
+        # 예전엔 그대로 넣었는데, 여기에 None이 들어가면 _is_severe_crash와
+        # _is_index_guard_active의 `min(kospi, kosdaq)`가 TypeError를 던지고,
+        # 그 둘은 on_price_update **최상단**에서 불린다 -> 그 종목의 손절·익절이
+        # 통째로 죽는다. 지금 get_index_change_rate는 항상 float를 돌려주지만
+        # (실패 시 0.0), 이 함수 하나가 바뀌면 매매가 조용히 멈추는 구조라
+        # 값싼 가드를 둔다. 검사에 걸리면 **기존 캐시값을 유지**한다.
+        def _num(v):
+            return isinstance(v, (int, float)) and not isinstance(v, bool)
+
         try:
-            self._kospi_rate = self.api.get_index_change_rate("001")
+            v = self.api.get_index_change_rate("001")
+            if _num(v):
+                self._kospi_rate = float(v)
         except Exception:
             pass  # 조회 실패 시 기존 캐시값 유지
         try:
-            self._kosdaq_rate = self.api.get_index_change_rate("101")
+            v = self.api.get_index_change_rate("101")
+            if _num(v):
+                self._kosdaq_rate = float(v)
         except Exception:
             pass
         self._market_rate_at = now
@@ -2625,6 +2666,49 @@ class StrategyManager:
             self._last_severe_crash_state = is_crash
 
         return is_crash
+
+    def vi_upper_price(self, stock_code: str) -> float:
+        """정적VI 상단 발동가격. 산출 불가면 0.0 (기능이 쉰다).
+
+        기준가는 **당일 시가**만 쓴다 — 전일종가 폴백을 하지 않는 이유는
+        상수 주석 참고(갭상승 날 조기매도를 만든다). REST 0콜.
+        """
+        try:
+            base = float(self._opening_prices.get(stock_code, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+        if base <= 0:
+            return 0.0
+        return base * (1.0 + VI_STATIC_RATIO)
+
+    def vi_upper_gap(self, stock_code: str, current_price: float) -> Optional[dict]:
+        """정적VI 상단까지의 거리. 판정 불가/범위 밖이면 None.
+
+        반환 dict: vi(상단가), gap(원), gap_pct(비율), ticks(호가 수), near(bool)
+
+        **밴드 조건**: `vi - margin <= price < vi` 일 때만 near=True.
+        - price >= vi 이면 이미 VI가 발동했거나(해제 후 기준가 갱신) 우리
+          기준가가 낡은 것이다. 그 상태에서 파는 건 근거 없는 매도가 되므로
+          발동시키지 않는다. **놓치는 쪽이 잘못 파는 쪽보다 안전하다.**
+        """
+        vi = self.vi_upper_price(stock_code)
+        try:
+            px = float(current_price)
+        except (TypeError, ValueError):
+            return None
+        if vi <= 0 or px <= 0 or px >= vi:
+            return None
+        gap = vi - px
+        gap_pct = gap / px
+        # 호가 판정은 add_ticks로 한다 — 가격대 경계(2천/5천/2만...)에서
+        # 호가단위가 바뀌므로 단순 나눗셈은 틀린다.
+        try:
+            within_ticks = add_ticks(int(px), VI_UPPER_MARGIN_TICKS) >= vi
+        except Exception:
+            within_ticks = False
+        near = (gap_pct <= VI_UPPER_MARGIN_PCT) or within_ticks
+        return {"vi": vi, "gap": gap, "gap_pct": gap_pct,
+                "within_ticks": within_ticks, "near": near}
 
     def _is_index_guard_active(self, now_dt: datetime = None) -> bool:
         """지수 하락 가드 발동 여부 (2026-08-03 신규, 사용자 지정).
@@ -4517,6 +4601,30 @@ class StrategyManager:
         if not buy_price:
             return
 
+        # ── 가격 위생검사 (2026-08-05) ────────────────────────────────
+        # **모든 매도가 이 함수를 지난다.** 여기에 이상한 값이 들어오면 그 자리에서
+        # 시장가 매도가 나가므로, 판정 전에 값 자체를 검증한다.
+        #   · 음수: 키움 응답은 등락부호가 붙은 '+78800'/'-78800' 형태다. 라이브
+        #     두 경로(WS 0B의 abs(), REST 분봉의 _safe_price)가 이미 부호를 벗기지만,
+        #     그 중 하나라도 바뀌면 gross_rate가 -100%가 되어 **즉시 손절**이 나간다.
+        #   · 비정상 배율: KRX 일일 변동 상한은 ±30%이고 이 봇은 당일 청산이라,
+        #     매수가의 0.2~5배를 벗어난 값은 데이터 오류다. 그대로 두면 가짜
+        #     급등으로 익절이, 가짜 급락으로 손절이 나간다.
+        # 어느 쪽이든 **판정을 건너뛴다**(매매를 만들지 않는다). 다음 정상 틱이
+        # 오면 그때 판정하고, 틱이 끊겨도 30초 가격 폴백이 받는다.
+        try:
+            current_price = float(current_price)
+        except (TypeError, ValueError):
+            logger.warning("[%s] 가격 형식 이상(%r) — 청산 판정 건너뜀",
+                           stock_code, current_price)
+            return
+        if current_price <= 0 or not (buy_price * 0.2 <= current_price <= buy_price * 5):
+            logger.warning(
+                "[%s] 비정상 가격 %s (매수가 %s) — 청산 판정 건너뜀",
+                stock_code, f"{current_price:,.0f}", f"{buy_price:,.0f}",
+            )
+            return
+
         if current_price > pos["highest_price"]:
             pos["highest_price"] = current_price
 
@@ -4596,6 +4704,29 @@ class StrategyManager:
                     stock_code, current_price,
                     f"지수 가드 강제청산 "
                     f"({INDEX_GUARD_FORCE_CLOSE.strftime('%H:%M')}, "
+                    f"순 {net_rate*100:+.2f}%)",
+                )
+                return
+
+        # ── 정적VI 상단 근접 확정매도 (2026-08-05 사용자 지정) ──────────
+        # 워밍업보다 **앞**이다: 순수 가격 판정이라 강도·거래량처럼 매수
+        # 직후 흔들리는 지표를 쓰지 않고, 매수 직후 급등으로 VI에 닿는
+        # 경우가 실제로 있다(08-05 마키나락스는 09:01 매수분이 VI 0.1% 앞까지).
+        # 손절·지수가드보다는 **뒤**다 — 이건 익절이고 저쪽은 리스크 차단이다.
+        # ⚠️ 반드시 **순이익 > 0**에서만 판다. 손실 구간의 매도는 손절/본전스톱이
+        #    담당한다(08-03에 '익절 로직이 손실 구간에서 발동'한 결함과 같은 원칙).
+        if VI_UPPER_EXIT_ENABLED and net_rate > 0:
+            try:
+                vi_info = self.vi_upper_gap(stock_code, current_price)
+            except Exception:
+                logger.exception("[%s] VI 상단 판정 실패 — 무시하고 계속", stock_code)
+                vi_info = None
+            if vi_info and vi_info["near"]:
+                why = ("2호가 이내" if vi_info["within_ticks"]
+                       else f"{vi_info['gap_pct']*100:.2f}% 이내")
+                self._execute_sell(
+                    stock_code, current_price,
+                    f"VI 상단 확정매도 (정적VI {vi_info['vi']:,.0f}원까지 {why}, "
                     f"순 {net_rate*100:+.2f}%)",
                 )
                 return
