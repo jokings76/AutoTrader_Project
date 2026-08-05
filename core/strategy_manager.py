@@ -723,6 +723,18 @@ RESCUE_ADD_MAX_PER_DAY = 2
 RESCUE_ADD_OBSERVE_SEC = 15.0
 RESCUE_ADD_OBSERVE_FLOOR = 0.045
 
+# ── 손실청산 종목의 조건부 재진입 (2026-08-05 사용자 지정) ──────────────
+# 07-29에 '손실청산 = 당일 영구차단'을 만든 건 스피어가 3연속 재진입으로
+# -199,290원을 낸 사고 때문이었다. 그 규칙은 유지하되, **훨씬 큰 대금이
+# 다시 들어올 때만** 1회 예외를 둔다.
+# 08-05 근거: 손실청산 7종목 중 KBI메탈이 손절 후 상한가(매수가 +15.93%)에
+# 안착했다. 손절 파라미터로는 잡을 수 없고(손절 후 9분간 -6.40%까지 추가
+# 하락) 재매수가 유일한 경로다. 단 '가격 회복 후 재진입'은 실측 1승 3패로
+# 나빴다(추격매수가 됨) — 그래서 가격이 아니라 대금 조건으로 간다.
+REBUY_AFTER_LOSS_ENABLED = True
+REBUY_AFTER_LOSS_WAIT_SEC = 3600.0   # 청산 후 최소 경과(60분)
+REBUY_BURST_VALUE_MULT = 2.0         # 절대 경로 문턱 배수 (4천만 -> 8천만 x2건 = 1.6억)
+
 # ── 분할매도 (2026-08-04 신규, 사용자 지정) ──────────────────
 # 체결강도 하락 신호의 예측 지평을 틱으로 실측한 결과:
 #   +1분 평균 -0.91% (6건 전부 음수 — 신호가 맞다)
@@ -953,6 +965,8 @@ class StrategyManager:
         self._buy_success_count = 0
         # 손절 대신 추가매수(Rescue Add) 당일 발동 횟수 (2026-08-05)
         self._rescue_count_today = 0
+        # 손실청산 후 재진입을 이미 쓴 종목 (종목당 1회, 2026-08-05)
+        self._rebuy_after_loss_used: dict[str, bool] = {}
         # MDD 일손실 차단 (실현손익 기준 -3%)
         self._base_capital = None  # 기준자본 (첫 매수 시도 때 1회 기록)
         self._daily_realized = 0.0  # 오늘 실현손익 누적
@@ -1994,11 +2008,71 @@ class StrategyManager:
     # ========================================
     # 쿨다운 / 차단
     # ========================================
+    def _rebuy_after_loss_ok(self, stock_code: str) -> tuple[bool, str]:
+        """손실청산 종목의 재진입 허용 여부 (2026-08-05 신규).
+
+        일반 진입보다 **훨씬 타이트한 대금**을 요구한다. 이미 한 번 실패한
+        종목이므로 같은 문턱으로 다시 사면 같은 실패를 반복하기 쉽다.
+
+        기준 (08-03~04 실거래 32건의 버스트 규모별 성과에서 도출):
+            0.8억 미만  19건 승률 37% 평균 -0.64%   <- 현재 일반 문턱(4천만x2)
+            0.8~1.5억    8건 승률 62% 평균 +0.10%
+            1.5~3.0억    4건 승률 50% 평균 +0.89%
+            3.0억+       1건 승률 100% 평균 +1.76%
+        0.8억을 경계로 37% -> 62%로 확연히 갈린다. 재매수는 여기에 **2배
+        안전마진**을 더해 절대 경로 문턱을 8천만x2건(=1.6억)으로 올린다.
+        ⚠️ 1.6억 이상 구간 자체의 표본은 5건뿐이라 이 값은 '최적화된 값'이
+        아니라 보수적 안전마진이다.
+
+        **상대 경로는 재매수에서 금지**한다 — 08-04 실측에서 3경로 중 가장
+        나빴다(상대 8건 -0.67% / 절대 -0.30% / 단일 +0.52%). 저유동 종목에서
+        '상대적으로만 큰' 체결이라 이미 실패한 종목의 재진입 근거로 약하다.
+        단일 경로(1억+)는 그대로 둔다 — 이미 절대 문턱보다 높고 성과도 최상이다.
+        """
+        if not REBUY_AFTER_LOSS_ENABLED:
+            return False, "기능 비활성"
+        if self._rebuy_after_loss_used.get(stock_code):
+            return False, "이미 1회 재진입함"
+        sold = self.sold_at.get(stock_code)
+        if sold is None:
+            return False, "청산시각 미상"
+        elapsed = (self._now() - sold).total_seconds()
+        if elapsed < REBUY_AFTER_LOSS_WAIT_SEC:
+            return False, (
+                f"청산 후 {elapsed/60:.0f}분 < "
+                f"{REBUY_AFTER_LOSS_WAIT_SEC/60:.0f}분"
+            )
+        try:
+            ok, det = self.check_burst(
+                stock_code,
+                value_mult=REBUY_BURST_VALUE_MULT,
+                allow_relative=False,
+            )
+        except Exception:
+            logger.exception("[%s] 재매수 버스트 판정 실패 -> 차단 유지", stock_code)
+            return False, "버스트 판정 실패"
+        if not ok:
+            return False, f"대금 미달(재매수 기준 x{REBUY_BURST_VALUE_MULT:.0f})"
+        return True, f"재매수 허용 ({det.get('path', '?')})"
+
     def _is_rebuy_blocked(self, stock_code: str) -> tuple[bool, str]:
         if stock_code in self.sell_blocked:
             return True, "매도 차단 (영구실패)"
         if stock_code in self._stoploss_blocked:
-            return True, "손절 종목 당일 재매수 금지"
+            # (2026-08-05) 조건부 해제 — 손실청산 종목도 "훨씬 큰 대금이 다시
+            # 들어오면" 1회만 재진입을 허용한다.
+            #
+            # 근거: 08-05에 손실청산 7종목이 이후 크게 올랐다. 특히 KBI메탈은
+            # 손절(09:01) 후 12:46부터 상승해 **상한가(매수가 +15.93%)**에 안착했다.
+            # 손절 파라미터로는 이걸 잡을 수 없다 — 손절 후 9분간 -6.40%까지
+            # 더 빠졌으므로 어떤 손절선을 써도 털린다. 유일한 경로가 재매수다.
+            #
+            # ⚠️ 다만 '가격이 회복되면 재진입'은 실측에서 **1승 3패**로 나빴다
+            # (손절가 +5% 회복 후 진입 = 이미 추격매수). 그래서 가격이 아니라
+            # **신호(대금)** 조건으로 간다 — 정상 트리거가 다시 날 때만이다.
+            ok, why = self._rebuy_after_loss_ok(stock_code)
+            if not ok:
+                return True, f"손절 종목 당일 재매수 금지 ({why})"
         cnt = self._buy_count_today.get(stock_code, 0)
         if cnt >= MAX_BUYS_PER_STOCK:
             return True, (
@@ -2564,13 +2638,18 @@ class StrategyManager:
             except Exception:
                 logger.warning("[%s] pre-arm 전일종가 예열 실패", stock_code)
 
-        if candles and stock_code not in self._opening_prices:
+        if stock_code not in self._opening_prices:
             try:
-                op = self._today_open(candles)
-                if op > 0:
-                    self._opening_prices.setdefault(stock_code, op)
+                if candles:
+                    op = self._today_open(candles)
+                    if op > 0:
+                        self._opening_prices.setdefault(stock_code, op)
+                # 분봉이 없으면 아무것도 하지 않는다 — 시가는 위의
+                # _get_prev_close(ka10001)가 **같은 1콜에서** 이미 채워준다.
+                # 여기서 분봉 400개를 따로 받으면 08-02에 없앤 REST 부담이
+                # 되살아난다(트리거 핫패스는 REST 0콜이어야 한다).
             except Exception:
-                pass
+                logger.warning("[%s] pre-arm 시가 예열 실패", stock_code)
 
     def update_strength_timer(
         self, stock_code: str, strength: float, now: float = None
@@ -2665,7 +2744,8 @@ class StrategyManager:
         self._entry_plans.pop(stock_code, None)
 
     def check_burst(self, stock_code: str, now: float = None,
-                    now_dt: datetime = None) -> tuple[bool, dict]:
+                    now_dt: datetime = None, value_mult: float = 1.0,
+                    allow_relative: bool = True) -> tuple[bool, dict]:
         """대량체결 버스트 3경로(OR) 판정. (통과여부, 상세) 반환.
 
           ① 3천만원 x 시간계수 이상 단일체결이 2건 이상 (5초 창)
@@ -2684,7 +2764,9 @@ class StrategyManager:
             return False, {"reason": "체결강도 데이터 소스 없음(phase1b 미연결)"}
 
         tmul = self.burst_time_multiplier(now_dt)
-        burst_min = PHASE1A_BURST_TRADE_VALUE * tmul
+        # value_mult: 재매수처럼 '더 타이트한 대금'을 요구할 때 쓰는 배수
+        # (2026-08-05). 기본 1.0이라 일반 진입 동작은 그대로다.
+        burst_min = PHASE1A_BURST_TRADE_VALUE * tmul * value_mult
         single_min = PHASE1A_SINGLE_TRADE_VALUE * tmul
 
         try:
@@ -2711,7 +2793,10 @@ class StrategyManager:
         # 절대 경로만 쓴다. '모름'이 매수를 막지도, 열어주지도 않게 한다.
         rel_min = 0.0
         rel_count = 0
-        if avg_tick > 0:
+        # allow_relative=False면 상대 경로를 아예 쓰지 않는다 (2026-08-05).
+        # 08-04 실측에서 3경로 중 가장 나빴다(상대 -0.67% / 절대 -0.30% /
+        # 단일 +0.52%) — 이미 실패한 종목의 재진입 근거로는 부적합하다.
+        if allow_relative and avg_tick > 0:
             rel_min = max(TICK_BURST_REL_FLOOR, avg_tick * TICK_BURST_REL_MULT)
             try:
                 rel_count = tf.count_large_trades(
@@ -2723,7 +2808,7 @@ class StrategyManager:
 
         path_abs = burst_count >= PHASE1A_BURST_TRADE_COUNT
         path_single = max_single >= single_min
-        path_rel = avg_tick > 0 and rel_count >= TICK_BURST_REL_COUNT
+        path_rel = allow_relative and avg_tick > 0 and rel_count >= TICK_BURST_REL_COUNT
 
         detail = {
             "burst_count": burst_count,
@@ -2928,6 +3013,9 @@ class StrategyManager:
         if not current_price or current_price <= 0:
             return False
 
+        # ⚠️ 여기서는 **캐시만** 읽는다 (REST 0콜). 캐시는 prearm_candidate가
+        # 편입 시점에 채운다 — 트리거 경로에서 REST를 부르면 가장 급한 순간에
+        # 스로틀 0.6초(+429면 2초)가 붙어 08-02에 없앤 병목이 되살아난다.
         ok, info = self.evaluate_tick_entry(
             stock_code, sub_strategy, current_price,
             open_price=self._opening_prices.get(stock_code, 0.0),
@@ -3745,7 +3833,22 @@ class StrategyManager:
         if cached:
             return cached
         try:
-            change_pct = self.api.get_stock_change_rate(stock_code)
+            # (2026-08-05) 같은 ka10001 응답에서 **시가까지** 함께 캐시한다.
+            # 예전엔 시가를 얻으려 분봉 400개를 따로 받았고, 그마저 pre-arm이
+            # 실제로는 호출하지 않아 "시가대비 +5% 매수보류" 필터가 하루 종일
+            # 죽어 있었다(08-05 실측: 발동 0건). 여기서 채우면 **추가 REST 0콜**이다.
+            change_pct = None
+            try:
+                basic = self.api.get_basic_quote(stock_code)
+            except Exception:
+                basic = None
+            if basic:
+                change_pct = basic.get("change_rate")
+                op = basic.get("open")
+                if op and op > 0:
+                    self._opening_prices.setdefault(stock_code, float(op))
+            if change_pct is None:
+                change_pct = self.api.get_stock_change_rate(stock_code)
             if not current_price or change_pct is None:
                 return None
             prev_close = current_price / (1 + change_pct / 100)
@@ -4154,6 +4257,8 @@ class StrategyManager:
                 # 평단으로 덮어써도 이 값은 유지된다 — 추가매수 후 최종 방어선
                 # (RESCUE_ADD_FINAL_STOP)의 기준이 '원가'이기 때문이다.
                 "origin_price": fill_price,
+                # 손실청산 후 재진입으로 산 자리인가 (2026-08-05).
+                "is_rebuy_after_loss": stock_code in self._stoploss_blocked,
                 "buy_quantity": quantity,
                 # qty = 현재 잔량. 부분매도(2026-08-04)가 이 값을 줄인다.
                 # buy_quantity는 '총 매수량'으로 남겨 손익 기준을 유지한다.
@@ -4185,6 +4290,15 @@ class StrategyManager:
                 "cond_key": self.cond_perf_key(cond_name),
                 "order_style": order_style,
             }
+            # 손실청산 후 재진입은 **종목당 1회**다. 실제로 체결된 지금
+            # 소진 표시를 남긴다 — 판정(_rebuy_after_loss_ok)에서 미리
+            # 표시하면 주문이 거부됐을 때 기회가 사라진다.
+            if self.holdings[stock_code].get("is_rebuy_after_loss"):
+                self._rebuy_after_loss_used[stock_code] = True
+                logger.warning(
+                    "[%s] %s 🔁 손실청산 후 재진입 체결 (종목당 1회 소진) @ %s원",
+                    stock_code, stock_name, f"{fill_price:,.0f}",
+                )
 
             self.sold_at.pop(stock_code, None)
             self._buy_success_count += 1
@@ -4843,10 +4957,39 @@ class StrategyManager:
                     f"체결강도 {entry_s:.0f}->{cur_s:.0f}, 거래량 x{vol_ratio:.2f}, "
                     f"순 {net_rate:+.2f}% — 손절 대기 대신 손실 축소)"
                 )
-                # 손실반등은 **전량** 청산 유지 (2026-08-04).
-                # 분할은 '익절을 놓치지 않기' 위한 장치인데, 이 경로는 애초에
-                # 손실을 -3% 손절 전에 줄이려는 리스크 장치다. 절반을 남기면
-                # 그 방어가 절반으로 약해진다 — 성격이 반대라 적용하지 않는다.
+                # (2026-08-05 변경) 전량 -> **50% 분할**, 잔량은 동적캡과 같은
+                # 고점대비 트레일로 넘긴다.
+                #
+                # 08-04엔 "이 경로는 리스크 장치라 성격이 반대"라며 전량을
+                # 유지했는데, 08-05 실거래가 그 판단을 뒤집었다 — 손실반등
+                # 매도 6건 중 **5건이 이후 상승했고 4건은 익절캡까지** 갔다:
+                #   금호타이어 -1.32% -> 이후 +6.04% / 뉴엔AI -0.12% -> +16.49%
+                #   일승 -0.11% -> +5.69% / JW신약 -0.63% -> +5.97%
+                #   PS일렉 -0.66% -> +3.10% / 서산 -0.45% -> +0.76%(유일한 실패)
+                #   실제 실현 -6,967원 vs 홀딩 시 +28,690원 (차이 +35,657원)
+                #
+                # 원인은 판정 기준이다: 급락 직후의 반등 초기엔 거래량·강도가
+                # **직전 급락 구간보다 낮은 게 당연**한데, 그걸 '가짜 반등'의
+                # 근거로 쓰니 조건이 거의 항상 참이 된다(08-03에 진입강도
+                # 스파이크를 기준선으로 삼아 동적캡이 오발동한 것과 같은 오류).
+                # 절반만 팔면 손실 축소 목적은 절반 달성하면서 상승 참여도
+                # 절반 남는다 — 오늘 기준 -6,967원 -> 약 +10,900원.
+                qty = int(pos.get("qty", pos.get("buy_quantity")) or 0)
+                half = int(qty * PARTIAL_EXIT_FRACTION)
+                if PARTIAL_EXIT_ENABLED and not pos.get("partial_exited") and half >= 1:
+                    self._execute_sell(
+                        code, price,
+                        reason + f" — 분할 1차 {int(PARTIAL_EXIT_FRACTION*100)}%"
+                        f" (잔량은 고점대비 {PARTIAL_EXIT_TRAIL*100:.1f}% 트레일)",
+                        sell_qty=half,
+                    )
+                    # 잔량 트레일 기준 고점을 지금 시점으로 고정 (동적캡 경로와 동일).
+                    p = self.holdings.get(code)
+                    if p is not None:
+                        p["trail_peak"] = max(
+                            float(p.get("highest_price") or price), float(price)
+                        )
+                    continue
                 self._execute_sell(code, price, reason)
                 continue
 

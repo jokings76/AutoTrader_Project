@@ -321,7 +321,7 @@ if "X1" in s4.holdings:
               10_200 < rec["sell_price"] < 10_600, f'{rec["sell_price"]:,.0f}')
 
 # ═════════════════════════════════════════════════════════
-print("\n[9] 손실반등은 전량 청산 유지 (리스크 장치는 안 쪼갠다)")
+print("\n[9] 손실반등도 50% 분할 (2026-08-05 변경)")
 # ═════════════════════════════════════════════════════════
 s5 = build()
 p5 = put_pos(s5, code="Y1", upgraded=False)
@@ -332,11 +332,23 @@ for i in range(12):
     s5.phase1b.trade_flow.add_tick("Y1", 9_150, "buy", 1, now=T - i * 0.2)
 s5._volume_ratio = lambda c: 0.3
 s5._update_dynamic_caps()
-check("손실반등은 절반이 아니라 전량 청산", "Y1" not in s5.holdings,
+# (2026-08-05) 전량 -> 50% 분할로 변경. 08-05 실거래에서 손실반등 매도 6건 중
+# 5건이 이후 상승하고 4건은 익절캡까지 갔다(실현 -6,967원 vs 홀딩 +28,690원).
+# 판정 기준의 문제였다 — 급락 직후 반등 초기엔 거래량·강도가 직전 급락 구간보다
+# 낮은 게 당연한데 그걸 '가짜 반등'의 근거로 써서 조건이 거의 항상 참이 됐다.
+check("손실반등도 50%만 매도하고 잔량 보유", "Y1" in s5.holdings,
       f"holdings={list(s5.holdings)}")
-check("손실반등 사유로 기록",
-      any("손실반등" in (r.get("exit_reason") or "") for r in _Repo.sells),
-      str([r.get("exit_reason") for r in _Repo.sells])[:70])
+check("잔량이 절반", s5.holdings.get("Y1", {}).get("qty") == 50,
+      str(s5.holdings.get("Y1", {}).get("qty")))
+check("분할 표시 + 트레일 기준 고점 설정",
+      s5.holdings.get("Y1", {}).get("partial_exited") is True
+      and s5.holdings.get("Y1", {}).get("trail_peak", 0) > 0)
+# 부분매도는 설계상 DB(update_sell)를 부르지 않는다(완전청산 시 1행만 기록).
+# 그래서 사유 문자열이 아니라 **실제 주문**으로 검증한다.
+_sold = [o for o in s5.order_manager.orders if o.get("side") == "sell"]
+check("실제로 50주만 매도 주문됨",
+      len(_sold) == 1 and _sold[0]["qty"] == 50, str(_sold))
+check("완전청산이 아니므로 DB 기록은 아직 없음", not _Repo.sells)
 
 # ═════════════════════════════════════════════════════════
 print("\n[10] 손절은 분할과 무관하게 전량 — 최후 방어선 불변")

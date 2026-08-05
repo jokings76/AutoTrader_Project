@@ -13,6 +13,7 @@
 import os as _os_testlog
 _os_testlog.environ["AUTOTRADER_TEST_LOG"] = "1"
 
+import inspect as _insp
 import sys
 import time
 from datetime import datetime, timedelta
@@ -374,6 +375,99 @@ s15._try_fill_entry_plan("B4", 10_050, now=time.time())
 check("ENTRY_BREAKOUT_ENABLED=False면 상승 이탈 미발동",
       "B4" not in s15.holdings)
 SM.ENTRY_BREAKOUT_ENABLED = True
+
+# ═════════════════════════════════════════════════════════
+print("\n[9] 시가대비 필터 — ka10001 1콜로 채워지는가 (REST 추가 0콜)")
+# ═════════════════════════════════════════════════════════
+# 08-05 실측: 이 필터의 발동 로그가 하루 종일 0건이었고 PS일렉트로닉스가
+# 시가대비 +9.94%인데 그대로 체결됐다. 원인은 시가 캐시가 비어 있으면
+# open_price=0이 되어 필터가 통째로 스킵되는 것. 이제 전일종가를 가져오는
+# 바로 그 ka10001 응답에서 시가까지 함께 캐시한다.
+class _RestQuote(_Rest):
+    def __init__(self):
+        super().__init__(); self.basic_calls = 0
+    def get_basic_quote(self, code):
+        self.basic_calls += 1
+        return {"change_rate": 3.0, "open": 9_000.0}
+
+s16, _ = build()
+s16.api = _RestQuote()
+pc = s16._get_prev_close("Q1", 10_000)
+check("전일종가 조회 1콜로 시가까지 캐시됨",
+      s16._opening_prices.get("Q1") == 9_000.0 and s16.api.basic_calls == 1,
+      f'시가={s16._opening_prices.get("Q1")} / ka10001 {s16.api.basic_calls}콜')
+check("전일종가도 정상 산출", pc and abs(pc - 10_000/1.03) < 1)
+before = s16.api.basic_calls
+s16._get_prev_close("Q1", 10_000)
+check("두 번째 호출은 캐시 사용(REST 추가 0콜)", s16.api.basic_calls == before)
+check("진입 핫패스는 raw 캐시만 읽는다(REST 0콜 유지)",
+      "self._opening_prices.get(stock_code, 0.0)" in
+      _insp.getsource(SM.StrategyManager._maybe_tick_entry))
+
+# ═════════════════════════════════════════════════════════
+print("\n[10] 손실청산 후 재진입 — 더 타이트한 대금")
+# ═════════════════════════════════════════════════════════
+from datetime import timedelta as _td
+check("재매수 완화 상수", SM.REBUY_AFTER_LOSS_ENABLED is True
+      and SM.REBUY_AFTER_LOSS_WAIT_SEC == 3600.0
+      and SM.REBUY_BURST_VALUE_MULT == 2.0)
+check("재매수 문턱이 일반의 2배(1.6억)",
+      SM.PHASE1A_BURST_TRADE_VALUE * SM.REBUY_BURST_VALUE_MULT
+      * SM.PHASE1A_BURST_TRADE_COUNT == 160_000_000)
+
+def rb(code, minutes_ago, each_value, n=2):
+    s, clock = build()
+    s._stoploss_blocked.add(code)
+    s.sold_at[code] = clock() - _td(minutes=minutes_ago)
+    s.phase1b.start_watching(code)
+    tf = s.phase1b.trade_flow
+    now = time.time()
+    for i in range(40):
+        tf.add_tick(code, 10_000, "buy", 1, now=now - 110 + i)
+    for i in range(n):
+        tf.add_tick(code, 10_000, "buy", int(each_value // 10_000), now=now - 2 + i * 0.3)
+    return s
+
+BIG = SM.PHASE1A_BURST_TRADE_VALUE * SM.REBUY_BURST_VALUE_MULT
+s17 = rb("K1", 90, BIG)
+blocked, why = s17._is_rebuy_blocked("K1")
+check("60분 경과 + 2배 대금 -> 재진입 허용", not blocked, why)
+
+s18 = rb("K2", 30, BIG)
+b2, w2 = s18._is_rebuy_blocked("K2")
+check("60분 미경과 -> 차단 유지", b2 and "분" in w2, w2)
+
+s19 = rb("K3", 90, SM.PHASE1A_BURST_TRADE_VALUE)   # 일반 문턱(2배 미달)
+b3, w3 = s19._is_rebuy_blocked("K3")
+check("일반 문턱은 통과해도 재매수 기준엔 미달 -> 차단", b3, w3)
+
+s20 = rb("K4", 90, BIG)
+s20._rebuy_after_loss_used["K4"] = True
+b4, w4 = s20._is_rebuy_blocked("K4")
+check("종목당 1회 소진 -> 차단", b4 and "1회" in w4, w4)
+
+# 상대 경로 금지: 평균 1틱이 작아 상대 경로로는 통과하지만 절대는 미달
+s21, clock21 = build()
+s21._stoploss_blocked.add("K5")
+s21.sold_at["K5"] = clock21() - _td(minutes=90)
+s21.phase1b.start_watching("K5")
+tf21 = s21.phase1b.trade_flow
+now21 = time.time()
+for i in range(40):
+    tf21.add_tick("K5", 10_000, "buy", 1, now=now21 - 110 + i)      # 평균 1틱 = 1만원
+for i in range(2):
+    tf21.add_tick("K5", 10_000, "buy", 3_000, now=now21 - 2 + i*0.3)  # 3천만 (상대 20배 통과)
+ok_rel, _ = s21.check_burst("K5", allow_relative=True)
+ok_norel, _ = s21.check_burst("K5", allow_relative=False,
+                              value_mult=SM.REBUY_BURST_VALUE_MULT)
+check("상대 경로로는 통과하지만", ok_rel)
+check("재매수에서는 상대 경로 금지로 차단", not ok_norel)
+b5, w5 = s21._is_rebuy_blocked("K5")
+check("따라서 재진입도 차단", b5, w5)
+
+check("일반 진입의 버스트 판정은 그대로(기본값 1.0/True)",
+      "value_mult: float = 1.0" in _insp.getsource(SM.StrategyManager.check_burst)
+      and "allow_relative: bool = True" in _insp.getsource(SM.StrategyManager.check_burst))
 
 print("\n" + "=" * 62)
 print(f"통과 {len(PASS)}건 / 실패 {len(FAIL)}건   ({time.time() - T0:.1f}초)")

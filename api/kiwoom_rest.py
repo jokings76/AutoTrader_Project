@@ -231,6 +231,33 @@ class KiwoomREST:
         except (ValueError, TypeError):
             return 0.0
 
+    def get_basic_quote(self, stock_code: str) -> dict:
+        """주식기본정보 (ka10001) → {"change_rate": %, "open": 시가} (2026-08-05).
+
+        `get_stock_change_rate`와 **같은 1콜**에서 시가까지 함께 꺼낸다.
+        예전엔 시가를 얻으려고 분봉 400개를 따로 받아왔는데(REST 부담이 큼),
+        이 응답에 `open_pric`이 이미 들어있다. 실측:
+            open_pric = +4195 / cur_prc = +4985 / flu_rt = +29.99
+        실패 시 {} — 호출부가 '판단 불가'로 보수적으로 처리한다.
+        """
+        result = self._request("/api/dostk/stkinfo", "ka10001", {"stk_cd": stock_code})
+        if result.get("return_code") != 0:
+            return {}
+        out = {}
+        raw = result.get("flu_rt") or result.get("prdy_ctrt")
+        if raw is not None:
+            try:
+                out["change_rate"] = float(str(raw).replace("+", "").strip())
+            except (ValueError, TypeError):
+                pass
+        op = result.get("open_pric") or result.get("opn_pric")
+        if op is not None:
+            try:
+                out["open"] = abs(float(str(op).replace("+", "").strip()))
+            except (ValueError, TypeError):
+                pass
+        return out
+
     def get_change_rate_ranking(self, mrkt_tp: str = "001") -> list:
         """전일대비등락률상위요청 (ka10027) → 시장 전체 등락률 상위 종목 리스트(최대 200개).
         mrkt_tp: 001=코스피, 101=코스닥. 주도테마 판별용 (ThemeManager).
