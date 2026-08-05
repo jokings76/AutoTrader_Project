@@ -511,6 +511,18 @@ check("고가주는 계수 > 1 (문턱이 올라감)", ps(30_000) > 1.0, f"{ps(3
 check("하한 클램프", ps(10) == SM.BURST_PRICE_MIN, str(ps(10)))
 check("상한 클램프", ps(1_000_000) == SM.BURST_PRICE_MAX, str(ps(1_000_000)))
 check("클램프 범위가 뒤집히지 않음", 0 < SM.BURST_PRICE_MIN < 1.0 < SM.BURST_PRICE_MAX)
+# (2026-08-05 저녁) MAX 2.5 -> 2.0. 상한이 **어느 주가부터 걸리는지**를 같이
+# 못박는다 — MAX만 보고 "고가주가 완화됐다"고 오해하기 쉽다. 실제 클램프
+# 시작점은 10,000 x MAX^(1/ALPHA)이고, 그 아래 종목은 아무 영향을 안 받는다.
+_bind = 10_000 * SM.BURST_PRICE_MAX ** (1 / SM.BURST_PRICE_ALPHA)
+check("상한 클램프 시작 주가가 3만원대", 30_000 <= _bind <= 40_000, f"{_bind:,.0f}원")
+check("클램프 미만 주가는 상한의 영향을 받지 않음",
+      ps(_bind * 0.9) < SM.BURST_PRICE_MAX and ps(_bind * 1.1) == SM.BURST_PRICE_MAX)
+# 08-05에 실제로 발화가 지연된 두 종목은 클램프 아래라 이 변경의 대상이 아니다.
+# (이 사실을 테스트로 박아둬야 "MAX 낮췄으니 해결됐다"는 오해가 안 생긴다)
+check("[문서화] 마키나락스 25,900 / GS건설 29,750은 클램프 미적용 구간",
+      ps(25_900) < SM.BURST_PRICE_MAX and ps(29_750) < SM.BURST_PRICE_MAX,
+      f"x{ps(25_900):.2f} / x{ps(29_750):.2f}")
 # 가격을 모르면 현행 동작으로 수렴 — '모름'이 매수를 막지도 열어주지도 않는다
 check("가격 0/None/문자 -> 계수 1.0 (현행 수렴)",
       ps(0) == 1.0 and ps(None) == 1.0 and ps(-5) == 1.0 and ps("x") == 1.0)
