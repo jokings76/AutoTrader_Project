@@ -362,7 +362,18 @@ TICK_ENTRY_COOLDOWN_SEC = 0.25
 #       (시장가로 때리면 위쪽 호가를 훑어 올라가 크게 불리하게 체결됨)
 #   호가 스냅샷 자체가 없음(판단 불가)  -> 지정가 (보수적 기본값)
 PHASE1A_ASK_DEPTH_LEVELS = 3
-PHASE1A_ASK_DEPTH_MIN = 50_000_000  # 5천만원
+# 2026-08-05 실전 1일차 실측으로 5천만 -> 1천만 인하.
+# 이 문턱의 목적은 "우리 주문이 호가를 훑고 올라가지 않을 만큼 두꺼운가"인데,
+# **주문 크기가 바뀌었는데 문턱만 그대로**여서 4배 과보수적이 돼 있었다:
+#     모의(200만원 시절) 주문 200만 / 문턱 5,000만 = 4.0%
+#     실전(50만원 + 되돌림 분할) 트랜치 22.5만 / 문턱 5,000만 = 0.45%
+#     -> 1,000만으로 낮춰도 2.2%로 모의 시절보다 여전히 보수적이다.
+# 실측 대가: 08-05 호가잔량 중앙값이 1,235만원인데 문턱이 5,000만이라
+# 매수주문 29건 중 24건(83%)이 지정가로 나갔고, 그중 3건이 미체결로 정리됐다.
+# 그 3건의 기회손실 — 대원전선 +11.33% / 마키나락스 +15.06% / GS건설 +5.71%.
+# 지정가는 이미 '매도3호가'에 걸므로 슬리피지 2~3틱은 어차피 감수 중이고,
+# 시장가 전환의 추가 비용(0.1~0.5%p)보다 미체결 손실(5~15%)이 압도적으로 크다.
+PHASE1A_ASK_DEPTH_MIN = 10_000_000  # 1천만원
 
 # 주도주상위 시가대비 급등 매수보류 (2026-07-31, 사용자 지정) — 개장 직후
 # 시가 대비 이미 5% 이상 오른 종목은 가파른 상승 뒤 눌림(되돌림) 가능성이
@@ -449,7 +460,16 @@ MARKET_DEFENSE_ENABLED = False
 # "고가에서 되돌린 자리"를 사는 전략이라 애초에 전일종가 대비 많이 오른 종목은
 # 되돌림 폭도 그만큼 커서 위험하다. 같은 상한을 두 전략에 쓰면 한쪽은 기회를
 # 잃고 다른 쪽은 과도한 위험을 진다.
-MAX_ENTRY_CHANGE_PCT = 16.0           # 1A 및 기본
+# 2026-08-05: 1A 16.0 -> 13.0 (사용자 지정). 실전 1일차 실측에서 진입시점
+# 등락률이 낮을수록 이후 성과가 좋았다 — 구간별 (이후최고/이후최저/변동폭):
+#     ~10%   (n=13)  +7.41% / -2.52% / 9.92%   <- 전 지표 1위
+#     10~14% (n=1)   +3.64% / -5.82% / 9.46%
+#     14~20% (n=2)   +5.05% / -3.23% / 8.28%
+# "이미 많이 오른 종목이 회전율·변동성이 커서 먹을 게 많다"는 통념과 반대다.
+# 이미 +19% 오른 종목은 '눈에 띄게 움직인 것'이지 '앞으로 움직일 것'이 아니다.
+# ⚠️ 08-05 기준으로는 이 변경의 비용이 0이다 — 그날 상한에 걸린 종목이
+#    전부 눌림목(10%) 경로였고 1A(16%)에 걸린 건 하나도 없었다.
+MAX_ENTRY_CHANGE_PCT = 13.0           # 1A 및 기본
 MAX_ENTRY_CHANGE_PCT_PULLBACK = 10.0  # 눌림목자동 조건검색 -> Pullback 전용
 
 # 신규매수 전면 하드 컷오프. 1A(~14:50)/1L(~10:50)은 자체 시간 윈도우가 있지만
@@ -590,7 +610,11 @@ TP_CAP_UPGRADED_MAX = 0.060         # 상향 시 목표 캡 (2026-08-03, 2.5% ->
 # 손절 0건 -> 5건). 사용자 지정으로 재활성화.
 BREAKEVEN_STOP_ENABLED = True
 BREAKEVEN_TRIGGER = 0.010           # 순 +1.0% 도달 시 무장
-BREAKEVEN_FLOOR = 0.000             # 무장 후 순수익이 이 값 아래로 떨어지면 청산
+# 2026-08-05: 0.000 -> 0.002. 바닥을 정확히 '순 0%'로 두면 매도가 시장가라
+# 체결이 판정가보다 한 틱 아래에서 이뤄져 **결국 마이너스로 나간다**
+# (08-05 포톤 실측: 본전스톱 발동가는 0%였는데 실현 순손익 -0.04%).
+# "본전 매도 시 최대한 손실 안 나는 선"이라는 요구에 맞춰 슬리피지만큼 올렸다.
+BREAKEVEN_FLOOR = 0.002             # 무장 후 순수익이 이 값 아래로 떨어지면 청산
 
 # ── 되돌림 대기 분할매수 (2026-08-04 신규, 사용자 지정) ──────────
 # 08-04 틱 재생으로 확인된 사실: **버스트 트리거 시점은 국소 고점이다.**
@@ -613,8 +637,91 @@ BREAKEVEN_FLOOR = 0.000             # 무장 후 순수익이 이 값 아래로 
 #    진짜 폭등을 놓칠 위험**은 이 표본(6/6 체결)으로는 측정되지 않았다.
 ENTRY_PULLBACK_ENABLED = True
 # (트리거가 대비 되돌림폭, 그 트랜치에 배정할 비중) — 비중 합은 1.0
-ENTRY_PULLBACK_TRANCHES = ((0.005, 0.5), (0.010, 0.5))
+# 2026-08-05: (0.005,0.010) -> (0.003,0.007). 실전 1일차에 되돌림 계획 21건 중
+# 9건이 미도달/부분체결이었고, 실제 되돌림 폭을 재보니 -0.16~-0.96%였다.
+# 1차 -0.5%는 적절했으나(9건 중 5건 체결) **2차 -1.0%가 너무 깊어**
+# 1/2만 체결된 5건이 전부 -0.60~-0.96%에서 멈췄다.
+#   삼기 -0.43% / SK오션플랜트 -0.35% / 포톤 -0.78% / 일승 -0.70% / JW신약 -0.60%
+#   삼기 -0.87% / PS일렉 -0.96% / 금호타이어 -0.27% / GS건설 -0.16%
+# 이 값으로 바꾸면 9건 중 4건의 체결이 개선된다(0/2->1/2 2건, 1/2->2/2 3건).
+# ⚠️ 손익 개선은 약 +1,200원으로 거의 중립이다. 진짜 가치는 손익이 아니라
+#    **설계대로 총액 100%가 체결되게 하는 것** — 지금은 의도 금액의 절반만
+#    사져서 성과 측정 자체가 설계와 어긋나 있었다.
+ENTRY_PULLBACK_TRANCHES = ((0.003, 0.5), (0.007, 0.5))
 ENTRY_PULLBACK_TIMEOUT_SEC = 120.0   # 이 시간 안에 안 오면 남은 트랜치는 포기
+
+# ── 되돌림 대기 중 '상승 이탈' 즉시진입 (2026-08-05 신규) ──────────────
+# 되돌림을 기다리는데 **오히려 올라가면** 되돌림이 안 온다는 관측 증거다.
+# 그때 남은 트랜치를 전량 시장가로 즉시 체결한다. 예측이 아니라 관측이라
+# "되돌림이 안 올 종목을 미리 맞히는" 불가능한 문제를 우회한다.
+#
+# 실측(08-05, 계획 21건): 트리거 시점 지표로는 되돌림 깊이를 예측할 수 없었다.
+#   경로별 평균 되돌림 — 절대 -0.75% / 단일 -1.30% / 상대 -1.69%
+#   (절대 경로가 가장 얕고 미체결 3건이 전부 절대였지만, 같은 절대 경로에서
+#    씨이랩 -4.50% / 금호건설 -3.00%도 나와 판별력이 없다)
+# 반면 '+0.3% 상승 이탈' 규칙은 미도달 9건 중 7건에서 발동하고,
+# 못 사던 4건을 **전부** 잡는다. 그 4건의 진입 후 결과는 3승 1패:
+#   삼기 +13.30% / 금호타이어 +5.01% / GS건설 +0.99% / SK오션플랜트 +0.19%(최저 -2.70%)
+#
+# 되돌림 1차(-0.3%)와 대칭인 +0.3%를 쓴다 — "0.3% 내려오면 사고, 0.3% 올라가도
+# 산다. 그 사이에서 머뭇거리면 안 산다"는 ±0.3% 브레이크아웃 밴드가 된다.
+# ⚠️ 고가 추격 위험이 있다(SK오션플랜트가 그 사례). 손절 -3%가 받쳐준다.
+ENTRY_BREAKOUT_ENABLED = True
+ENTRY_BREAKOUT_PCT = 0.003       # 트리거가 대비 이만큼 오르면 잔여 전량 즉시매수
+
+# ── 손절 대신 추가매수 (Rescue Add, 2026-08-05 신규 — 사용자 지정) ──────
+# -3% 손절선에 닿았을 때, **매수세가 오히려 몰리고 있다는 증거 3개가 전부**
+# 성립하면 매도 대신 같은 금액을 추가 매수해 평단을 낮춘다.
+#
+# ⚠️ 이건 손절이라는 최후 방어선을 조건부로 미루는 변경이다. 반드시 지킬 것:
+#   - 조건은 **AND**다. 하나라도 불충족이면 그냥 손절한다.
+#   - 판정 중 **예외가 나면 손절**로 수렴한다(안전측).
+#   - 추가매수 후에는 **원가 대비 -6%가 무조건 청산선**이다. 이게 없으면
+#     손실이 무한대로 열린다.
+#   - 종목당 1회, 하루 RESCUE_ADD_MAX_PER_DAY회.
+#   - MDD 차단/지수 가드/WS 격리 중이면 미발동(= 그냥 손절).
+#
+# 08-05 역산(조건①만 검증 가능, ②③은 틱·호가 이력이 없어 검증 불가):
+#   KBI메탈 4.59배 -> 추가매수했다면 09:10에 최저 4,025로 **-6% 최종손절**
+#           (그 뒤 09:24에 익절선 도달 — 바닥을 먼저 찍고 털리는 최악 경로)
+#   씨이랩  3.93배 -> 익절 +2.5% 성공
+#   금호건설 0.68배 -> 미발동(그냥 손절)
+#   => 1승 1패, 금액으로는 -20,700원. 조건③(반등 확증)이 KBI메탈을 걸러줬을
+#      가능성이 높지만(09:02~09:10 단조 하락) 확인할 방법이 없다.
+RESCUE_ADD_ENABLED = True
+# ① 거래대금 급증: value_acceleration(최근30초 / 120초 균일기대치) 배수
+#    ⚠️ 08-05 분석에서 쓴 '당일 분봉 평균 대비 3.9~4.6배'와 창이 다르다
+#       (틱 버퍼가 120초뿐이라 당일 평균을 잴 수 없다). 같은 개념의 근사치다.
+RESCUE_ADD_ACCEL_MIN = 3.0
+# ② 체결강도: 이 값 이상 AND 기준선(_strength_baseline) 대비 상승
+RESCUE_ADD_MIN_STRENGTH = 100.0
+# ③ 반등 확증: 최근 RESCUE_ADD_LOW_WINDOW초 저점 대비 이만큼 올라와 있어야 한다.
+#    "안 밀리고 버틴다"가 아니라 **실제로 되돌아 올라왔다**를 요구한다 —
+#    07-30에 1B 반등확증 게이트로 승률 29.7%->50%를 만든 것과 같은 구조.
+RESCUE_ADD_REBOUND_PCT = 0.003
+RESCUE_ADD_LOW_WINDOW = 30.0
+# 추가매수 후 최종 방어선 (원가 대비). 평단 기준으로는 약 -4.5%.
+RESCUE_ADD_FINAL_STOP = 0.06
+RESCUE_ADD_MAX_PER_DAY = 2
+
+# ⚠️ 관찰 창 — 이게 없으면 조건③(반등 확증)은 **원리적으로 성립할 수 없다.**
+# 손절은 -3%에 **최초로 닿는 순간** 발동하는데, 그 시점엔 현재가가 곧 최근
+# 저점이라 "저점 대비 +0.3% 반등"이 정의상 0%다. 즉 그냥 두면 이 기능은
+# 영원히 발동하지 않는다(2026-08-05 테스트 작성 중 발견).
+#
+# 그래서 -3% 도달 시 조건①②(거래대금·강도)가 이미 성립해 있으면 매도를
+# **잠시 보류**하고 이 시간 동안 지켜본다. 그 사이 저점을 갱신하며
+#   · 저점 대비 +RESCUE_ADD_REBOUND_PCT 반등  -> 추가매수
+#   · 원가 대비 -RESCUE_ADD_OBSERVE_FLOOR 이탈 -> 즉시 손절(관찰 포기)
+#   · 창 만료                                  -> 손절
+# 를 판정한다. 이게 사용자가 말한 "하락이 안 나오고 버티거나 상승으로 나올 시"의
+# 정확한 구현이다.
+#
+# **추가되는 리스크는 정확히 이만큼이다**: 구조받지 못한 포지션의 손절이
+# -3%가 아니라 최대 -RESCUE_ADD_OBSERVE_FLOOR(-4.5%)에서 난다. 관찰은
+# ①②가 이미 성립한 경우에만 시작하므로 아무 종목에나 걸리지 않는다.
+RESCUE_ADD_OBSERVE_SEC = 15.0
+RESCUE_ADD_OBSERVE_FLOOR = 0.045
 
 # ── 분할매도 (2026-08-04 신규, 사용자 지정) ──────────────────
 # 체결강도 하락 신호의 예측 지평을 틱으로 실측한 결과:
@@ -844,6 +951,8 @@ class StrategyManager:
         self.sold_at: dict[str, datetime] = {}
         self._stoploss_blocked: set[str] = set()  # 손절로 나간 종목(당일 재매수 금지)
         self._buy_success_count = 0
+        # 손절 대신 추가매수(Rescue Add) 당일 발동 횟수 (2026-08-05)
+        self._rescue_count_today = 0
         # MDD 일손실 차단 (실현손익 기준 -3%)
         self._base_capital = None  # 기준자본 (첫 매수 시도 때 1회 기록)
         self._daily_realized = 0.0  # 오늘 실현손익 누적
@@ -1073,6 +1182,10 @@ class StrategyManager:
             self.holdings[h["stock_code"]] = {
                 "trade_id": h["id"],
                 "buy_price": buy_price,
+                # 재시작 복원 시 DB의 buy_price는 이미 평단일 수 있다(분할 2차/
+                # 추가매수 반영분). 원가를 복원할 방법이 없으므로 평단을 원가로
+                # 간주한다 — 최종 방어선이 원가 기준보다 **얕아져** 보수적이다.
+                "origin_price": buy_price,
                 "buy_quantity": int(h["buy_quantity"]),
                 "buy_time": h["buy_time"],
                 "stock_name": h["stock_name"],
@@ -1516,6 +1629,11 @@ class StrategyManager:
         # 조건검색식별 09:20 지연 게이트는 2026-08-01에 폐지됐다(OTHER_COND_START
         # 상수째 삭제). 이 사유 문자열은 더 이상 생성되지 않으므로 규칙도 뺀다.
         ("장시작 전 대기", ("장 시작 전",)),
+        # (2026-08-05) 등락률 상한은 아래 "매수 컷오프"(15:10 하드컷오프 등)와
+        # 성격이 완전히 다르므로 반드시 먼저 잡아 분리한다. 08-05 실측에서
+        # 10:30 이후 탈락의 대부분이 이것이었다(2,222회, 대한광통신 2,110회).
+        # 뭉뚱그리면 "왜 안 사는가"의 답이 통째로 사라진다.
+        ("등락률 상한 초과", ("등락률 상한",)),
         ("매수 컷오프", ("컷오프", "상한",)),
     )
     # '코드/인프라 이상'을 의심해야 하는 분류 — 정상 필터링과 구분해서 경고한다.
@@ -1548,6 +1666,61 @@ class StrategyManager:
             )
         except Exception:
             pass
+
+    # 놓친 기회 계층 — 위일수록 '아까운' 것. (표시라벨, 분류키, 설명)
+    _MISS_TIERS = (
+        ("🥇", "되돌림 미도달(대기 만료)", "신호 완벽, 가격만 안 옴"),
+        ("🥈", "대량체결 부족", "무장 완료, 대금 미달"),
+        ("🥉", "강도 미무장(요구시간 미달)", "강도 유지중, 시간 미달"),
+        ("⛔", "등락률 상한 초과", "참고만 — 실측 성과 부진"),
+    )
+
+    def build_missed_opportunities(self, top_n: int = 3) -> str:
+        """'놓친 기회' 알림 (2026-08-05 신규). main.task_missed_opportunities가 호출.
+
+        기존 build_entry_diagnostics가 **사유별 종목 수**를 보여준다면, 이건
+        **어떤 종목이 얼마나 아깝게 놓쳤는지**를 보여준다. 수동 판단용이다.
+
+        계층이 핵심이다 — 08-05 실측에서 '등락률 상한 초과'가 탈락의 대부분
+        (2,222회, 대한광통신 혼자 2,110회)이었는데 그건 아까운 게 아니라
+        **의도적 배제**였고, 실제로 사봤자 6건 중 익절4/손절2였다. 반면
+        '되돌림 미도달'은 무장·버스트·등락률을 전부 통과한 완벽한 신호라
+        성격이 완전히 다르다. 이걸 한 덩어리로 보여주면 판단이 불가능하다.
+        """
+        now = self._now()
+        lines = [f"🎯 놓친 기회 ({now.strftime('%H:%M')})"]
+        buckets = {label: [] for _, label, _ in self._MISS_TIERS}
+        for code, rec in list(self._last_reject.items()):
+            try:
+                cat, reason, ts = rec
+            except Exception:
+                continue
+            if cat not in buckets:
+                continue
+            if (now - ts).total_seconds() > 600:   # 최근 10분만
+                continue
+            buckets[cat].append((code, reason, ts))
+
+        any_shown = False
+        for mark, label, desc in self._MISS_TIERS:
+            items = sorted(buckets.get(label, []), key=lambda x: x[2], reverse=True)
+            if not items:
+                continue
+            any_shown = True
+            lines.append(f"\n{mark} {label} — {desc}")
+            for code, reason, ts in items[:top_n]:
+                name = self._stock_names.get(code, code)
+                px = 0
+                try:
+                    px = self._fresh_tick_price(code, max_age_sec=120) or 0
+                except Exception:
+                    px = 0
+                px_s = f"{px:,.0f}원" if px else "-"
+                lines.append(f"  {name}({code}) {px_s} · {ts.strftime('%H:%M')}")
+                lines.append(f"    {reason}")
+        if not any_shown:
+            lines.append("\n최근 10분간 아깝게 놓친 후보 없음")
+        return "\n".join(lines)
 
     def build_entry_diagnostics(self) -> str:
         """장중 진입 진단 요약 (텔레그램용). main.task_entry_diagnostics가 호출.
@@ -2942,6 +3115,74 @@ class StrategyManager:
 
         if all(t["filled"] for t in plan["targets"]):
             self._close_entry_plan(stock_code, "전량 체결")
+            return filled_any
+
+        # ── 상승 이탈 즉시진입 (2026-08-05 신규) ───────────────────────
+        # 되돌림을 기다리는데 오히려 트리거가 +ENTRY_BREAKOUT_PCT를 넘으면
+        # "되돌림이 안 온다"는 관측이 성립한 것이다. 남은 트랜치를 전량 집행한다.
+        # 위 되돌림 루프를 **먼저** 돌린 뒤에 본다 — 한 틱의 가격은 하나뿐이라
+        # 실제로 둘이 동시에 성립할 수는 없지만, 더 좋은 가격(하락)을 우선한다는
+        # 의도를 코드 순서로 못박아 둔다.
+        if not ENTRY_BREAKOUT_ENABLED or plan.get("breakout_done"):
+            return filled_any
+        trigger_price = plan["trigger_price"]
+        if price < trigger_price * (1.0 + ENTRY_BREAKOUT_PCT):
+            return filled_any
+
+        remain = [t for t in plan["targets"] if not t["filled"]]
+        if not remain:
+            return filled_any
+        plan["breakout_done"] = True
+
+        # 가격이 올랐으므로 등락률 상한을 **다시** 본다. 계획 생성 시점엔
+        # 통과했어도 지금은 넘었을 수 있다(그대로 사면 상한이 무의미해진다).
+        try:
+            prev_close = self._get_prev_close(stock_code, price)
+        except Exception:
+            prev_close = None
+        if prev_close:
+            cap = self._entry_change_cap(plan["sub_strategy"])
+            change_pct = (price - prev_close) / prev_close * 100
+            if change_pct > cap:
+                self._note_reject(
+                    stock_code,
+                    f"등락률 상한 초과 (전일종가대비 +{change_pct:.1f}% > +{cap:.0f}%)",
+                )
+                logger.info(
+                    "[%s] %s 상승 이탈했으나 등락률 상한 초과로 미집행 "
+                    "(전일종가대비 +%.1f%% > +%.0f%%)",
+                    stock_code, plan["stock_name"], change_pct, cap,
+                )
+                self._close_entry_plan(stock_code, "상승 이탈(등락률 초과)")
+                return filled_any
+
+        frac = sum(t["frac"] for t in remain)
+        for t in remain:
+            t["filled"] = True
+        already = stock_code in self.holdings
+        info = dict(plan["info"])
+        info["current_price"] = price
+        info["entry_note"] = (
+            f"되돌림 포기 — 상승 이탈(+{ENTRY_BREAKOUT_PCT*100:.1f}%)"
+        )
+        logger.info(
+            "[%s] %s ⚡ 되돌림 포기 — 상승 이탈 (트리거 %s원 -> %s원, +%.2f%%) "
+            "잔여 %.0f%% 즉시 집행",
+            stock_code, plan["stock_name"], f"{trigger_price:,.0f}", f"{price:,.0f}",
+            (price - trigger_price) / trigger_price * 100, frac * 100,
+        )
+        try:
+            self._execute_buy(
+                stock_code, plan["stock_name"], plan["phase"], info,
+                sub_strategy=plan["sub_strategy"],
+                size_frac=frac, add_to_position=already,
+            )
+        except Exception:
+            logger.exception("[%s] 상승 이탈 즉시진입 실패", stock_code)
+        if stock_code in self.holdings:
+            filled_any = True
+            self._tick_entry_stats["bought"] += 1
+        self._close_entry_plan(stock_code, "상승 이탈 전량 체결")
         return filled_any
 
     def _close_entry_plan(self, stock_code, why=""):
@@ -3909,6 +4150,10 @@ class StrategyManager:
             self.holdings[stock_code] = {
                 "trade_id": trade_id,
                 "buy_price": fill_price,
+                # 최초 진입가. add_to_position(분할 2차/추가매수)이 buy_price를
+                # 평단으로 덮어써도 이 값은 유지된다 — 추가매수 후 최종 방어선
+                # (RESCUE_ADD_FINAL_STOP)의 기준이 '원가'이기 때문이다.
+                "origin_price": fill_price,
                 "buy_quantity": quantity,
                 # qty = 현재 잔량. 부분매도(2026-08-04)가 이 값을 줄인다.
                 # buy_quantity는 '총 매수량'으로 남겨 손익 기준을 유지한다.
@@ -4077,11 +4322,37 @@ class StrategyManager:
         # 않는 것'이지, **가격 기반 하드 손절까지 멈추는 것이 아니다.**
         # 급락은 매수 직후일수록 위험한데 정확히 그 구간이 무방비였다.
         if gross_rate <= STOP_LOSS_RATE:
-            self._execute_sell(
-                stock_code, current_price,
-                f"손절 가격{gross_rate*100:.2f}% (순 {net_rate*100:.2f}%)",
-            )
-            return
+            # ── 손절 대신 추가매수 (2026-08-05) ────────────────────────
+            # 원가는 추가매수로 평단이 바뀌어도 유지된다 — 최종 방어선(-6%)의
+            # 기준이기 때문이다. buy_price는 add_to_position이 평단으로 덮는다.
+            origin = float(pos.get("origin_price") or buy_price or 0)
+            if pos.get("rescue_added"):
+                # 이미 한 번 구조한 포지션 — 원가 -6%가 무조건 청산선이다.
+                if origin > 0 and current_price <= origin * (1.0 - RESCUE_ADD_FINAL_STOP):
+                    self._execute_sell(
+                        stock_code, current_price,
+                        f"추가매수 후 최종손절 "
+                        f"(원가대비 {(current_price - origin) / origin * 100:.2f}%, "
+                        f"평단대비 {gross_rate*100:.2f}%)",
+                    )
+                    return
+                # -6% 전이면 손절을 보류한다. **return 하지 않고** 아래
+                # 지수가드/강제청산 등 나머지 청산 경로는 그대로 태운다 —
+                # 여기서 빠져나가면 가드가 켜진 날 이 포지션만 무방비가 된다.
+            else:
+                decision = self._rescue_gate(stock_code, pos, current_price, origin)
+                if decision == "added":
+                    return
+                if decision == "observing":
+                    # 매도 보류 — 관찰 창 안이다. 하한 이탈/만료는 _rescue_gate가
+                    # 다음 틱에 'sell'로 바꿔준다. 틱이 끊겨도 30초 가격 폴백
+                    # (task_holdings_price_fallback)이 이 함수를 다시 부른다.
+                    return
+                self._execute_sell(
+                    stock_code, current_price,
+                    f"손절 가격{gross_rate*100:.2f}% (순 {net_rate*100:.2f}%)",
+                )
+                return
 
         # ── 지수 하락 가드 청산 (2026-08-03 사용자 지정) ──────────────
         # 손절 바로 다음에 둔다 — 지수가 무너지는 날은 개별 종목의 익절캡/
@@ -4258,6 +4529,147 @@ class StrategyManager:
 
         if exit_reason:
             self._execute_sell(stock_code, current_price, exit_reason)
+
+    def _rescue_precheck(self, stock_code: str, pos: dict) -> tuple[bool, str]:
+        """조건 ①거래대금 ②체결강도 — 관찰을 시작할 자격이 있는가.
+
+        ③(반등 확증)은 관찰 창 안에서 따로 본다. 예외를 밖으로 던지지 않는다.
+        """
+        tf = getattr(self.phase1b, "trade_flow", None) if self.phase1b else None
+        if tf is None:
+            return False, "틱 트래커 없음"
+
+        # ① 거래대금 급증
+        accel = tf.value_acceleration(stock_code, short_sec=30, long_sec=120)
+        if accel < RESCUE_ADD_ACCEL_MIN:
+            return False, f"거래대금 배수 {accel:.2f} < {RESCUE_ADD_ACCEL_MIN}"
+
+        # ② 체결강도 — 절대수준(매수우위) AND 기준선 대비 상승
+        cur_s = self._current_strength(stock_code)
+        if cur_s < RESCUE_ADD_MIN_STRENGTH:
+            return False, f"체결강도 {cur_s:.0f} < {RESCUE_ADD_MIN_STRENGTH:.0f}"
+        self._maybe_anchor_strength_baseline(pos, stock_code)
+        base_s = self._strength_baseline(pos)
+        if not base_s or base_s <= 0:
+            return False, "강도 기준선 미확보(판단 불가)"
+        if cur_s <= base_s:
+            return False, f"강도 미상승 ({base_s:.0f} -> {cur_s:.0f})"
+        return True, f"거래대금 x{accel:.2f}, 강도 {base_s:.0f}->{cur_s:.0f}"
+
+    def _rescue_gate(self, stock_code: str, pos: dict, current_price: float,
+                     origin: float) -> str:
+        """-3% 손절선에서의 판정. 'added' | 'observing' | 'sell' 중 하나.
+
+        'observing'이면 호출부는 **이번 틱에 매도하지 않는다**. 관찰 중에도
+        원가 대비 RESCUE_ADD_OBSERVE_FLOOR를 이탈하면 즉시 'sell'이 된다 —
+        보류에 상한을 두지 않으면 손절이 무력화되기 때문이다.
+        """
+        if not RESCUE_ADD_ENABLED or pos.get("rescue_added"):
+            return "sell"
+        now = _time_mod.time()
+        watch_until = pos.get("rescue_watch_until")
+
+        # ── 관찰 시작 판정 (첫 -3% 도달) ──────────────────────────
+        if watch_until is None:
+            if self._rescue_count_today >= RESCUE_ADD_MAX_PER_DAY:
+                self._note_reject(stock_code, "추가매수 일일 한도 초과")
+                return "sell"
+            try:
+                blocked = self._entry_block_reason()
+                if blocked:
+                    logger.info("[%s] 추가매수 관찰 미시작 — %s", stock_code, blocked)
+                    return "sell"
+                ok, why = self._rescue_precheck(stock_code, pos)
+            except Exception:
+                logger.exception("[%s] 추가매수 사전판정 실패 -> 손절", stock_code)
+                return "sell"
+            if not ok:
+                logger.info("[%s] 추가매수 미발동 — %s", stock_code, why)
+                return "sell"
+            pos["rescue_watch_until"] = now + RESCUE_ADD_OBSERVE_SEC
+            pos["rescue_low"] = current_price
+            logger.warning(
+                "[%s] %s 👀 손절 보류 %.0f초 관찰 시작 — %s | 현재 %s원 "
+                "(관찰 중 %s원 이탈 시 즉시 손절)",
+                stock_code, pos.get("stock_name", stock_code),
+                RESCUE_ADD_OBSERVE_SEC, why, f"{current_price:,.0f}",
+                f"{origin * (1 - RESCUE_ADD_OBSERVE_FLOOR):,.0f}",
+            )
+            return "observing"
+
+        # ── 관찰 중 ────────────────────────────────────────────
+        low = min(float(pos.get("rescue_low") or current_price), current_price)
+        pos["rescue_low"] = low
+        if origin > 0 and current_price <= origin * (1.0 - RESCUE_ADD_OBSERVE_FLOOR):
+            logger.info("[%s] 관찰 중 하한 이탈 -> 손절", stock_code)
+            return "sell"
+        if now >= watch_until:
+            logger.info("[%s] 관찰 창 만료(반등 없음) -> 손절", stock_code)
+            return "sell"
+        if low <= 0:
+            return "sell"
+        rebound = (current_price - low) / low
+        if rebound < RESCUE_ADD_REBOUND_PCT:
+            return "observing"
+
+        # ③ 반등 확증 성립 — ①②를 다시 확인하고 집행한다
+        try:
+            ok, why = self._rescue_precheck(stock_code, pos)
+        except Exception:
+            logger.exception("[%s] 추가매수 재판정 실패 -> 손절", stock_code)
+            return "sell"
+        if not ok:
+            logger.info("[%s] 반등했으나 %s -> 손절", stock_code, why)
+            return "sell"
+        why = f"{why}, 저점 {low:,.0f} 대비 +{rebound*100:.2f}%"
+        return "added" if self._do_rescue_add(stock_code, pos, current_price,
+                                              origin, why) else "sell"
+
+    def _do_rescue_add(self, stock_code: str, pos: dict, current_price: float,
+                       origin: float, why: str) -> bool:
+        """조건이 전부 성립한 뒤의 **집행 전용**. 성공하면 True.
+
+        판정은 _rescue_gate가 끝냈다. 여기서 실패하면(주문 거부/미체결) 호출부는
+        손절로 되돌아간다 — 어떤 경우에도 '못 팔고 못 사는' 상태가 되면 안 된다.
+        """
+        before_qty = int(pos.get("qty", pos.get("buy_quantity")) or 0)
+        info = {"current_price": current_price,
+                "entry_note": f"손절 대신 추가매수 ({why})"}
+        logger.warning(
+            "[%s] %s 🛟 손절 대신 추가매수 — %s | 원가 %s원 / 현재 %s원 "
+            "(최종손절 %s원)",
+            stock_code, pos.get("stock_name", stock_code), why,
+            f"{origin:,.0f}", f"{current_price:,.0f}",
+            f"{origin * (1 - RESCUE_ADD_FINAL_STOP):,.0f}",
+        )
+        try:
+            self._execute_buy(
+                stock_code, pos.get("stock_name", stock_code),
+                pos.get("strategy_phase", "1A"), info,
+                sub_strategy=pos.get("sub_strategy", "1A"),
+                size_frac=1.0, add_to_position=True,
+            )
+        except Exception:
+            logger.exception("[%s] 추가매수 주문 실패 -> 손절로 진행", stock_code)
+            return False
+
+        after_qty = int(pos.get("qty", pos.get("buy_quantity")) or 0)
+        if after_qty <= before_qty:
+            logger.warning("[%s] 추가매수 미체결(수량 불변) -> 손절로 진행", stock_code)
+            return False
+
+        pos["rescue_added"] = True
+        self._rescue_count_today += 1
+        _notify(
+            f"🛟 손절 대신 추가매수\n"
+            f"{pos.get('stock_name', stock_code)} ({stock_code})\n"
+            f"{why}\n"
+            f"평단 {pos.get('buy_price', 0):,.0f}원 / {after_qty}주\n"
+            f"최종손절 {origin * (1 - RESCUE_ADD_FINAL_STOP):,.0f}원 "
+            f"(원가 -{RESCUE_ADD_FINAL_STOP*100:.0f}%)\n"
+            f"오늘 {self._rescue_count_today}/{RESCUE_ADD_MAX_PER_DAY}회"
+        )
+        return True
 
     def _strength_baseline(self, pos: dict) -> float:
         """청산 판정에 쓸 체결강도 '기준선' (2026-08-03 신규).

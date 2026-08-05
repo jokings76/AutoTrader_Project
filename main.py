@@ -1371,6 +1371,44 @@ class TradingBot:
             except Exception:
                 logger.exception("원격제어 워치독 예외")
 
+    async def task_missed_opportunities(self):
+        """'놓친 기회' 알림 (2026-08-05 신규).
+
+        task_entry_diagnostics가 **사유별 종목 수**를 보여준다면, 이건
+        **어떤 종목을 얼마나 아깝게 놓쳤는지**를 계층으로 보여준다.
+        다윤님이 폰으로 보고 수동 매수를 판단하기 위한 것이다.
+
+        계층 분리가 핵심이다 — 08-05 실측에서 탈락의 대부분이 '등락률 상한
+        초과'(2,222회)였는데 그건 아까운 게 아니라 의도적 배제였다. 반면
+        '되돌림 미도달'은 무장·버스트·등락률을 전부 통과한 완벽한 신호라
+        성격이 정반대다. 한 덩어리로 보여주면 판단이 불가능하다.
+
+        10분 주기 고정 — 이 알림은 '지금 살까?'를 묻는 것이라 늦으면 무의미하다.
+        """
+        MISS_INTERVAL = 600
+        last_sent = 0.0
+        while not self._stop:
+            await asyncio.sleep(30)
+            try:
+                now = datetime.now()
+                if not (time_in(now, 9, 5) and not time_after(now, 14, 50)):
+                    continue
+                strat = self.strategy_mgr
+                if not strat:
+                    continue
+                if time.time() - last_sent < MISS_INTERVAL:
+                    continue
+                body = await asyncio.to_thread(strat.build_missed_opportunities)
+                # 놓친 게 없으면 보내지 않는다 — 조용한 게 정상이고,
+                # 빈 알림이 10분마다 오면 정작 중요한 것이 묻힌다.
+                if "아깝게 놓친 후보 없음" in body:
+                    last_sent = time.time()
+                    continue
+                send_telegram(body, target="signal")
+                last_sent = time.time()
+            except Exception:
+                logger.exception("놓친 기회 알림 실패")
+
     async def task_entry_diagnostics(self):
         """장중 진입 진단 알림 (2026-08-01 신규).
 
@@ -1468,6 +1506,7 @@ class TradingBot:
                 self.task_program_flow(),
                 self.task_tick_archive(),
                 self.task_entry_diagnostics(),
+                self.task_missed_opportunities(),
                 self.task_fid228_watchdog(),
                 self.task_remote_control_watchdog(),
                 # self.task_condition_snapshot_poll(),

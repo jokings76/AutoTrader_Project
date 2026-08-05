@@ -146,9 +146,11 @@ print("\n[1] 상수 — 실측 근거대로 설정됐는지")
 # ═════════════════════════════════════════════════════════
 check("되돌림 대기 활성", SM.ENTRY_PULLBACK_ENABLED is True)
 check("2단 분할 (사용자 지정: 절반씩)", len(SM.ENTRY_PULLBACK_TRANCHES) == 2)
-check("1차 -0.5% (스킵 0건이었던 값)",
-      abs(SM.ENTRY_PULLBACK_TRANCHES[0][0] - 0.005) < 1e-9)
-check("2차 -1.0%", abs(SM.ENTRY_PULLBACK_TRANCHES[1][0] - 0.010) < 1e-9)
+# (2026-08-05) -0.5/-1.0% -> -0.3/-0.7%. 실전 1일차에 되돌림 계획 21건 중
+# 9건이 미도달/부분체결이었고 실제 되돌림이 -0.16~-0.96%였다. 1차는 적절했으나
+# 2차 -1.0%가 너무 깊어 1/2만 체결된 5건이 전부 -0.60~-0.96%에서 멈췄다.
+check("1차 -0.3%", abs(SM.ENTRY_PULLBACK_TRANCHES[0][0] - 0.003) < 1e-9)
+check("2차 -0.7%", abs(SM.ENTRY_PULLBACK_TRANCHES[1][0] - 0.007) < 1e-9)
 check("비중 합이 1.0", abs(sum(f for _, f in SM.ENTRY_PULLBACK_TRANCHES) - 1.0) < 1e-9)
 check("1차가 2차보다 얕다(순서 뒤집히면 2차가 먼저 체결됨)",
       SM.ENTRY_PULLBACK_TRANCHES[0][0] < SM.ENTRY_PULLBACK_TRANCHES[1][0])
@@ -170,37 +172,47 @@ check("무장+버스트 -> 계획 생성", "A1" in s._entry_plans)
 check("아직 매수하지 않음(트리거는 국소 고점)", "A1" not in s.holdings)
 check("대기 중에도 슬롯 점유 — 되돌림 왔을 때 살 자리 확보",
       s.occupied_slots() == 1, str(s.occupied_slots()))
+# ⚠️ 가격을 하드코딩하지 않는다 — 08-05에 트랜치 폭을 바꾸자 9,950/9,900을
+# 박아둔 픽스처가 무더기로 깨졌다. 전부 상수에서 유도한다.
+TRIG = 10_000
+_D1, _D2 = SM.ENTRY_PULLBACK_TRANCHES[0][0], SM.ENTRY_PULLBACK_TRANCHES[1][0]
+P1 = round(TRIG * (1 - _D1))          # 1차 목표가
+P2 = round(TRIG * (1 - _D2))          # 2차 목표가
+P_SHALLOW = round(TRIG * (1 - _D1 / 2))   # 1차에도 못 미치는 얕은 되돌림
+
 plan = s._entry_plans["A1"]
-check("목표가가 트리거가 대비 -0.5%/-1.0%",
-      abs(plan["targets"][0]["price"] - 9_950) < 1 and
-      abs(plan["targets"][1]["price"] - 9_900) < 1,
-      f'{plan["targets"][0]["price"]:.0f}/{plan["targets"][1]["price"]:.0f}')
+check("목표가가 트리거가 대비 1차/2차 폭과 일치",
+      abs(plan["targets"][0]["price"] - P1) < 1 and
+      abs(plan["targets"][1]["price"] - P2) < 1,
+      f'{plan["targets"][0]["price"]:.0f}/{plan["targets"][1]["price"]:.0f} '
+      f'(기대 {P1}/{P2})')
 
-# 되돌림이 얕으면(-0.3%) 아직 안 산다
-tick(s, "A1", 128.0, T + 4.0, price=9_970, side="sell")
-check("-0.3%로는 체결되지 않음", "A1" not in s.holdings)
+# 1차 목표에도 못 미치는 얕은 되돌림이면 아직 안 산다
+tick(s, "A1", 128.0, T + 4.0, price=P_SHALLOW, side="sell")
+check("1차 목표 미달로는 체결되지 않음", "A1" not in s.holdings,
+      f"{P_SHALLOW} > {P1}")
 
 # ═════════════════════════════════════════════════════════
-print("\n[3] 1차 트랜치 (-0.5%) 체결")
+print("\n[3] 1차 트랜치 체결")
 # ═════════════════════════════════════════════════════════
-s.phase1b.orderbook.update("A1", {"ask_prices": [9_950, 9_960, 9_970],
+s.phase1b.orderbook.update("A1", {"ask_prices": [P1, P1 + 10, P1 + 20],
                                   "ask_volumes": [3_000, 3_000, 3_000]})
-tick(s, "A1", 128.0, T + 5.0, price=9_950, side="sell")
-check("-0.5% 도달 -> 1차 체결", "A1" in s.holdings)
+tick(s, "A1", 128.0, T + 5.0, price=P1, side="sell")
+check("1차 목표 도달 -> 1차 체결", "A1" in s.holdings)
 check("tranches_filled=1", s.holdings["A1"].get("tranches_filled") == 1)
 check("계획은 아직 살아있음(2차 대기)", "A1" in s._entry_plans)
 check("qty가 설정됨(부분매도 전제)", s.holdings["A1"].get("qty", 0) > 0)
 q1 = s.holdings["A1"]["qty"]
 avg1 = s.holdings["A1"]["buy_price"]
-check("1차 진입가가 트리거가보다 낮다(개선)", avg1 < 10_000, f"{avg1:,.0f}")
+check("1차 진입가가 트리거가보다 낮다(개선)", avg1 < TRIG, f"{avg1:,.0f}")
 
 # ═════════════════════════════════════════════════════════
-print("\n[4] 2차 트랜치 (-1.0%) — 평단가가 낮아진다")
+print("\n[4] 2차 트랜치 — 평단가가 낮아진다")
 # ═════════════════════════════════════════════════════════
-s.phase1b.orderbook.update("A1", {"ask_prices": [9_900, 9_910, 9_920],
+s.phase1b.orderbook.update("A1", {"ask_prices": [P2, P2 + 10, P2 + 20],
                                   "ask_volumes": [3_000, 3_000, 3_000]})
-tick(s, "A1", 126.0, T + 6.0, price=9_900, side="sell")
-check("-1.0% 도달 -> 2차 체결", s.holdings["A1"].get("tranches_filled") == 2)
+tick(s, "A1", 126.0, T + 6.0, price=P2, side="sell")
+check("2차 목표 도달 -> 2차 체결", s.holdings["A1"].get("tranches_filled") == 2)
 check("수량이 늘어남", s.holdings["A1"]["qty"] > q1,
       f'{q1} -> {s.holdings["A1"]["qty"]}')
 check("평단가가 1차보다 낮아짐", s.holdings["A1"]["buy_price"] < avg1,

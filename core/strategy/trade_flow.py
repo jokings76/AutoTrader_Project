@@ -290,6 +290,27 @@ class TradeFlowTracker:
             return 0.0
         return short_val / expected
 
+    def get_low(
+        self,
+        stock_code: str,
+        window_sec: float,
+        now: float = None,
+    ) -> Optional[float]:
+        """최근 window_sec 안의 **최저 체결가**. 틱이 없으면 None.
+
+        (2026-08-05 신규) 손절 대신 추가매수(Rescue Add)의 '반등 확증' 판정용.
+        포지션의 `lowest_price`는 매수 이후 전 구간의 저점이라 "지금 막 반등을
+        시작했는가"를 못 잰다 — 그건 짧은 창의 저점이어야 한다.
+        None은 '판단 불가'이며, 호출부는 이를 **추가매수 미발동**(=손절)으로
+        보수적으로 처리한다.
+        """
+        now = now if now is not None else time.time()
+        d = self.ticks.get(stock_code)
+        if not d:
+            return None
+        lows = [px for ts, px, _side, _vol in d if now - ts <= window_sec and px > 0]
+        return float(min(lows)) if lows else None
+
     def count_large_trades(
         self,
         stock_code: str,

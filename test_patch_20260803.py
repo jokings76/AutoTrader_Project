@@ -156,7 +156,9 @@ print("\n[2] 본전스톱 — 현재 ON (2026-08-04 재활성화)")
 # 둘 다 확인한다. 로직이 썩으면 되살릴 때 조용히 깨지기 때문이다.
 check("본전스톱 기본값 ON", SM.BREAKEVEN_STOP_ENABLED is True)
 check("무장 지점 상수는 보존(순 +1.0%)", abs(SM.BREAKEVEN_TRIGGER - 0.010) < 1e-9)
-check("바닥 상수도 보존(본전 0%)", abs(SM.BREAKEVEN_FLOOR - 0.0) < 1e-9)
+# (2026-08-05) 0.0 -> 0.002. 바닥을 정확히 0%로 두면 매도가 시장가라
+# 체결이 판정가보다 아래에서 이뤄져 결국 마이너스로 나간다(포톤 -0.04% 실측).
+check("바닥은 순 +0.2% (슬리피지만큼 위)", abs(SM.BREAKEVEN_FLOOR - 0.002) < 1e-9)
 
 px_arm = int(10_000 * (1 + SM.BREAKEVEN_TRIGGER + SM.ROUND_TRIP_COST)) + 1
 
