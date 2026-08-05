@@ -649,6 +649,28 @@ VI_STATIC_RATIO = 0.10          # 정적VI 발동 폭 (기준가 대비 ±10%)
 VI_UPPER_MARGIN_PCT = 0.005     # 상단까지 0.5% 이내면 확정매도
 VI_UPPER_MARGIN_TICKS = 2       # 또는 2호가 이내 (둘 중 하나만 맞으면 발동)
 
+# ── 정적VI 상단 근접 시 **매수 차단** (2026-08-06 사용자 지정) ────────
+# [왜] 무장·버스트가 다 맞아도 VI 상단 코앞에서 사면 세 가지가 겹친다:
+#   ① VI가 걸리면 2분간 단일가매매라 **산 직후 손도 못 대는 구간**에 갇힌다.
+#   ② 위쪽 여유가 VI까지밖에 없어 **익절 캡(4.0%/2.5%)에 도달할 공간이 없다.**
+#   ③ 매수하자마자 VI_UPPER_MARGIN_PCT(0.5%) 확정매도에 걸려 **수수료만 내고
+#      되파는 회전**이 된다 — 매수·매도 규칙이 서로 싸우는 상태다.
+# -> 상단까지 이 비율 **이하로 붙어 있으면 매수하지 않는다.**
+#    (= 여유가 이 값을 **넘을 때만** 조건 충족 시 매수)
+#
+# [실효 지점] VI 상단은 시가 x1.10이므로, 차단이 시작되는 가격은
+#   P >= 시가 x 1.10 / (1 + 0.03) = 시가 x **1.0680** — 즉 '시가 대비 +6.80%'다.
+#   ⚠️ 1A에는 이미 '시가대비 +5% 매수보류'가 있어 **1A에선 그쪽이 먼저 걸린다**
+#      (5% < 6.8%). 즉 이 규칙이 실질적으로 새로 막는 건 **Pullback 경로**다
+#      (눌림목자동엔 시가대비 필터가 없다).
+#
+# ⚠️ **시가를 모르면 차단하지 않는다.** 여기서 막아버리면 시가 캐시가 비는
+#    순간 하루 종일 매수 0건이 되는데, 그건 로그를 뒤지기 전엔 안 보인다
+#    (08-05에 시가대비 필터가 정확히 그 이유로 하루 종일 0건이었다).
+#    '모름'이 매수를 막지도 열어주지도 않게 두고, 대신 탈락 사유로 관측한다.
+VI_UPPER_ENTRY_BLOCK_ENABLED = True
+VI_UPPER_ENTRY_BLOCK_PCT = 0.03   # 상단까지 이 비율 이하면 매수 차단
+
 # ── 동적 익절캡 (2026-07-30 사용자 지정) ───────────────────────
 # 1.5%캡 종목이 보유 중 체결강도 상승을 보이면 캡을 2.5%로 올려 더 태우고,
 # 2.5%캡 종목은 체결강도 하락 AND 거래량 하락이 동시에 오면 즉시 매도한다.
@@ -1749,6 +1771,11 @@ class StrategyManager:
         # 신호이므로 ENTRY_PULLBACK_TRANCHES/TIMEOUT을 조정할 근거가 된다.
         # ⚠️ 라벨에 수치를 박지 말 것(상수를 바꿔도 안 따라온다).
         ("되돌림 미도달(대기 만료)", ("되돌림 미도달",)),
+        # (2026-08-06) VI 상단에 붙어 있어 매수를 막은 경우. '신호가 없다'가
+        # 아니라 **신호는 다 맞았는데 자리가 나쁘다**는 뜻이라 반드시 분리한다.
+        # 이게 많으면 VI_UPPER_ENTRY_BLOCK_PCT가 과한지 판단할 근거가 된다.
+        # ⚠️ 라벨에 수치를 박지 말 것(상수를 바꿔도 안 따라온다).
+        ("VI 상단 근접 매수차단", ("VI 상단 근접",)),
         ("체결강도 미달", ("체결강도 미달", "체결강도 지속 미달")),
         ("시가급등 보류", ("시가대비",)),
         ("저유동성 보류", ("저유동성",)),
@@ -2710,6 +2737,33 @@ class StrategyManager:
         return {"vi": vi, "gap": gap, "gap_pct": gap_pct,
                 "within_ticks": within_ticks, "near": near}
 
+    def vi_entry_block_reason(self, stock_code: str, price: float) -> Optional[str]:
+        """정적VI 상단에 너무 붙어 있어 매수를 막아야 하면 사유, 아니면 None.
+
+        **이 판정의 단일 창구다.** 진입 경로가 여럿(계획 생성 / 주문 직전)이라
+        규칙을 복제하면 한쪽만 고쳐져 조용히 어긋난다 — 이 코드베이스의 반복
+        사고 패턴이라 함수 하나로 모은다.
+
+        시가를 모르면 None(차단 안 함) — 상수 주석의 ⚠️ 참고.
+        """
+        if not VI_UPPER_ENTRY_BLOCK_ENABLED:
+            return None
+        try:
+            vi = self.vi_upper_price(stock_code)
+            px = float(price)
+        except (TypeError, ValueError):
+            return None
+        if vi <= 0 or px <= 0:
+            return None          # 시가 미상 -> 판정 포기(매수 허용)
+        gap_pct = (vi - px) / px
+        if gap_pct > VI_UPPER_ENTRY_BLOCK_PCT:
+            return None
+        # gap_pct <= 0 이면 이미 VI선을 넘은 것 — 그것도 차단이다.
+        return (
+            f"VI 상단 근접 매수차단 (정적VI {vi:,.0f}원까지 {gap_pct*100:.2f}% "
+            f"<= {VI_UPPER_ENTRY_BLOCK_PCT*100:.0f}%)"
+        )
+
     def _is_index_guard_active(self, now_dt: datetime = None) -> bool:
         """지수 하락 가드 발동 여부 (2026-08-03 신규, 사용자 지정).
 
@@ -3318,6 +3372,15 @@ class StrategyManager:
                     stock_code, stock_name, change_pct, entry_cap,
                 )
                 return
+
+        # VI 상단 근접 매수차단 (2026-08-06) — 등락률 상한과 같은 이유로
+        # **계획 생성 전에** 본다. 여기서 안 막으면 살 수 없는 종목이
+        # ENTRY_PULLBACK_TIMEOUT_SEC 동안 슬롯을 점유한다.
+        vi_block = self.vi_entry_block_reason(stock_code, trigger_price)
+        if vi_block:
+            self._note_reject(stock_code, vi_block)
+            logger.info("[%s] %s 되돌림 대기 생략: %s", stock_code, stock_name, vi_block)
+            return
 
         now = now if now is not None else _time_mod.time()
         targets = []
@@ -4210,6 +4273,18 @@ class StrategyManager:
                     f"등락률 상한 초과 (전일종가대비 +{change_pct:.1f}% > +{entry_cap:.0f}%)",
                 )
                 return
+
+        # VI 상단 근접 매수차단 (2026-08-06) — 주문 직전 하드가드.
+        # `_open_entry_plan`에서 이미 보지만 여기도 두는 이유: `_execute_buy`
+        # 호출부가 3곳(폴링 진입 / 되돌림·상승이탈 체결 / 손절대신 추가매수)이고,
+        # 계획을 건 뒤 상승 이탈로 가격이 VI 쪽으로 붙는 경우가 있다.
+        # (되돌림 체결은 가격이 내려간 것이라 VI에서 멀어지므로 걸리지 않는다.)
+        vi_block = self.vi_entry_block_reason(stock_code, current_price)
+        if vi_block:
+            logger.info("[%s] %s 매수 차단: %s [%s]",
+                        stock_code, stock_name, vi_block, sub_strategy)
+            self._note_reject(stock_code, vi_block)
+            return
 
         sc = info.get("score")
         if sc is not None:

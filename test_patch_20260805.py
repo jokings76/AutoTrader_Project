@@ -683,6 +683,112 @@ check("VI_UPPER_EXIT_ENABLED=False로 완전 무력화 가능",
       "VI_UPPER_EXIT_ENABLED and net_rate > 0"
       in _insp.getsource(SM.StrategyManager.on_price_update))
 
+
+# ═════════════════════════════════════════════════════════
+print("\n[13] VI 상단 근접 매수차단 (2026-08-06 신규)")
+# ═════════════════════════════════════════════════════════
+# [왜] 무장·버스트가 다 맞아도 VI 상단 코앞에서 사면 (a) VI 발동 시 2분간
+# 손도 못 대고 (b) 익절 캡까지 갈 공간이 없고 (c) 매수 직후 VI 확정매도(0.5%)에
+# 걸려 수수료만 내고 되판다. -> 상단까지 3% 이하로 붙으면 매수하지 않는다.
+
+check("매수차단 상수", SM.VI_UPPER_ENTRY_BLOCK_ENABLED is True
+      and SM.VI_UPPER_ENTRY_BLOCK_PCT == 0.03,
+      f"{SM.VI_UPPER_ENTRY_BLOCK_ENABLED} / {SM.VI_UPPER_ENTRY_BLOCK_PCT}")
+check("매수차단 폭 > 매도발동 폭 (밴드가 뒤집히면 사자마자 되판다)",
+      SM.VI_UPPER_ENTRY_BLOCK_PCT > SM.VI_UPPER_MARGIN_PCT,
+      f"매수차단 {SM.VI_UPPER_ENTRY_BLOCK_PCT} vs 매도 {SM.VI_UPPER_MARGIN_PCT}")
+check("매수차단 폭 < 정적VI 폭", SM.VI_UPPER_ENTRY_BLOCK_PCT < SM.VI_STATIC_RATIO)
+
+def vb(open_px, price, code="VB"):
+    s, _ = build()
+    if open_px:
+        s._opening_prices[code] = open_px
+    return s.vi_entry_block_reason(code, price)
+
+# 시가 10,000 -> VI 상단 11,000 -> 차단 시작 11,000/1.03 = 10,680원
+check("여유 충분(3% 초과)하면 차단 안 함", vb(10_000, 10_600) is None,
+      str(vb(10_000, 10_600)))
+# 경계는 '정확히 3%'가 아니라 **양옆**으로 본다 — 부동소수점 때문에 정확히
+# 3.000%인 가격은 계산 순서에 따라 위/아래로 갈린다(테스트가 그걸 잡아냈다).
+_edge = 11_000 / (1 + SM.VI_UPPER_ENTRY_BLOCK_PCT)     # 여유가 딱 3%인 가격
+check("경계 바로 아래(여유 3.01%)는 통과", vb(10_000, _edge * 0.9999) is None,
+      f"{_edge*0.9999:,.1f}원")
+check("경계 바로 위(여유 2.99%)는 차단", vb(10_000, _edge * 1.0001) is not None,
+      f"{_edge*1.0001:,.1f}원")
+check("3% 이내면 차단", vb(10_000, 10_800) is not None, str(vb(10_000, 10_800))[:60])
+check("VI선 초과도 차단(이미 발동했을 수 있음)", vb(10_000, 11_500) is not None)
+check("차단 사유 문구에 'VI 상단 근접' 포함",
+      "VI 상단 근접" in (vb(10_000, 10_900) or ""), str(vb(10_000, 10_900))[:70])
+
+# ⚠️ 시가를 모르면 차단하지 않는다 — 막으면 하루 종일 매수 0건이 되는데
+#    로그를 뒤지기 전엔 안 보인다(08-05 시가대비 필터가 정확히 그랬다).
+check("🔴 시가 캐시가 없으면 차단하지 않음(전면 매수정지 방지)",
+      vb(None, 10_900) is None)
+check("가격이 0/음수/문자면 차단하지 않음",
+      vb(10_000, 0) is None and vb(10_000, -1) is None and vb(10_000, "x") is None)
+check("VI_UPPER_ENTRY_BLOCK_ENABLED=False면 완전 무력화",
+      "if not VI_UPPER_ENTRY_BLOCK_ENABLED"
+      in _insp.getsource(SM.StrategyManager.vi_entry_block_reason))
+
+# 차단 시작 지점이 '시가 대비 +6.80%'인지 (문서·주석과 일치해야 한다)
+_start = (1 + SM.VI_STATIC_RATIO) / (1 + SM.VI_UPPER_ENTRY_BLOCK_PCT)
+check("차단 시작 = 시가 대비 +6.80%", abs(_start - 1.0680) < 0.0005,
+      f"시가 x{_start:.4f}")
+
+# ── 실제 진입 경로 두 곳에서 막히는가 (규칙 복제 사고 방지) ──
+_src_plan = _insp.getsource(SM.StrategyManager._open_entry_plan)
+_src_buy = _insp.getsource(SM.StrategyManager._execute_buy)
+check("계획 생성 경로에 매수차단 배선", "vi_entry_block_reason" in _src_plan)
+check("주문 직전 경로에 매수차단 배선", "vi_entry_block_reason" in _src_buy)
+check("판정이 단일 함수(vi_entry_block_reason)로 모여 있다",
+      _src_plan.count("VI_UPPER_ENTRY_BLOCK_PCT") == 0
+      and _src_buy.count("VI_UPPER_ENTRY_BLOCK_PCT") == 0,
+      "호출부가 상수를 직접 보면 규칙이 갈라진다")
+
+# 계획이 아예 안 걸리는지 (슬롯 점유 방지)
+s_p, _ = build()
+s_p._opening_prices["VP"] = 10_000
+s_p._open_entry_plan("VP", "VP", "1A", {}, "1A", "주도주상위", 10_900)
+check("🔴 VI 근접 종목엔 되돌림 계획을 걸지 않는다(슬롯 점유 방지)",
+      "VP" not in s_p._entry_plans)
+s_p2, _ = build()
+s_p2._opening_prices["VP"] = 10_000
+s_p2._open_entry_plan("VP", "VP", "1A", {}, "1A", "주도주상위", 10_500)
+check("✅ 대조군: 여유 있으면 계획이 정상 생성", "VP" in s_p2._entry_plans)
+
+# 주문 직전 하드가드 — 실제로 매수가 안 나가는가
+def try_buy(price, open_px=10_000, code="VE"):
+    s, _ = build()
+    s._opening_prices[code] = open_px
+    s._prev_closes[code] = 10_000
+    s.phase1b.start_watching(code)
+    s._execute_buy(code, code, "1A", {"current_price": price}, "1A")
+    return s
+
+_s = try_buy(10_900)          # VI 상단 11,000까지 0.92% — 차단돼야 한다
+check("🔴 VI 근접이면 주문이 나가지 않는다",
+      not _s.order_manager.orders and "VE" not in _s.holdings,
+      str(_s.order_manager.orders)[:60])
+_s = try_buy(10_400)          # 여유 5.77% — 정상 매수돼야 한다
+check("✅ 대조군: 여유 있으면 주문이 정상 실행",
+      bool(_s.order_manager.orders) or "VE" in _s.holdings,
+      str(_s.order_manager.orders)[:60])
+# 시가를 모르면 주문이 막히지 않아야 한다(전면 매수정지 방지)
+_s2, _ = build()
+_s2._prev_closes["VF"] = 10_000
+_s2.phase1b.start_watching("VF")
+_s2._execute_buy("VF", "VF", "1A", {"current_price": 10_900}, "1A")
+check("🔴 시가 미상이면 주문이 막히지 않는다",
+      bool(_s2.order_manager.orders) or "VF" in _s2.holdings,
+      str(_s2.order_manager.orders)[:60])
+
+# 진단 분류
+check("탈락 사유가 '기타'로 뭉개지지 않는다",
+      any("VI 상단 근접" in r[0] for r in SM.StrategyManager._REJECT_RULES))
+check("진단 라벨에 수치를 박지 않았다",
+      not any(ch.isdigit() for r in SM.StrategyManager._REJECT_RULES
+              if "VI 상단 근접" in r[0] for ch in r[0]))
+
 print("\n" + "=" * 62)
 print(f"통과 {len(PASS)}건 / 실패 {len(FAIL)}건   ({time.time() - T0:.1f}초)")
 if FAIL:

@@ -152,6 +152,13 @@ check("되돌림 깊이 오름차순",
                                       SM.ENTRY_PULLBACK_TRANCHES[1:])))
 check("VI 마진 < 정적VI 폭 (밴드가 뒤집히지 않음)",
       SM.VI_UPPER_MARGIN_PCT < SM.VI_STATIC_RATIO)
+# (2026-08-06) 매수차단 폭 > 매도발동 폭이어야 한다. 뒤집히면 **사자마자
+# 되파는** 구조가 된다(매수는 허용되는데 그 가격이 이미 확정매도 구간).
+check("🔴 VI 매수차단 폭 > VI 확정매도 폭 (사자마자 되팔기 방지)",
+      SM.VI_UPPER_ENTRY_BLOCK_PCT > SM.VI_UPPER_MARGIN_PCT,
+      f"매수차단 {SM.VI_UPPER_ENTRY_BLOCK_PCT} vs 매도 {SM.VI_UPPER_MARGIN_PCT}")
+check("VI 매수차단 폭 < 정적VI 폭",
+      SM.VI_UPPER_ENTRY_BLOCK_PCT < SM.VI_STATIC_RATIO)
 check("추가매수 관찰 하한 > 손절선 (구조 전 더 내려갈 여지)",
       SM.RESCUE_ADD_OBSERVE_FLOOR > abs(SM.STOP_LOSS_RATE))
 check("추가매수 최종손절 > 관찰 하한", SM.RESCUE_ADD_FINAL_STOP > SM.RESCUE_ADD_OBSERVE_FLOOR)
@@ -532,6 +539,10 @@ if _doc:
     doc_has("캡", f"캡 {SM.TAKE_PROFIT_CAP} {SM.TAKE_PROFIT_CAP_PULLBACK} "
                 f"{SM.TAKE_PROFIT_CAP_EARLY} {SM.TP_CAP_UPGRADED_MAX}")
     doc_has("본전스톱", f"본전스톱 {SM.BREAKEVEN_STOP_ENABLED}")
+    doc_has("VI", f"VI {SM.VI_UPPER_EXIT_ENABLED} {SM.VI_STATIC_RATIO} "
+                 f"{SM.VI_UPPER_MARGIN_PCT} {SM.VI_UPPER_MARGIN_TICKS}")
+    doc_has("VI매수차단", f"VI매수차단 {SM.VI_UPPER_ENTRY_BLOCK_ENABLED} "
+                       f"{SM.VI_UPPER_ENTRY_BLOCK_PCT}")
     doc_has("매수금액", f"매수금액 3곳 {SM.POSITION_AMOUNT} "
                      f"{DEFAULT_BASE_AMOUNT} {BUY_AMOUNT_PER_STOCK} 일치")
 

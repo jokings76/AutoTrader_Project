@@ -496,23 +496,46 @@ check("중복 편입 11:00 -> Pullback으로 매수",
 print("\n[7] 기존 안전장치가 틱 경로에서도 유지되는지")
 # ═════════════════════════════════════════════════════════
 # 시가대비 +5% 보류는 1A에만
+# ⚠️ (2026-08-06) 시가를 9,450으로 잡는다. 예전엔 9,000이었는데, 그러면
+#    현재가 10,000이 **정적VI 상단(9,900)을 이미 넘어** 새로 생긴
+#    'VI 상단 근접 매수차단'에도 걸린다 — 두 규칙이 겹쳐 어느 쪽이 막았는지
+#    구분이 안 된다(실제로 이 테스트가 그 충돌을 잡아냈다).
+#    9,450이면 시가대비 +5.82%(>5%라 1A 보류는 걸림) / VI 상단 10,395까지
+#    3.95% 여유(>3%라 VI 차단은 안 걸림) — 규칙이 정확히 하나만 작동한다.
+_OPEN_ISOLATED = 9_450
 s = build_strat(datetime(2026, 8, 3, 9, 30, 0))
 setup_candidate(s, "S1")
-s._opening_prices["S1"] = 9_000            # 현재가 10,000 -> +11%
+s._opening_prices["S1"] = _OPEN_ISOLATED
 tick(s, "S1", 130.0, t0)
 feed(s.phase1b.trade_flow, "S1", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5, span=0.5)
 tick(s, "S1", 130.0, t0 + 3.5)
 check("1A: 시가대비 +5% 이상이면 매수 보류", "S1" not in s.holdings)
+check("  (이 케이스는 VI 차단 범위 밖 — 규칙이 겹치지 않는다)",
+      s.vi_entry_block_reason("S1", 10_000) is None,
+      str(s.vi_entry_block_reason("S1", 10_000)))
 
 s = build_strat(datetime(2026, 8, 3, 10, 0, 0))
 setup_candidate(s, "S2", cond="눌림목자동")
-s._opening_prices["S2"] = 9_000
+s._opening_prices["S2"] = _OPEN_ISOLATED
 tick(s, "S2", 130.0, t0)
 feed(s.phase1b.trade_flow, "S2", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5, span=0.5)
 tick(s, "S2", 130.0, t0 + 3.5)
 pullback_fill(s, "S2", t0 + 4.5)   # -0.5% 되돌림 체결 (2026-08-04)
 check("눌림목엔 시가대비 보류를 적용하지 않음(되돌림을 사는 전략)",
       "S2" in s.holdings)
+
+# (2026-08-06) VI 상단 근접 매수차단은 **전략 무관**으로 적용된다.
+# 위 눌림목은 시가대비 보류를 면제받지만 VI 차단은 면제받지 않는다 —
+# 이게 두 규칙의 결정적 차이라 나란히 못박는다.
+s = build_strat(datetime(2026, 8, 3, 10, 0, 0))
+setup_candidate(s, "S3", cond="눌림목자동")
+s._opening_prices["S3"] = 9_200            # VI 상단 10,120 -> 현재가 10,000까지 1.2%
+tick(s, "S3", 130.0, t0)
+feed(s.phase1b.trade_flow, "S3", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5, span=0.5)
+tick(s, "S3", 130.0, t0 + 3.5)
+pullback_fill(s, "S3", t0 + 4.5)
+check("🔴 눌림목이라도 VI 상단 3% 이내면 매수 차단", "S3" not in s.holdings,
+      str(s.vi_entry_block_reason("S3", 10_000))[:60])
 
 # 지수 HALT
 s = build_strat(datetime(2026, 8, 3, 9, 30, 0))
