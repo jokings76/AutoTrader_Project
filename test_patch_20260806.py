@@ -646,6 +646,86 @@ check("[진단] 파동 상한이 '매수 컷오프'로 오분류되지 않는다
           "버스트 파동 상한 초과 (5번째 > 3번째)") == "버스트 파동 상한(후기 파동)")
 
 # ═════════════════════════════════════════════════════════
+print("\n[11] 무장 3초 복원 (2026-08-07)")
+# ═════════════════════════════════════════════════════════
+check("무장 요구시간이 3.0초로 복원됨", SM.TICK_STRENGTH_SUSTAIN_SEC == 3.0,
+      str(SM.TICK_STRENGTH_SUSTAIN_SEC))
+check("무장 임계 강도는 100 유지(내리면 매도우위에서 사게 된다)",
+      SM.TICK_STRENGTH_MIN == 100.0)
+check("[불변식] 무장 요구시간 < 무장 TTL",
+      SM.TICK_STRENGTH_SUSTAIN_SEC < SM.TICK_ARM_TTL_SEC)
+
+s11 = build()
+setup(s11, "ARM1")
+_n = time.time()
+# 2.9초는 탈락 / 3.0초는 통과 — 경계를 못박는다
+s11._strength_since["ARM1"] = _n - 2.9
+ok, info = s11.evaluate_tick_entry("ARM1", "1A", 10_000, now=_n)
+check("2.9초는 무장 미달로 탈락", (not ok) and "미무장" in info.get("reason", ""),
+      info.get("reason", "")[:40])
+s11._strength_since["ARM1"] = _n - 3.0
+feed(s11.phase1b.trade_flow, "ARM1", 2, SM.PHASE1A_BURST_TRADE_VALUE * 1.2, _n)
+ok2, info2 = s11.evaluate_tick_entry("ARM1", "1A", 10_000, now=_n)
+check("3.0초 + 버스트면 통과", ok2, info2.get("reason", "")[:40])
+
+# ═════════════════════════════════════════════════════════
+print("\n[12] 세션 VWAP 인프라 (2026-08-07 신설, 기본 OFF)")
+# ═════════════════════════════════════════════════════════
+check("VWAP 진입 필터는 기본 OFF", SM.VWAP_ENTRY_ENABLED is False)
+check("이격 기준 +0.5%", SM.VWAP_ENTRY_MIN_GAP_PCT == 0.5)
+check("적용 시작 09:05 (그 전엔 VWAP이 요동쳐 판정 무의미)",
+      SM.VWAP_ENTRY_FROM == SM.time(9, 5))   # SM.time = datetime.time
+check("단위 보정 기본 1.0 (실거래 확인 전까지 원 단위 가정)",
+      SM.VWAP_UNIT_SCALE == 1.0)
+
+s12 = build(now_dt=datetime(2026, 8, 7, 9, 30, 0))
+setup(s12, "VW1")
+# 0B raw의 누적 필드로 VWAP이 잡히는가 (13=누적량 14=누적대금)
+s12.on_trade({"stock_code": "VW1", "price": 10_300, "volume": 10, "side": "buy",
+              "strength": 120.0, "raw": {"13": "1000", "14": "10000000"}})
+check("raw FID 13/14로 세션 VWAP 계산 (10,000,000/1,000 = 10,000)",
+      abs(s12.session_vwap("VW1") - 10_000) < 0.01, f"{s12.session_vwap('VW1'):.1f}")
+check("VWAP 미수신 종목은 0.0", s12.session_vwap("NOPE") == 0.0)
+
+# OFF일 때는 어떤 가격이어도 통과해야 한다
+check("[OFF] 기능이 꺼져 있으면 항상 통과",
+      s12.vwap_entry_reject("VW1", 9_000) is None)
+
+_old = SM.VWAP_ENTRY_ENABLED
+try:
+    SM.VWAP_ENTRY_ENABLED = True
+    check("[ON] VWAP 대비 +0.4%면 탈락(기준 +0.5%)",
+          s12.vwap_entry_reject("VW1", 10_040) is not None)
+    check("[ON] VWAP 대비 +0.6%면 통과",
+          s12.vwap_entry_reject("VW1", 10_060) is None)
+    check("[ON] VWAP 아래면 탈락",
+          s12.vwap_entry_reject("VW1", 9_900) is not None)
+    check("[ON] 09:05 이전에는 판정하지 않는다(VWAP 불안정 구간)",
+          s12.vwap_entry_reject("VW1", 9_000,
+                                now_dt=datetime(2026, 8, 7, 9, 2, 0)) is None)
+    check("[ON] VWAP 미수신이면 통과(모름이 매수를 막지 않는다)",
+          s12.vwap_entry_reject("NOPE", 10_000) is None)
+finally:
+    SM.VWAP_ENTRY_ENABLED = _old
+
+check("[진단] VWAP 탈락이 '기타'로 뭉개지지 않는다",
+      SM.StrategyManager._reject_category(
+          "VWAP 이격 미달 (VWAP대비 +0.10% <= +0.5%)") == "VWAP 이격 미달")
+check("[안전] 이상 raw(빈값/0/문자)에도 예외 없이 무시",
+      (s12._note_session_vwap("X", {"raw": {}}) is None
+       and s12._note_session_vwap("X", {"raw": {"13": "0", "14": "0"}}) is None
+       and s12._note_session_vwap("X", {"raw": {"13": "a", "14": "b"}}) is None
+       and s12.session_vwap("X") == 0.0))
+
+# 호출부가 상수를 직접 보지 못하게 (규칙 복제 방지)
+import inspect as _insp
+for _fn, _nm in ((SM.StrategyManager._open_entry_plan, "_open_entry_plan"),
+                 (SM.StrategyManager._execute_buy, "_execute_buy")):
+    _src = _insp.getsource(_fn)
+    check(f"{_nm}은 vwap_entry_reject만 부른다(상수 직접 참조 금지)",
+          "vwap_entry_reject" in _src and "VWAP_ENTRY_MIN_GAP_PCT" not in _src)
+
+# ═════════════════════════════════════════════════════════
 print("\n" + "=" * 62)
 print(f"통과 {len(PASS)} / 실패 {len(FAIL)}")
 if FAIL:

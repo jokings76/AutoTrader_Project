@@ -698,8 +698,8 @@ check("버스트 요구 건수가 2건(사용자 지정, 구버전 3건)",
       SM.PHASE1A_BURST_TRADE_COUNT == 2, str(SM.PHASE1A_BURST_TRADE_COUNT))
 check("버스트 창이 5초(구버전 3초, 사용자 원안 1초는 판정 불가)",
       SM.TICK_BURST_WINDOW_SEC == 5.0, str(SM.TICK_BURST_WINDOW_SEC))
-check("강도 유지 요구가 1.5초 (2026-08-03: 3.0 -> 2.0 -> 1.5)",
-      SM.TICK_STRENGTH_SUSTAIN_SEC == 1.5, str(SM.TICK_STRENGTH_SUSTAIN_SEC))
+check("강도 유지 요구가 3.0초 (08-03에 1.5로 완화했다가 08-07 실측으로 복원)",
+      SM.TICK_STRENGTH_SUSTAIN_SEC == 3.0, str(SM.TICK_STRENGTH_SUSTAIN_SEC))
 check("강도 임계값 100", SM.TICK_STRENGTH_MIN == 100.0)
 
 # 구버전: 15초 폴링이 유일한 진입 경로였다 -> 지금은 틱에서 바로 산다

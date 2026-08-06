@@ -532,8 +532,8 @@ sSR = full_strat(11, 10, SM.MAX_HOLDINGS, kospi=-5.2, kosdaq=-1.0)
 check("가드 중 슬롯교체 시도가 즉시 반환(교체 0)",
       _SR.try_slot_replacement(sSR, None, 0, sSR._now()) == 0)
 
-print("\n[17] 무장 1.5초")
-check("무장 요구시간 1.5초", abs(SM.TICK_STRENGTH_SUSTAIN_SEC - 1.5) < 1e-9,
+print("\n[17] 무장 3.0초 (2026-08-07 복원)")
+check("무장 요구시간 3.0초", abs(SM.TICK_STRENGTH_SUSTAIN_SEC - 3.0) < 1e-9,
       str(SM.TICK_STRENGTH_SUSTAIN_SEC))
 check("[불변] 쿨다운보다는 큼", SM.TICK_STRENGTH_SUSTAIN_SEC > SM.TICK_ENTRY_COOLDOWN_SEC)
 check("[불변] 무장 TTL보다는 작음", SM.TICK_STRENGTH_SUSTAIN_SEC < SM.TICK_ARM_TTL_SEC)

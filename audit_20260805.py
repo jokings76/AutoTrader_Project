@@ -551,6 +551,9 @@ if _doc:
     doc_has("진입숙성", f"진입숙성 {SM.MIN_ENTRY_DELAY_SEC}")
     doc_has("파동상한", f"파동상한 {SM.BURST_WAVE_MAX}")
     doc_has("무장", f"무장 {SM.TICK_STRENGTH_MIN} {SM.TICK_STRENGTH_SUSTAIN_SEC}")
+    # 2026-08-07 신설. 현재 OFF지만 켜는 순간 매수 게이트가 되므로 문서와 묶어둔다.
+    doc_has("VWAP진입", f"VWAP진입 {SM.VWAP_ENTRY_ENABLED} "
+                       f"{SM.VWAP_ENTRY_MIN_GAP_PCT} {SM.VWAP_ENTRY_FROM}")
     doc_has("버스트", f"버스트 {SM.PHASE1A_BURST_TRADE_VALUE} "
                     f"{SM.PHASE1A_BURST_TRADE_COUNT} {SM.PHASE1A_SINGLE_TRADE_VALUE}")
     doc_has("주가계수", f"주가계수 {SM.BURST_PRICE_REF} {SM.BURST_PRICE_ALPHA} "

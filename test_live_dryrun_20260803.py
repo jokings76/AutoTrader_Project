@@ -925,13 +925,16 @@ SM.PULLBACK_MAX_SLOTS = 4   # [E] 설정조합 배선 검증용 임시 복구
 sN.on_condition_hit("PB1", "눌림새창", cond_name="눌림목자동")
 ob(sN, "PB1")
 TN = time.time()
+# 타임라인을 상수에서 산출한다 — 무장 시간을 바꿔도 이 테스트가 따라온다
+# (2026-08-07: 1.5초 -> 3.0초 복원 때 여기가 하드코딩 2.2초라 깨졌다).
+_SUS = SM.TICK_STRENGTH_SUSTAIN_SEC
 tick(sN, "PB1", 130.0, TN)
-tick(sN, "PB1", 130.0, TN + 1.0)
-check("1.0초에는 무장 전(요구 1.5초)", "PB1" not in sN._armed_at)
-burst(sN, "PB1", TN + 2.2)
-tick(sN, "PB1", 130.0, TN + 2.2)
-tick(sN, "PB1", 130.0, TN + 3.2, price=9_940, side="sell")  # 되돌림 체결
-check("09:02 눌림목이 1.5초 무장 + 버스트로 매수 (구버전: 창밖+3초 미달로 둘 다 불가)",
+tick(sN, "PB1", 130.0, TN + _SUS * 0.5)
+check(f"요구시간의 절반({_SUS*0.5:.1f}초)에는 무장 전", "PB1" not in sN._armed_at)
+burst(sN, "PB1", TN + _SUS + 0.7)
+tick(sN, "PB1", 130.0, TN + _SUS + 0.7)
+tick(sN, "PB1", 130.0, TN + _SUS + 1.7, price=9_940, side="sell")  # 되돌림 체결
+check(f"09:02 눌림목이 {_SUS:.1f}초 무장 + 버스트로 매수 (구버전: 창밖이라 불가)",
       "PB1" in sN.holdings, f"holdings={list(sN.holdings)}")
 check("눌림 전략으로 라우팅", sN.holdings["PB1"]["sub_strategy"] == "1A_눌림")
 

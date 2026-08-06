@@ -716,11 +716,13 @@ check("무장 전에는 매수하지 않음", "INT1" not in s.holdings)
 # 1.0초 경과 — 아직 요구시간(1.5초) 미달  (2026-08-03: 3.0 -> 2.0 -> 1.5초)
 s.on_trade({"stock_code": "INT1", "price": 10_000, "side": "buy",
             "volume": 10, "strength": 115.0}, now=t0 + 1.0)
-check("1.0초(요구 1.5초 미달)에는 무장 안 됨", "INT1" not in s._armed_at)
-# 1.5초를 넘기면 무장한다 — 구버전(2.0/3.0초)이면 여기서 아직 무장 전이었다
+check("요구시간 미달에는 무장 안 됨", "INT1" not in s._armed_at)
+# 요구시간을 넘기면 무장한다. 시간은 상수에서 산출 — 무장 시간을 바꿔도 따라온다
+# (2026-08-07: 1.5 -> 3.0초 복원 때 하드코딩 1.6초라 깨졌다).
 s.on_trade({"stock_code": "INT1", "price": 10_000, "side": "buy",
-            "volume": 10, "strength": 115.0}, now=t0 + 1.6)
-check("1.6초에 무장 성립(구버전 2.0초였다면 미무장)", "INT1" in s._armed_at)
+            "volume": 10, "strength": 115.0},
+           now=t0 + SM.TICK_STRENGTH_SUSTAIN_SEC + 0.1)
+check(f"{SM.TICK_STRENGTH_SUSTAIN_SEC:.1f}초 경과 시 무장 성립", "INT1" in s._armed_at)
 
 # 3.5초 경과 + 그 틱 자체가 대량체결(3천만원 x 2건)
 feed(s.phase1b.trade_flow, "INT1", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5, span=1.0)

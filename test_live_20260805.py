@@ -372,7 +372,7 @@ check("1A/Pullback 시간창 동일 09:00~14:50",
       and SM.PHASE1A_END == SM.PULLBACK_END == dtime(14, 50))
 check("진입 종료(14:50) < 강제청산(15:10)",
       SM.PHASE1A_END < dtime(15, 10) and FORCE_CLOSE_TIME == "15:10")
-check("무장 1.5초, 임계 100", SM.TICK_STRENGTH_SUSTAIN_SEC == 1.5
+check("무장 3.0초, 임계 100", SM.TICK_STRENGTH_SUSTAIN_SEC == 3.0
       and SM.TICK_STRENGTH_MIN == 100.0,
       f"{SM.TICK_STRENGTH_SUSTAIN_SEC}초 / {SM.TICK_STRENGTH_MIN}")
 check("버스트 문턱 4천만 x2건 / 단일 1억",

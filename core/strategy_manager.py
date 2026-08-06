@@ -256,13 +256,24 @@ TICK_ENTRY_ENABLED = True          # 즉시 끄는 스위치(False면 기존 폴
 # 228은 이미 매 체결 틱에 실려 온다(api/kiwoom_ws.py의 parsed["strength"]) —
 # 계산 0회, 추가 호출 0회, 지연 0ms.
 TICK_STRENGTH_MIN = 100.0          # 이 값 이상이어야 무장 타이머가 돈다
-# (2026-08-03) 3.0 -> 2.0 -> **1.5초**. **백테스트로 검증한 값이 아니다** — FID228 이력이
-# 남지 않아 과거 재현이 원리적으로 불가능하다(틱 아카이브엔 시각·가격·거래량만
-# 있다). 간접 근거는 08-03 매수 16건의 '매수 시점 강도 지속시간 vs 성과'가
-# 짧을수록 좋았다는 것뿐인데(3~5초 1건 +1.76% / 5~20초 4건 +0.13% / 20초+
-# 11건 +0.03%), 가장 짧은 구간이 1건이라 근거로는 약하다.
-# 모의투자에서 노출을 넓혀보자는 사용자 판단으로 완화한다.
-# 되돌릴 때는 이 값만 3.0으로 바꾸면 된다.
+# (2026-08-07) 1.5 -> **3.0초로 복원**. 08-03 저녁에 3.0 -> 2.0 -> 1.5로 완화할 때는
+# "FID228 이력이 없어 재현이 원리적으로 불가능"하다고 적고 근거 없이 내렸는데,
+# **그 이력은 로그에 남아 있었다** — `🔫 무장 — 체결강도 100 이상 N초 연속` /
+# `⚡ 틱 진입 트리거 (강도 100+ N초 연속)`. 이걸 DB 실체결과 역매칭해 실측했다.
+#
+# [실측] 08-05~08-06 실거래 33건 (실전 전환 + 조건검색 '통합' 이후만.
+#        08-03/04는 모의투자 + KRX 조건식이라 유니버스·수수료가 달라 제외했다):
+#     컷오프    거래  승률  손익비   합계     08-05    08-06
+#     1.5초(구)  33   36%  1.41   -6.2%    +4.6%   -10.8%
+#     3.0초      29   38%  1.61   -0.3%    +4.4%    -4.7%
+#   -> 3초로 조이면 손익비 1.41 -> 1.61, 합계 -6.2% -> -0.3%.
+#      제거되는 4건은 대원전선 0.00% / 포톤 +0.19% / 대원전선 -3.02% /
+#      에스피지 -3.06% = 합계 -5.9%로, **3건이 손실 또는 0%**다.
+#   ※ 4.0/5.0초로 더 올려도 결과가 동일하다(3~5초 구간에 거래가 없다).
+#      즉 3.0은 '가장 느슨하면서 같은 효과를 내는' 지점이다.
+# ⚠️ 반사실 한계: 이 표본은 '현행 조건을 통과한 거래'만 담는다. 3초로 조였을 때
+#    다른 종목이 그 슬롯을 대신 채웠을 가능성은 재현되지 않는다.
+# 다시 완화하려면 이 값만 바꾸면 된다(1.5로 되돌리면 08-03 저녁 사양).
 # ⚠️ 이 값을 더 낮출 때 주의: 무장은 '매수세가 실제로 유지되는가'의 유일한
 # 증거다. 너무 짧으면 순간 스파이크에도 무장돼 버스트 하나만으로 매수가 나간다.
 # ⚠️ 1.5초에서 더 내릴 때 주의 — 저유동 종목은 틱 간격 자체가 길다.
@@ -272,10 +283,45 @@ TICK_STRENGTH_MIN = 100.0          # 이 값 이상이어야 무장 타이머가
 #   경과를 재므로). 즉 저유동 종목에선 값을 낮춰도 체감 완화가 거의 없고,
 #   대신 **증거 자체가 2틱뿐**이라는 위험만 남는다. 유동성 필터와 버스트 조건이
 #   그 위험을 받치고 있다는 전제에서만 유효하다.
-TICK_STRENGTH_SUSTAIN_SEC = 1.5    # 연속 유지 요구 시간(초). 밑으로 떨어지면 리셋
+TICK_STRENGTH_SUSTAIN_SEC = 3.0    # 연속 유지 요구 시간(초). 밑으로 떨어지면 리셋
 # 무장 후 이 시간(초) 안에 버스트가 안 오면 무장 해제. 강도가 계속 100 위라도
 # 버스트 없이 오래 끌면 "이미 지나간 자리"일 가능성이 커서 무한 대기를 막는다.
 TICK_ARM_TTL_SEC = 120.0
+
+# ── 세션 VWAP 진입 필터 (2026-08-07 신설, **현재 OFF — 관측만**) ──────
+# 아이디어: VWAP(그날 평균 체결단가) **아래**에서 사면 위에 물린 매물이 상단을
+# 막는다. 실측이 그 기전을 그대로 보여준다 —
+#   08-05 후보 111건: VWAP 위 평균이익 +3.38% / 평균손실 -2.58% (손익비 1.31)
+#                     VWAP 아래 평균이익 +2.46% / 평균손실 -3.07% (손익비 0.80)
+#   **VWAP 아래는 승률이 오히려 높은데(67% vs 63%) 손익비가 낮다** — 이익은
+#   작고 손실은 크다. 승률만 보면 안 잡히고 손익비를 봐야 잡히는 축이다.
+#
+# ⚠️ **아직 켜지 않는 이유** — 4일 실거래 69건으로 재검증하니 효과가 08-05
+#    단일 분석의 1/4로 줄었다(손익비 1.03 -> 1.09에 그침). +1.0% 이상은 오히려
+#    0.80으로 악화돼 단조성도 깨진다. 단독 도입 근거로는 부족하다.
+#    무장 3초 복원(2026-08-07)의 효과를 먼저 본 뒤 재평가한다.
+#
+# [측정 가능 시각] VWAP은 첫 체결부터 값이 나오지만 초반엔 **VWAP 자체가
+#   요동쳐서** 위/아래 판정이 매분 뒤집힌다. 08-05 실측 분당 변동률:
+#     1~3분 0.509% / 3~5분 0.299% / 5~10분 0.181% / 15~30분 0.058%
+#   판정폭(0.5%)보다 변동이 큰 09:00~09:03 구간은 판정이 물리적으로 무의미하다.
+#   성과도 정확히 일치한다 — 09:00~09:10 구간은 VWAP 위/아래 손익비가 0.77로
+#   **완전히 동일**(판별력 0)하고, 09:10~09:30에서 비로소 갈린다(승률 91% vs 0%).
+#   그래서 VWAP_ENTRY_FROM 이전에는 이 필터를 **적용하지 않는다**.
+VWAP_ENTRY_ENABLED = False          # True로 바꾸면 즉시 적용된다
+VWAP_ENTRY_MIN_GAP_PCT = 0.5        # 현재가가 VWAP보다 이 % 초과 위여야 매수
+VWAP_ENTRY_FROM = time(9, 5)        # 이 시각 이전에는 판정하지 않는다(VWAP 불안정)
+# 세션 VWAP 원천: 실시간 체결(0B)의 누적 필드. **REST 0콜**이고 거래소가 장
+# 시작부터 누적한 값이라 진짜 세션 VWAP이다(감시 시작 시점부터 자체 누적하면
+# 08-05 실측 기준 손익비 1.31 -> 1.19로 효과가 반토막 난다 — 편입이 09:05 이후인
+# 종목이 절반이라 짧은 이동평균이 되어 'VWAP'의 의미를 잃기 때문).
+# ⚠️ **단위 미확인** — 14가 원 단위인지 백만원 단위인지 실거래로 확인해야 한다.
+#    VWAP_UNIT_SCALE이 맞으면 (14*scale)/13이 현재가 근처에 나온다.
+#    확인 전까지 VWAP_ENTRY_ENABLED를 켜지 말 것. 확인은 아래
+#    _note_session_vwap()이 하루 1회 찍는 진단 로그로 한다.
+VWAP_FID_ACC_VALUE = "14"           # 누적거래대금 (추정)
+VWAP_FID_ACC_VOLUME = "13"          # 누적거래량
+VWAP_UNIT_SCALE = 1.0               # 14의 단위 보정(원=1.0 / 백만원=1_000_000.0)
 
 # ── 발사: 대량체결 버스트 3경로(OR) ──────────────────────────────
 # 창을 5초로 잡은 이유(사용자 원안 "1초" -> 5초): 키움 체결 FID 20이
@@ -1215,6 +1261,10 @@ class StrategyManager:
         self._first_seen: dict[str, float] = {}
         # stock_code -> 그날 카운트된 버스트 파동의 발생 시각들 (BURST_WAVE_MAX용).
         self._burst_waves: dict[str, list[float]] = {}
+        # stock_code -> 세션 VWAP(거래소 누적 기준). 0B의 FID 13/14로 매 틱 갱신.
+        # 2026-08-07 신설, 현재 관측 전용(VWAP_ENTRY_ENABLED=False).
+        self._session_vwap: dict[str, float] = {}
+        self._vwap_unit_logged = False       # 단위 확인 진단 로그 1회만
         # 평상시 상한(MAX_HOLDINGS)이 꽉 찬 시각 — 확장 슬롯(7~8) 판정용 (2026-07-31)
         self._soft_cap_full_since: Optional[datetime] = None
         # 장중 전략 성과 추적 — 잘 되는 전략의 컷라인을 낮추고 안 되는 전략은
@@ -1501,6 +1551,74 @@ class StrategyManager:
             return (
                 f"버스트 파동 상한 초과 ({wave_no}번째 > {BURST_WAVE_MAX}번째 "
                 f"— 이미 여러 번 터진 자리)"
+            )
+        return None
+
+    def _note_session_vwap(self, stock_code: str, parsed_trade: dict) -> None:
+        """0B 체결틱의 누적 필드로 세션 VWAP을 갱신한다 (2026-08-07 신설).
+
+        VWAP = 누적거래대금(FID 14) / 누적거래량(FID 13). 거래소가 장 시작부터
+        누적한 값이라 **REST 0콜 · O(1) · 진짜 세션 VWAP**이다.
+        파서가 원본을 `parsed["raw"]`로 통째로 넘겨주므로 파서 수정도 필요 없다.
+
+        ⚠️ 실패해도 절대 밖으로 던지지 않는다 — 이 함수는 on_trade 핫패스에서
+        불리므로, 여기서 예외가 새면 그 종목의 가격/강도 추적이 통째로 멈춘다.
+        """
+        try:
+            raw = parsed_trade.get("raw") or {}
+            vol = abs(int(str(raw.get(VWAP_FID_ACC_VOLUME, "") or 0).strip() or 0))
+            val = abs(int(str(raw.get(VWAP_FID_ACC_VALUE, "") or 0).strip() or 0))
+            if vol <= 0 or val <= 0:
+                return
+            vwap = val * VWAP_UNIT_SCALE / vol
+            self._session_vwap[stock_code] = vwap
+
+            # ── 단위 확인 진단 (하루 1회) ────────────────────────────
+            # 14가 원 단위인지 백만원 단위인지 실거래로 확정하기 위한 것.
+            # 계산된 VWAP이 현재가와 같은 자릿수면 VWAP_UNIT_SCALE=1.0이 맞다.
+            if not self._vwap_unit_logged:
+                self._vwap_unit_logged = True
+                px = parsed_trade.get("price") or 0
+                ratio = (vwap / px) if px else 0
+                logger.info(
+                    "🔎 세션VWAP 단위확인 [%s] FID13(누적량)=%s FID14(누적대금)=%s "
+                    "-> VWAP=%.1f / 현재가=%s / 비율=%.4f  "
+                    "(비율이 0.9~1.1이면 VWAP_UNIT_SCALE=1.0 정상, "
+                    "훨씬 작으면 14가 백만원 단위)",
+                    stock_code, vol, val, vwap, px, ratio,
+                )
+        except Exception:
+            pass
+
+    def session_vwap(self, stock_code: str) -> float:
+        """세션 VWAP(원). 아직 수신 전이면 0.0."""
+        return float(self._session_vwap.get(stock_code, 0.0) or 0.0)
+
+    def vwap_entry_reject(self, stock_code: str, price: float,
+                          now_dt: datetime = None) -> Optional[str]:
+        """세션 VWAP 진입 필터. None이면 통과, 문자열이면 탈락 사유.
+
+        (2026-08-07 신설, 기본 OFF) 판정을 **여기 한 곳에만** 둔다 —
+        이 코드베이스의 반복 사고 패턴이 '같은 규칙의 복제'라, 호출부가
+        상수를 직접 보지 못하게 한다(_entry_change_reject와 같은 규약).
+
+        건너뛰는 경우 3가지 — 전부 '모름이 매수를 막지 않는다'는 기존 규약:
+          ① 기능 OFF  ② VWAP_ENTRY_FROM 이전(VWAP이 아직 요동쳐 판정 무의미)
+          ③ VWAP 미수신(0)
+        """
+        if not VWAP_ENTRY_ENABLED:
+            return None
+        now_t = (now_dt or self._now()).time()
+        if now_t < VWAP_ENTRY_FROM:
+            return None
+        vwap = self.session_vwap(stock_code)
+        if vwap <= 0 or not price or price <= 0:
+            return None
+        gap = (price - vwap) / vwap * 100
+        if gap <= VWAP_ENTRY_MIN_GAP_PCT:
+            return (
+                f"VWAP 이격 미달 (VWAP대비 {gap:+.2f}% "
+                f"<= +{VWAP_ENTRY_MIN_GAP_PCT:.1f}%)"
             )
         return None
 
@@ -2098,6 +2216,8 @@ class StrategyManager:
         # 이게 많으면 VI_UPPER_ENTRY_BLOCK_PCT가 과한지 판단할 근거가 된다.
         # ⚠️ 라벨에 수치를 박지 말 것(상수를 바꿔도 안 따라온다).
         ("VI 상단 근접 매수차단", ("VI 상단 근접",)),
+        # 2026-08-07 신설. 정상 필터링이므로 인프라 경고(_REJECT_INFRA)가 아니다.
+        ("VWAP 이격 미달", ("VWAP 이격",)),
         ("체결강도 미달", ("체결강도 미달", "체결강도 지속 미달")),
         ("시가급등 보류", ("시가대비",)),
         ("저유동성 보류", ("저유동성",)),
@@ -2881,6 +3001,11 @@ class StrategyManager:
                     self._fid228_seen.add(code)
             except (TypeError, ValueError):
                 pass
+
+        # 세션 VWAP 갱신 (2026-08-07) — 0B의 누적 필드(13/14) 나눗셈 한 번이라
+        # 핫패스 비용이 사실상 없다. 보유/미보유와 무관하게 항상 갱신해야
+        # 청산 후 재진입 판정에서도 최신 VWAP을 쓸 수 있다.
+        self._note_session_vwap(code, parsed_trade)
 
         # ⚠️ 체결틱 적재는 **가장 먼저** 한다 (2026-08-01 수정).
         # 기존엔 보유 종목이면 on_price_update 후 곧바로 return 해서
@@ -3749,6 +3874,14 @@ class StrategyManager:
         if vi_block:
             self._note_reject(stock_code, vi_block)
             logger.info("[%s] %s 되돌림 대기 생략: %s", stock_code, stock_name, vi_block)
+            return
+
+        # 세션 VWAP 필터 (2026-08-07, 기본 OFF) — 위 두 게이트와 같은 이유로
+        # **계획 생성 전에** 본다(살 수 없는 종목이 슬롯을 묶지 않게).
+        vwap_block = self.vwap_entry_reject(stock_code, trigger_price)
+        if vwap_block:
+            self._note_reject(stock_code, vwap_block)
+            logger.info("[%s] %s 되돌림 대기 생략: %s", stock_code, stock_name, vwap_block)
             return
 
         now = now if now is not None else _time_mod.time()
@@ -4645,6 +4778,16 @@ class StrategyManager:
             logger.info("[%s] %s 매수 차단: %s [%s]",
                         stock_code, stock_name, vi_block, sub_strategy)
             self._note_reject(stock_code, vi_block)
+            return
+
+        # 세션 VWAP 필터 (2026-08-07, 기본 OFF) — 주문 직전 하드가드.
+        # `_open_entry_plan`에서 이미 보지만 여기도 두는 이유는 `_execute_buy`
+        # 호출부가 3곳이기 때문이다(폴링 / 되돌림·상승이탈 체결 / 손절대신 추가매수).
+        vwap_block = self.vwap_entry_reject(stock_code, current_price)
+        if vwap_block:
+            logger.info("[%s] %s 매수 차단: %s [%s]",
+                        stock_code, stock_name, vwap_block, sub_strategy)
+            self._note_reject(stock_code, vwap_block)
             return
 
         sc = info.get("score")
