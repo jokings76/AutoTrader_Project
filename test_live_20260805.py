@@ -428,14 +428,15 @@ check("정의된 태스크가 전부 gather에 등록됨",
 # ═════════════════════════════════════════════════════════
 print("\n[11] 조건검색 거래소구분 — HTS '대상' 설정과 일치하는가")
 # ═════════════════════════════════════════════════════════
-# 2026-08-05: HTS 대상을 KRX -> 통합으로 바꾸자 stex_tp="K"가 **에러 없이
-# 0종목**을 반환했다. 그대로 기동했으면 하루 종일 매수 0건이었다.
-# 실측(08:33): seq=1/3/4 모두 K,N -> 0종목 / A -> HTS와 동일.
+# 2026-08-07: 통합('A') -> KRX('K')로 되돌림 (사용자 지정).
+# 이유는 성과가 아니라 **정합성**이다 — 실시간 0B / REST 분봉 / 주문이 전부
+# KRX 전용인데 조건검색만 통합이라, '통합으로 고른 종목'을 'KRX 데이터로'
+# 판정하고 있었다(NXT 상장 종목 거래량 결손률 평균 54%).
 from api.kiwoom_ws import CONDITION_STEX_TP
 import inspect as _insp
 
-check("CONDITION_STEX_TP가 통합('A')", CONDITION_STEX_TP == "A",
-      f"{CONDITION_STEX_TP!r} (HTS 대상=통합이면 'A', KRX면 'K')")
+check("CONDITION_STEX_TP가 KRX('K')", CONDITION_STEX_TP == "K",
+      f"{CONDITION_STEX_TP!r} (HTS 대상=KRX면 'K', 통합이면 'A')")
 
 _src_sub = _insp.getsource(KiwoomWS.subscribe_condition)
 _src_snap = _insp.getsource(KiwoomWS.fetch_condition_snapshot)
