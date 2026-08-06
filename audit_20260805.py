@@ -135,6 +135,14 @@ check("진입 종료 <= 강제청산", SM.PHASE1A_END <= dtime(*map(int, FORCE_C
 check("1A/Pullback 진입 종료 동일", SM.PHASE1A_END == SM.PULLBACK_END)
 check("슬롯 캡 <= 하드 상한", SM.PHASE1A_MAX_SLOTS <= SM.MAX_HOLDINGS_HARD
       and SM.PULLBACK_MAX_SLOTS <= SM.MAX_HOLDINGS_HARD)
+# 🔴 죽은 슬롯 불변식 (2026-08-06 [E]) — 어느 한쪽 캡을 0으로 내렸을 때
+#    나머지 캡이 공유 상한을 못 채우면 그 차이만큼 슬롯이 영구히 논다.
+#    [E]에서 실제로 밟을 뻔한 함정이라 감사가 상시 감시한다.
+check("죽은 슬롯 없음 — 캡 합이 공유 상한 이상",
+      SM.PHASE1A_MAX_SLOTS + SM.PULLBACK_MAX_SLOTS >= SM.MAX_HOLDINGS,
+      f"{SM.PHASE1A_MAX_SLOTS}+{SM.PULLBACK_MAX_SLOTS} vs {SM.MAX_HOLDINGS}")
+check("확장 슬롯 도달 가능 — 캡 합이 하드 상한 이상",
+      SM.PHASE1A_MAX_SLOTS + SM.PULLBACK_MAX_SLOTS >= SM.MAX_HOLDINGS_HARD)
 check("MAX_HOLDINGS <= HARD", SM.MAX_HOLDINGS <= SM.MAX_HOLDINGS_HARD)
 check("무장 시간 < 무장 TTL", SM.TICK_STRENGTH_SUSTAIN_SEC < SM.TICK_ARM_TTL_SEC)
 check("시간계수 전부 <= 1.0", all(v <= 1.0 for _, v in SM.TICK_BURST_TIME_MULT))
@@ -533,6 +541,7 @@ if _doc:
     doc_has("청산시각", f"청산 {FORCE_CLOSE_TIME}")
     doc_has("슬롯", f"슬롯 {SM.PHASE1A_MAX_SLOTS} {SM.PULLBACK_MAX_SLOTS} "
                    f"{SM.MAX_HOLDINGS} {SM.MAX_HOLDINGS_HARD}")
+    doc_has("진입숙성", f"진입숙성 {SM.MIN_ENTRY_DELAY_SEC}")
     doc_has("무장", f"무장 {SM.TICK_STRENGTH_MIN} {SM.TICK_STRENGTH_SUSTAIN_SEC}")
     doc_has("버스트", f"버스트 {SM.PHASE1A_BURST_TRADE_VALUE} "
                     f"{SM.PHASE1A_BURST_TRADE_COUNT} {SM.PHASE1A_SINGLE_TRADE_VALUE}")

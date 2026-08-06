@@ -623,6 +623,34 @@ MAX_ENTRY_CHANGE_PCT_PULLBACK = 10.0  # 눌림목자동 조건검색 -> Pullback
 # 되돌리려면 -100.0 (사실상 무제한).
 MIN_ENTRY_CHANGE_PCT = 0.0
 
+# ── [F] 진입 숙성 — 편입 직후 급하게 사지 않는다 (2026-08-06 신규) ────
+# [배경] "너무 급하게 사고 너무 빨리 손절한다"는 관찰에서 출발해, 08-03~06
+# 실매수 73건을 **편입 -> 매수 지연** 축으로 분해했다:
+#     지연        n    평균 손익    +5분
+#     0~1분      20   **-1.15%**   +1.31%   <- 최악
+#     1~3분       7    +0.42%      +0.81%
+#     3~10분     16    -1.28%      -1.44%
+#     10~30분    18    +0.25%      -0.14%
+#     30분~      12    +0.01%      +0.16%
+# 0~1분 건은 **+5분 기준으로는 가장 좋은데(+1.31%) 최종 손익은 가장 나쁘다**.
+# 즉 급등 직후 진입은 먼저 오르고 나서 크게 되돌린다 — 우리 손절(-3%)이
+# 그 되돌림을 정확히 맞는다. 이게 "빨리 손절"의 정체다.
+#
+# [왜 60초인가 — 4일 전부 개선하는 유일한 값]
+#     설정        4일합계    08-03    08-04    08-05    08-06
+#     현행       -35.9%     -9.5    -20.5    +15.1    -20.9
+#     **60초**   **-12.9%**  -7.5✓   -14.5✓   +22.2✓   -13.2✓   <- 4/4 개선
+#     600초       +4.6%     -5.2✓    -5.5✓   +14.1✗    +1.2✓   <- 3/4
+# 합계만 보면 600초가 낫지만 08-05를 악화시키고 표본이 73->30으로 반토막 난다.
+# 이 프로젝트의 강건성 기준("일자별로 각각 개선")을 만족하는 건 60초뿐이다.
+#
+# ⚠️ 처음엔 정반대(신선한 신호만 사는 '신선도 컷오프')를 검토했는데 **데이터가
+#    반박했다** — 1/2/3/5분 이내로 제한하면 전부 플러스일 0/4로 더 나빠진다.
+#    "편입 즉시 매수가 +0.506%인데 우리는 +0.099%"를 '지연 탓'으로 읽었던 것이
+#    오독이었다. 지연이 아니라 **선택(역선택)**이 문제다.
+# 되돌리려면 0.0 (숙성 요구 없음 = 08-05까지의 동작).
+MIN_ENTRY_DELAY_SEC = 60.0
+
 # 신규매수 전면 하드 컷오프. 1A(~14:50)/1L(~10:50)은 자체 시간 윈도우가 있지만
 # 1B(FSM 감시)는 Pullback 미체결 후보를 계속 지켜보다 READY_TO_BUY가 되면 바로
 # 매수해서 자체 종료 시각이 없음 — 장마감(15:30) 직전까지 실시간 틱이 들어오는
@@ -1045,8 +1073,32 @@ SLOT_EXPANSION_WAIT_SEC = 90        # 슬롯 만석이 이 시간 이상 지속�
 #   - 부수 효과로 확장 슬롯(7~8)의 구조적 도달 불가도 계속 해소된 상태로 유지
 #     (합 8 > 6이라 7번째를 요청할 주체가 존재).
 # 한 전략이 6칸을 독식하는 일은 여전히 불가능하다(캡 4).
-PHASE1A_MAX_SLOTS = 4
-PULLBACK_MAX_SLOTS = 4
+#
+# ══════════════════════════════════════════════════════════════════
+# 🔴 2026-08-06 [E]: **눌림목(Pullback) 슬롯 0 — 매매 중단** (사용자 지정)
+# ══════════════════════════════════════════════════════════════════
+# 근거 — 08-03~06 조건검색 편입 158건을 진입로직 없이 재생(편입 시점 매수 가정):
+#   조건식            n   +30분    플러스일   종가보유(수수료 차감)
+#   돌파자동매매용     38  +2.27%    3/4      평균 +3.01% (승 61%)
+#   주도주상위        74  +0.55%    4/4      평균 +0.86% (승 50%)
+#   눌림목자동        46  -0.27%    1/4      평균 -0.77% (승 41%)  <- 유일한 음수
+# 눌림목자동은 **Pullback 전략의 유일한 유니버스**라 슬롯 0 = 사실상 중단이다.
+#
+# ⚠️ '구독 해지'가 아니라 '슬롯 0'을 쓴 이유: 조건식 구독과 평가는 그대로 두어
+#    **데이터가 계속 쌓이게** 하기 위함이다. 표본이 늘어 판단이 뒤집히면
+#    PULLBACK_MAX_SLOTS만 되돌리면 된다(다른 코드는 손댈 필요 없음).
+# ⚠️ 반대 근거도 있다 — **실거래** 15건 기준으로는 1A_눌림이 1A보다 나았다
+#    (+5분 +0.22% vs +0.07%, MAE -2.60 vs -4.78). 편입 기준(46건)과 실거래
+#    기준(15건)이 엇갈린다. 표본이 큰 쪽을 택했지만 확정된 결론은 아니다.
+#
+# 🔴 **PHASE1A_MAX_SLOTS를 반드시 같이 올려야 한다.** 안 그러면 1A 캡(4)이
+#    실질 상한이 되어 **MAX_HOLDINGS(6) 중 2칸이 영구히 죽는다.**
+#    합(8)이 하드 상한(8)과 같아지도록 8로 올려, 확장 슬롯 도달 가능성과
+#    "공유 상한이 실제 제한자"라는 기존 설계를 그대로 유지한다.
+#    -> 평상시 실질 상한은 여전히 MAX_HOLDINGS(6)이고 노출도 그대로다.
+# 되돌리려면 4 / 4로 함께 되돌릴 것 (둘은 짝이다).
+PHASE1A_MAX_SLOTS = 8
+PULLBACK_MAX_SLOTS = 0
 
 # ⚠️ [미사용, 2026-08-02] 옛 watch_candidates 큐(1N 눌림목) 시절의 잔재.
 # 그 전략은 2026-07-27에 삭제됐고 지금 감시 목록은 watch_list_today +
@@ -1119,6 +1171,9 @@ class StrategyManager:
         self._cond_names: dict[str, str] = {}  # stock_code -> 최초 편입 조건검색식 이름
         self._opening_prices: dict[str, float] = {}  # stock_code -> 당일 시가 (1A 서지율 점수용)
         self._prev_closes: dict[str, float] = {}  # stock_code -> 전일종가 (등락률 상한 체크용, 2026-07-31)
+        # stock_code -> 그 종목을 **처음 본 시각**(monotonic). [F] 진입 숙성 판정용.
+        # 편입/pre-arm 어느 경로로 들어와도 여기 한 번만 찍힌다(setdefault).
+        self._first_seen: dict[str, float] = {}
         # 평상시 상한(MAX_HOLDINGS)이 꽉 찬 시각 — 확장 슬롯(7~8) 판정용 (2026-07-31)
         self._soft_cap_full_since: Optional[datetime] = None
         # 장중 전략 성과 추적 — 잘 되는 전략의 컷라인을 낮추고 안 되는 전략은
@@ -1376,6 +1431,30 @@ class StrategyManager:
             return (
                 f"등락률 하한 미달 (전일종가대비 {change_pct:+.1f}% "
                 f"<= {MIN_ENTRY_CHANGE_PCT:+.0f}%)"
+            )
+        return None
+
+    def _entry_delay_reject(self, stock_code: str, now: float = None) -> Optional[str]:
+        """[F] 진입 숙성 판정 — 편입 직후 MIN_ENTRY_DELAY_SEC 안에는 사지 않는다.
+
+        (2026-08-06 신설) 반환값이 None이면 통과, 문자열이면 탈락 사유다.
+        근거는 MIN_ENTRY_DELAY_SEC 주석 참고(0~1분 진입이 4일 실측 최악).
+
+        **최초 관측 시각을 모르면 통과**시킨다 — 이 코드베이스의 기존 규약
+        ('모름'이 매수를 막지 않는다)을 그대로 따른다. pre-arm이 어떤 이유로
+        누락돼도 매매가 통째로 멈추지 않게 하기 위함이다.
+        """
+        if MIN_ENTRY_DELAY_SEC <= 0:
+            return None
+        seen = self._first_seen.get(stock_code)
+        if seen is None:
+            return None
+        now = now if now is not None else _time_mod.time()
+        waited = now - seen
+        if waited < MIN_ENTRY_DELAY_SEC:
+            return (
+                f"진입 숙성 미달 (편입 후 {waited:.0f}초 "
+                f"< {MIN_ENTRY_DELAY_SEC:.0f}초)"
             )
         return None
 
@@ -1982,6 +2061,11 @@ class StrategyManager:
         # ⚠️ '상한' 규칙보다 먼저 와야 한다 — 아래 "매수 컷오프"가 부분문자열
         #    "상한"을 잡으므로, 순서가 밀리면 하한이 컷오프로 오분류된다.
         ("등락률 하한 미달(하락중)", ("등락률 하한",)),
+        # (2026-08-06 [F]) 편입 직후 급하게 사지 않는 숙성 대기.
+        # 이게 대부분이면 '코드 정상, 아직 익지 않음'이라는 뜻이다 —
+        # 없으면 "기타"로 뭉개져 매수가 준 이유를 장중에 판단할 수 없다.
+        # ⚠️ 라벨에 초 수를 박지 말 것(상수를 바꾸면 거짓말이 된다).
+        ("진입 숙성 대기", ("진입 숙성",)),
         ("매수 컷오프", ("컷오프", "상한",)),
     )
     # '코드/인프라 이상'을 의심해야 하는 분류 — 정상 필터링과 구분해서 경고한다.
@@ -3034,6 +3118,11 @@ class StrategyManager:
         편입은 장중에 흩어져 발생하므로 이 호출이 429를 몰아치게 하지 않는다.
         어떤 실패도 밖으로 던지지 않는다 — 준비 실패가 감시 시작을 막으면 안 된다.
         """
+        # [F] 최초 관측 시각 — 여기가 모든 진입 경로가 반드시 지나는 지점이다
+        # (틱 경로/폴링 경로/조건검색 편입 전부 pre-arm을 거친다).
+        # setdefault라 재편입해도 최초 시각이 유지된다 — 그래야 '숙성'이 의미를 갖는다.
+        self._first_seen.setdefault(stock_code, _time_mod.time())
+
         try:
             if self.phase1b and not self.phase1b.is_watching(stock_code):
                 self.phase1b.start_watching(stock_code)
@@ -3558,7 +3647,8 @@ class StrategyManager:
         # 살 수 없는 종목에 계획을 걸면 그 슬롯이 ENTRY_PULLBACK_TIMEOUT_SEC
         # 동안 묶인다(구버전은 _execute_buy 안에서 즉시 걸러져 pending이 바로
         # 회수됐다). 진입 자체를 막는 값싼 게이트는 **계획 생성 전에** 본다.
-        chg_reject = self._entry_change_reject(stock_code, sub_strategy, trigger_price)
+        chg_reject = (self._entry_change_reject(stock_code, sub_strategy, trigger_price)
+                      or self._entry_delay_reject(stock_code, now))
         if chg_reject:
             self._note_reject(stock_code, chg_reject)
             logger.info(
@@ -4446,7 +4536,11 @@ class StrategyManager:
                 )
                 return
 
-        chg_reject = self._entry_change_reject(stock_code, sub_strategy, current_price)
+        # 등락률(상·하한) + 진입 숙성 — 주문 직전 하드가드.
+        # `_open_entry_plan`에서 이미 보지만 여기도 두는 이유는 `_execute_buy`
+        # 호출부가 3곳이기 때문이다(폴링 / 되돌림 체결 / 손절대신 추가매수).
+        chg_reject = (self._entry_change_reject(stock_code, sub_strategy, current_price)
+                      or self._entry_delay_reject(stock_code))
         if chg_reject:
             logger.info(
                 "[%s] %s 매수 차단: %s [%s]",

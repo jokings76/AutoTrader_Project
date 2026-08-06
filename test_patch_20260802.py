@@ -134,7 +134,27 @@ def feed(tf, code, n, value_each, side="buy", now=None, span=1.0):
         tf.add_tick(code, price, side, vol, now=now - span * (i / max(1, n)))
 
 
+
+class _pullback_slots:
+    """[E] 눌림 슬롯이 0이어도 **파이프라인 자체**는 계속 검증한다 (2026-08-06).
+
+    08-06에 PULLBACK_MAX_SLOTS를 0으로 내려 눌림목 매매를 중단했지만, 그건
+    '지금 안 산다'는 정책이지 '코드가 죽었다'가 아니다. 슬롯만 되돌리면
+    다시 돌아야 하므로, 라우팅·시간창·트리거 검증은 이 컨텍스트 안에서
+    슬롯을 잠시 복구해 그대로 유지한다.
+    (슬롯 0이 실제로 매수를 막는지는 아래 [6-b]에서 따로 못박는다.)
+    """
+    def __init__(self, n=4): self.n = n
+    def __enter__(self):
+        self.old = SM.PULLBACK_MAX_SLOTS
+        SM.PULLBACK_MAX_SLOTS = self.n
+        return self
+    def __exit__(self, *a):
+        SM.PULLBACK_MAX_SLOTS = self.old
+        return False
+
 def setup_candidate(strat, code, cond="주도주상위", ob=True):
+    strat._first_seen[code] = time.time() - 999   # [F] 숙성 완료 상태
     strat._cond_names[code] = cond
     strat._stock_names[code] = code
     strat.watch_list_today.add(code)
@@ -429,6 +449,7 @@ print("\n[6] 틱 구동 진입 — Pullback도 동일 트리거")
 # ═════════════════════════════════════════════════════════
 s = build_strat(datetime(2026, 8, 3, 10, 0, 0))
 setup_candidate(s, "P1", cond="눌림목자동")
+_pb = _pullback_slots(); _pb.__enter__()
 tick(s, "P1", 130.0, t0)
 feed(s.phase1b.trade_flow, "P1", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5, span=0.5)
 tick(s, "P1", 130.0, t0 + 3.5)
@@ -439,11 +460,13 @@ check("sub_strategy가 1A_눌림으로 기록",
       str(s.holdings.get("P1", {}).get("sub_strategy")))
 check("Pullback 진입에 분봉 REST를 쓰지 않음 (구버전은 2콜)",
       len([c for c in s.api.calls if c[0] == "candles"]) == 0, str(s.api.calls))
+_pb.__exit__()
 
 # (2026-08-03) Pullback 시간창이 09:00으로 앞당겨져 09:10에도 매수된다.
 # 구버전은 09:25 전이라 여기서 탈락했다.
 s = build_strat(datetime(2026, 8, 3, 9, 10, 0))
 setup_candidate(s, "P2", cond="눌림목자동")
+_pb = _pullback_slots(); _pb.__enter__()
 tick(s, "P2", 130.0, t0)
 feed(s.phase1b.trade_flow, "P2", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5, span=0.5)
 tick(s, "P2", 130.0, t0 + 3.5)
@@ -452,6 +475,7 @@ check("눌림목이 09:10에도 매수됨 (구버전은 09:25까지 대기)",
       "P2" in s.holdings, f"holdings={list(s.holdings)}")
 check("매수 전략이 눌림으로 라우팅됨",
       s.holdings.get("P2", {}).get("sub_strategy") == "1A_눌림")
+_pb.__exit__()
 
 # 1A는 09:10에도 산다 (시간창 09:00~)
 s = build_strat(datetime(2026, 8, 3, 9, 10, 0))
@@ -483,6 +507,7 @@ check("중복 편입 10:00 -> 1A로 매수",
 
 s = build_strat(datetime(2026, 8, 3, 11, 0, 0))
 setup_candidate(s, "D2", cond="주도주상위+눌림목자동")
+_pb = _pullback_slots(); _pb.__enter__()
 tick(s, "D2", 130.0, t0)
 feed(s.phase1b.trade_flow, "D2", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5, span=0.5)
 tick(s, "D2", 130.0, t0 + 3.5)
@@ -490,6 +515,7 @@ pullback_fill(s, "D2", t0 + 4.5)   # -0.5% 되돌림 체결 (2026-08-04)
 check("중복 편입 11:00 -> Pullback으로 매수",
       s.holdings.get("D2", {}).get("sub_strategy") == "1A_눌림",
       str(s.holdings.get("D2", {}).get("sub_strategy")))
+_pb.__exit__()
 
 
 # ═════════════════════════════════════════════════════════
@@ -516,6 +542,7 @@ check("  (이 케이스는 VI 차단 범위 밖 — 규칙이 겹치지 않는�
 
 s = build_strat(datetime(2026, 8, 3, 10, 0, 0))
 setup_candidate(s, "S2", cond="눌림목자동")
+_pb = _pullback_slots(); _pb.__enter__()
 s._opening_prices["S2"] = _OPEN_ISOLATED
 tick(s, "S2", 130.0, t0)
 feed(s.phase1b.trade_flow, "S2", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5, span=0.5)
@@ -523,6 +550,7 @@ tick(s, "S2", 130.0, t0 + 3.5)
 pullback_fill(s, "S2", t0 + 4.5)   # -0.5% 되돌림 체결 (2026-08-04)
 check("눌림목엔 시가대비 보류를 적용하지 않음(되돌림을 사는 전략)",
       "S2" in s.holdings)
+_pb.__exit__()
 
 # (2026-08-06) VI 상단 근접 매수차단은 **전략 무관**으로 적용된다.
 # 위 눌림목은 시가대비 보류를 면제받지만 VI 차단은 면제받지 않는다 —

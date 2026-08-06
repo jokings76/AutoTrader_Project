@@ -139,6 +139,12 @@ def build(now_dt=datetime(2026, 8, 3, 8, 59, 0)):
 
 
 def ob(strat, code, thick=True):
+    # [F] 진입 숙성(MIN_ENTRY_DELAY_SEC) 충족 상태로 둔다 (2026-08-06).
+    # 이 통합 테스트는 '편입 후 충분히 지켜본 종목'이 진입 배선을 타는지를
+    # 보는 것이지 숙성 게이트 자체를 재는 게 아니다. 실전에서도 편입과 진입
+    # 사이에는 최소 수십 초가 흐른다(08-03~06 실측 중앙값 6.7분).
+    # 숙성 게이트 자체의 검증은 test_patch_20260806.py [9]에 있다.
+    strat._first_seen[code] = time.time() - 999
     strat.phase1b.orderbook.update(
         code,
         {"ask_prices": [10_000, 10_010, 10_020],
@@ -196,6 +202,10 @@ check("장중 실시간 편입도 pre-arm 됨", s.phase1b.is_watching("A003"))
 
 clock.set(9, 3, 0)
 ob(s, "A001")
+# [F] 08:59 편입 -> 09:03이면 실전에선 4분이 지났다. 격리 테스트의
+# _first_seen은 실제 시계(time.time())라 그 경과를 재현해 준다.
+for _c in ("A001", "A002", "A003", "P001"):
+    s._first_seen[_c] = time.time() - 999
 tick(s, "A001", 125.0, T0)                     # 무장 타이머 시작
 check("첫 틱: 아직 무장 아님", "A001" not in s._armed_at)
 tick(s, "A001", 130.0, T0 + 1.0)
@@ -285,6 +295,11 @@ tick(s, "P001", 130.0, T0 + 43.5)
 check("08:59:30 — 장 시작 전이라 매수 안 됨", "P001" not in s.holdings)
 
 clock.set(9, 0, 5)
+# [E] 눌림 슬롯이 0이어도 **파이프라인 자체**는 계속 검증한다 —
+# 슬롯만 되돌리면 다시 돌아야 하므로 여기서는 잠시 복구해 배선을 확인한다.
+# (슬롯 0이 실제로 매수를 막는지는 test_patch_20260806.py [8]에서 못박는다.)
+_pb_old = SM.PULLBACK_MAX_SLOTS
+SM.PULLBACK_MAX_SLOTS = 4
 burst(s, "P001", T0 + 50)
 tick(s, "P001", 130.0, T0 + 50)
 check("09:00 직후 — 눌림목도 되돌림 대기 계획 생성", "P001" in s._entry_plans)
@@ -293,6 +308,7 @@ check("09:00 직후 — 눌림목 매수 성립(구버전은 09:25까지 대기)
       "P001" in s.holdings, f"holdings={list(s.holdings)}")
 check("1A와 시간창이 동일해짐", SM.PULLBACK_START == SM.GROUP_A_START)
 check("sub_strategy=1A_눌림", s.holdings["P001"]["sub_strategy"] == "1A_눌림")
+SM.PULLBACK_MAX_SLOTS = _pb_old   # [E] 원상복구
 # 편입 시점의 분봉 1콜(시가 캐시용, 1A "시가대비 +5%" 필터의 근거)은 정상이다.
 # 검증할 것은 "진입 판정 자체가 분봉을 더 부르지 않는가" — 즉 종목당 1콜을
 # 넘지 않는지다. 구버전 Pullback은 여기서 종목당 2콜(_get_merged_candles +
@@ -319,6 +335,8 @@ clk2.set(10, 30, 0)
 check("10:30 -> Pullback으로 전환", s2.resolve_strategy(s2._cond_names["D001"],
                                                       clk2().time()) == "1A_눌림")
 
+_pb_old2 = SM.PULLBACK_MAX_SLOTS
+SM.PULLBACK_MAX_SLOTS = 4   # [E] 눌림 라우팅 배선 검증용 임시 복구
 ob(s2, "D001")
 tick(s2, "D001", 130.0, T0 + 60)
 burst(s2, "D001", T0 + 63.5)
@@ -327,6 +345,7 @@ tick(s2, "D001", 130.0, T0 + 64.5, price=9_940, side="sell")  # 되돌림 체결
 check("10:30 이후 매수는 눌림 슬롯으로 들어감",
       s2.holdings.get("D001", {}).get("sub_strategy") == "1A_눌림",
       str(s2.holdings.get("D001", {}).get("sub_strategy")))
+SM.PULLBACK_MAX_SLOTS = _pb_old2   # [E] 원상복구
 
 # ═════════════════════════════════════════════════════════
 print("\n[8] 점심(12:00) — 완화가 제거됐는지 (2026-08-03 사양 변경)")
@@ -873,10 +892,10 @@ check("[불변] 단일체결 기준 > 절대 기준",
 
 # 슬롯
 check("[불변] 전략별 슬롯 합 >= 공유상한(한쪽이 남으면 흡수 가능)",
-      SM.PHASE1A_MAX_SLOTS + SM.PULLBACK_MAX_SLOTS >= SM.MAX_HOLDINGS)
+      SM.PHASE1A_MAX_SLOTS + SM.PULLBACK_MAX_SLOTS >= SM.MAX_HOLDINGS_HARD)
 check("[불변] 확장슬롯 > 공유상한", SM.MAX_HOLDINGS_HARD > SM.MAX_HOLDINGS)
 check("[불변] 전략별 캡 < 공유상한(한 전략 독식 불가)",
-      SM.PHASE1A_MAX_SLOTS < SM.MAX_HOLDINGS)
+      SM.PHASE1A_MAX_SLOTS >= SM.MAX_HOLDINGS)   # [E] 눌림 0이라 1A가 다 채워야 한다
 
 # 백테스트 동기화 — 어긋나면 리포트가 라이브와 다른 규칙으로 계산된다
 check("[동기] 백테스트 캡", _DB.TAKE_PROFIT_CAP == SM.TAKE_PROFIT_CAP)
@@ -901,6 +920,8 @@ print("\n[21] 08-04 설정 조합 통합 — 바뀐 값들이 함께 굴러가�
 
 # (1) 09:00 직후 눌림목 — 새 창 + 2초 무장으로 매수까지
 sN, cN = build(datetime(2026, 8, 3, 9, 2, 0))
+_pb_old3 = SM.PULLBACK_MAX_SLOTS
+SM.PULLBACK_MAX_SLOTS = 4   # [E] 설정조합 배선 검증용 임시 복구
 sN.on_condition_hit("PB1", "눌림새창", cond_name="눌림목자동")
 ob(sN, "PB1")
 TN = time.time()
@@ -928,6 +949,7 @@ sN.on_price_update("PB1", armN)
 check("본전스톱 ON — 무장됨", sN.holdings["PB1"].get("breakeven_armed") is True)
 sN.on_price_update("PB1", buyN)
 check("본전스톱 ON — 본전 복귀 시 청산", "PB1" not in sN.holdings)
+SM.PULLBACK_MAX_SLOTS = _pb_old3   # [E] 원상복구
 
 # (4) 손절은 워밍업 중에도 작동 (별도 포지션으로)
 sS, cS = build(datetime(2026, 8, 3, 9, 3, 0))

@@ -111,6 +111,7 @@ def build(now_dt=datetime(2026, 8, 4, 9, 30, 0)):
 
 
 def setup(strat, code, cond="주도주상위", ask=10_000):
+    strat._first_seen[code] = time.time() - 999   # [F] 숙성 완료 상태
     strat._cond_names[code] = cond
     strat._stock_names[code] = code
     strat.watch_list_today.add(code)

@@ -705,6 +705,7 @@ check("첫 평가는 틱이 없어 탈락하고 후보로만 남음",
 s.phase1b.orderbook.update("INT1", {"ask_prices": [10_000, 10_010, 10_020],
                                     "ask_volumes": [3_000, 3_000, 3_000]}, now=now)
 t0 = time.time()
+s._first_seen["INT1"] = t0 - 999   # [F] 숙성 완료 상태(편입은 이미 있었다)
 # 강도 100 이상이 들어오기 시작 -> 타이머 시작(아직 무장 아님)
 s.on_trade({"stock_code": "INT1", "price": 10_000, "side": "buy",
             "volume": 10, "strength": 120.0}, now=t0)
@@ -847,6 +848,7 @@ s4.phase1b.start_watching("FAST")
 s4.phase1b.orderbook.update("FAST", {"ask_prices": [10_000, 10_010, 10_020],
                                      "ask_volumes": [3_000, 3_000, 3_000]}, now=now)
 _t = time.time()
+s4._first_seen["FAST"] = _t - 999   # [F] 숙성 완료 상태
 # 무장만 시켜두고(버스트는 아직) 슬롯이 꽉 찼다가 풀린 상황을 가정
 s4._strength_since["FAST"] = _t - 5.0
 feed(s4.phase1b.trade_flow, "FAST", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=_t, span=1.0)
@@ -878,13 +880,22 @@ print("\n[19] 시간대별 1A 캡 + 확장 슬롯 도달 가능성")
 # ═════════════════════════════════════════════════════════
 early = build_strat(datetime(2026, 8, 3, 9, 30, 0))
 late = build_strat(datetime(2026, 8, 3, 11, 0, 0))
-check("1A 캡은 시간과 무관하게 4 (Pullback이 15:10까지라 '노는 슬롯' 전제 소멸)",
-      early.phase1a_max_slots() == 4 and late.phase1a_max_slots() == 4)
-check("눌림 캡 4", SM.PULLBACK_MAX_SLOTS == 4)
-check("캡 합(8) > 공유 상한(6) — 한쪽이 놀면 다른 쪽이 흡수 + 확장슬롯 도달 가능",
-      SM.PHASE1A_MAX_SLOTS + SM.PULLBACK_MAX_SLOTS > SM.MAX_HOLDINGS)
-check("한 전략이 공유 상한(6)을 독식하지는 못함",
-      SM.PHASE1A_MAX_SLOTS < SM.MAX_HOLDINGS and SM.PULLBACK_MAX_SLOTS < SM.MAX_HOLDINGS)
+check("1A 캡은 시간과 무관하게 일정 (시간대별 상향은 폐지됨)",
+      early.phase1a_max_slots() == late.phase1a_max_slots() == SM.PHASE1A_MAX_SLOTS)
+# (2026-08-06 [E]) 눌림 캡 4 -> 0. 조건검색 편입 158건 기준 눌림목자동만
+# 우위가 없었다(+30분 -0.27%, 플러스일 1/4). 구독·평가는 그대로 두고
+# 슬롯만 막아 데이터는 계속 쌓이게 한다.
+check("눌림 캡 0 (매매 중단, 구독·평가는 유지)", SM.PULLBACK_MAX_SLOTS == 0)
+check("캡 합 >= 하드 상한 — 확장슬롯(7~8)이 구조적으로 도달 가능",
+      SM.PHASE1A_MAX_SLOTS + SM.PULLBACK_MAX_SLOTS >= SM.MAX_HOLDINGS_HARD)
+# 🔴 예전 불변식이던 "한 전략이 공유 상한을 독식 못 함"은 **폐기됐다.**
+# 눌림 캡이 0이 된 이상 1A가 6칸을 다 쓸 수 있어야 한다 — 아니면
+# MAX_HOLDINGS(6) 중 (6 - PHASE1A_MAX_SLOTS)칸이 영구히 죽는다.
+check("[E] 1A 단독으로 공유 상한(6)을 채울 수 있다 — 죽은 슬롯 없음",
+      SM.PHASE1A_MAX_SLOTS >= SM.MAX_HOLDINGS,
+      f"1A캡 {SM.PHASE1A_MAX_SLOTS} vs 공유상한 {SM.MAX_HOLDINGS}")
+check("그래도 하드 상한(8)은 넘지 않는다",
+      SM.PHASE1A_MAX_SLOTS <= SM.MAX_HOLDINGS_HARD)
 
 # ═════════════════════════════════════════════════════════
 print("\n[20] pending 오버부킹 방지")
@@ -966,6 +977,7 @@ s.phase1b.orderbook.update("FREE", {"ask_prices": [10_000, 10_010, 10_020],
                                     "ask_volumes": [3_000, 3_000, 3_000]}, now=now)
 feed(s.phase1b.trade_flow, "FREE", 3, SM.PHASE1A_BURST_TRADE_VALUE)
 s._cond_names["FREE"] = "주도주상위"
+s._first_seen["FREE"] = time.time() - 999   # [F] 숙성 완료
 # (2026-08-02) 무장(강도 100+ 3초 연속)이 진입의 선행조건 — 버스트만으로는 안 산다.
 s._strength_since["FREE"] = time.time() - 5.0
 s._evaluate_1a_pullback_entry("FREE", "FREE", 1, None, 10_000, 9_800,

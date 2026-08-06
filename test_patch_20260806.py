@@ -133,6 +133,7 @@ def build(now_dt=datetime(2026, 8, 6, 9, 30, 0), change_rate=3.0):
 
 
 def setup(strat, code, cond="주도주상위", ask=10_000, open_px=10_000):
+    strat._first_seen[code] = time.time() - 999   # [F] 숙성 완료 상태
     strat._cond_names[code] = cond
     strat._stock_names[code] = code
     strat.watch_list_today.add(code)
@@ -475,6 +476,106 @@ check("VI 매수차단은 OFF 유지", SM.VI_UPPER_ENTRY_BLOCK_ENABLED is False)
 check("VI 확정매도는 ON 유지", SM.VI_UPPER_EXIT_ENABLED is True)
 check("본전스톱 ON 유지", SM.BREAKEVEN_STOP_ENABLED is True)
 check("되돌림 대기 ON 유지 (상승이탈만 껐다)", SM.ENTRY_PULLBACK_ENABLED is True)
+
+# ═════════════════════════════════════════════════════════
+print("\n[8] [E] 눌림목 슬롯 0 — 매매 중단, 관측은 유지")
+# ═════════════════════════════════════════════════════════
+check("PULLBACK_MAX_SLOTS == 0", SM.PULLBACK_MAX_SLOTS == 0)
+# 🔴 죽은 슬롯 방지 — 눌림이 0이면 1A 혼자 공유 상한을 채울 수 있어야 한다.
+check("[핵심] 1A 단독으로 공유 상한을 채울 수 있다(죽은 슬롯 0)",
+      SM.PHASE1A_MAX_SLOTS >= SM.MAX_HOLDINGS,
+      f"1A캡 {SM.PHASE1A_MAX_SLOTS} / 공유상한 {SM.MAX_HOLDINGS}")
+check("확장 슬롯이 여전히 도달 가능(캡 합 >= 하드 상한)",
+      SM.PHASE1A_MAX_SLOTS + SM.PULLBACK_MAX_SLOTS >= SM.MAX_HOLDINGS_HARD)
+check("하드 상한은 넘지 않는다", SM.PHASE1A_MAX_SLOTS <= SM.MAX_HOLDINGS_HARD)
+
+s8 = build(datetime(2026, 8, 6, 10, 0, 0))
+check("[핵심] can_buy_pullback은 항상 False", s8.can_buy_pullback({}) is False)
+check("[대조군] can_buy_phase1a는 정상 동작", s8.can_buy_phase1a({}) is True)
+
+# 라우팅·구독·평가는 살아 있어야 한다 — 데이터가 계속 쌓여야 판단을 뒤집을 수 있다
+check("[관측 유지] 눌림목자동은 여전히 1A_눌림으로 라우팅된다",
+      SM.StrategyManager.resolve_strategy(
+          "눌림목자동", datetime(2026, 8, 6, 10, 0).time()) == "1A_눌림")
+check("[관측 유지] 중복 편입의 10:30 전략 전환 규칙도 그대로",
+      SM.StrategyManager.resolve_strategy(
+          "주도주상위+눌림목자동", datetime(2026, 8, 6, 9, 0).time()) == "1A"
+      and SM.StrategyManager.resolve_strategy(
+          "주도주상위+눌림목자동", datetime(2026, 8, 6, 11, 0).time()) == "1A_눌림")
+
+# 슬롯만 되돌리면 즉시 복구되는가 (롤백 가능성 보장)
+_old = SM.PULLBACK_MAX_SLOTS
+try:
+    SM.PULLBACK_MAX_SLOTS = 4
+    s8b = build(datetime(2026, 8, 6, 10, 0, 0))
+    check("[롤백] PULLBACK_MAX_SLOTS만 되돌리면 즉시 매수 가능해진다",
+          s8b.can_buy_pullback({}) is True)
+finally:
+    SM.PULLBACK_MAX_SLOTS = _old
+
+# ═════════════════════════════════════════════════════════
+print("\n[9] [F] 진입 숙성 — 편입 직후에는 사지 않는다")
+# ═════════════════════════════════════════════════════════
+check("MIN_ENTRY_DELAY_SEC == 60초 (4일 전부 개선하는 유일한 값)",
+      abs(SM.MIN_ENTRY_DELAY_SEC - 60.0) < 1e-9)
+
+s9 = build()
+now9 = time.time()
+s9._first_seen["FRESH"] = now9 - 10          # 편입 10초 전
+r9 = s9._entry_delay_reject("FRESH", now=now9)
+check("[핵심] 편입 10초 -> 거절", r9 is not None and "숙성" in r9, str(r9))
+s9._first_seen["OLD"] = now9 - 61
+check("[경계] 61초 -> 통과", s9._entry_delay_reject("OLD", now=now9) is None)
+s9._first_seen["EDGE"] = now9 - 59.9
+check("[경계] 59.9초 -> 거절", s9._entry_delay_reject("EDGE", now=now9) is not None)
+check("[모름은 막지 않는다] 최초 관측 시각이 없으면 통과",
+      s9._entry_delay_reject("UNKNOWN", now=now9) is None)
+
+# pre-arm이 최초 관측 시각을 찍는가 + 재편입해도 갱신되지 않는가
+s9b = build()
+s9b.prearm_candidate("PA", 10_000)
+t_first = s9b._first_seen.get("PA")
+check("pre-arm이 최초 관측 시각을 기록한다", t_first is not None)
+time.sleep(0.01)
+s9b.prearm_candidate("PA", 10_000)
+check("[핵심] 재편입해도 최초 시각이 유지된다(숙성이 리셋되면 의미가 없다)",
+      s9b._first_seen.get("PA") == t_first)
+
+# 실제 진입 경로에서 막히는가
+s9c = build()
+setup(s9c, "YOUNG")
+s9c._first_seen["YOUNG"] = time.time() - 5   # 방금 편입
+trigger(s9c, "YOUNG", T)
+check("[경로1] 숙성 미달이면 되돌림 계획조차 안 걸린다",
+      "YOUNG" not in s9c._entry_plans and "YOUNG" not in s9c.holdings)
+s9c._execute_buy("YOUNG", "YOUNG", 1, {"current_price": 10_000}, sub_strategy="1A")
+check("[경로2] 주문 직전 하드가드에서도 막힌다", "YOUNG" not in s9c.holdings)
+
+# 대조군 — 숙성되면 예전과 똑같이 동작
+s9d = build()
+setup(s9d, "RIPE")
+s9d._first_seen["RIPE"] = time.time() - 999
+trigger(s9d, "RIPE", T)
+check("[대조군] 숙성된 종목은 정상적으로 계획이 열린다", "RIPE" in s9d._entry_plans)
+
+check("[진단] 숙성 대기가 '기타'로 뭉개지지 않는다",
+      SM.StrategyManager._reject_category("진입 숙성 미달 (편입 후 12초 < 60초)")
+      == "진입 숙성 대기")
+# ⚠️ 라벨에 초 수를 박으면 상수를 바꿔도 안 따라와 거짓말이 된다
+_lbl = [lb for lb, _ in SM.StrategyManager._REJECT_RULES if "숙성" in lb][0]
+check("[진단] 라벨에 초 수를 박지 않았다",
+      not any(ch.isdigit() for ch in _lbl), _lbl)
+
+# 롤백 가능성
+_oldd = SM.MIN_ENTRY_DELAY_SEC
+try:
+    SM.MIN_ENTRY_DELAY_SEC = 0.0
+    s9e = build()
+    s9e._first_seen["X"] = time.time() - 1
+    check("[롤백] 0으로 두면 숙성 요구가 사라진다",
+          s9e._entry_delay_reject("X") is None)
+finally:
+    SM.MIN_ENTRY_DELAY_SEC = _oldd
 
 # ═════════════════════════════════════════════════════════
 print("\n" + "=" * 62)

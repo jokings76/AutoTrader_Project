@@ -389,9 +389,15 @@ check("기본캡 != 상향캡 (08-03 결함① 재발 방지)",
       f"{SM.TAKE_PROFIT_CAP} vs {SM.TP_CAP_UPGRADED_MAX}")
 check("지수가드 임계 == SEVERE_CRASH 임계 (두 규칙 동기)",
       SM.INDEX_GUARD_THRESHOLD == -5.0)
-check("슬롯 4/4, 공유 6, 확장 8",
-      (SM.PHASE1A_MAX_SLOTS, SM.PULLBACK_MAX_SLOTS,
-       SM.MAX_HOLDINGS, SM.MAX_HOLDINGS_HARD) == (4, 4, 6, 8))
+# (2026-08-06 [E]) 눌림 캡 4 -> 0, 1A 캡 4 -> 8.
+# 값 자체보다 **불변식**을 검사한다 — 죽은 슬롯이 생기지 않는가.
+check("슬롯: 눌림 0 / 1A가 공유상한을 채울 수 있음 / 하드상한 이내",
+      SM.PULLBACK_MAX_SLOTS == 0
+      and SM.PHASE1A_MAX_SLOTS >= SM.MAX_HOLDINGS
+      and SM.PHASE1A_MAX_SLOTS <= SM.MAX_HOLDINGS_HARD
+      and (SM.MAX_HOLDINGS, SM.MAX_HOLDINGS_HARD) == (6, 8),
+      f"{SM.PHASE1A_MAX_SLOTS}/{SM.PULLBACK_MAX_SLOTS}/"
+      f"{SM.MAX_HOLDINGS}/{SM.MAX_HOLDINGS_HARD}")
 check("1B 잔재 없음", not hasattr(SM, "PHASE1B_ENABLED"))
 check("틱 구동 ON", SM.TICK_ENTRY_ENABLED is True)
 
