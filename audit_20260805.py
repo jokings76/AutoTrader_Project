@@ -556,6 +556,10 @@ if _doc:
             f"{SM.PHASE1A_OPEN_SURGE_BURST_MULT}")
     doc_has("매수금액", f"매수금액 3곳 {SM.POSITION_AMOUNT} "
                      f"{DEFAULT_BASE_AMOUNT} {BUY_AMOUNT_PER_STOCK} 일치")
+    # (2026-08-06 신규) [B][C][D]
+    doc_has("등락률하한", f"등락률하한 {SM.MIN_ENTRY_CHANGE_PCT}")
+    doc_has("상승이탈", f"상승이탈 {SM.ENTRY_BREAKOUT_ENABLED} {SM.ENTRY_BREAKOUT_PCT}")
+    doc_has("버스트방향", f"버스트방향 {SM.BURST_REQUIRE_BUY_SIDE}")
 
     # 주가계수 예시표 — 문서에 적힌 배수가 실제와 같은가
     for px in (1_000, 2_000, 10_000, 50_000, 150_000):
@@ -658,12 +662,46 @@ section("[11] 🔬 매수 게이트 순서 — 하나라도 빠지면 잘못된 
 _src_buy = inspect.getsource(SM.StrategyManager._execute_buy)
 for label, needle in [
     ("15:10 하드컷오프", "ENTRY_HARD_CUTOFF"),
-    ("등락률 상한", "_entry_change_cap"),
     ("전략 라우팅 가드", "1A_눌림"),
     ("지수 하락 가드", "_is_index_guard_active"),
     ("pending 회수(finally)", "finally"),
 ]:
     check(f"_execute_buy에 {label} 존재", needle in _src_buy)
+
+# ⚠️ 등락률 게이트는 **소스 문자열로 찾으면 안 된다.** 2026-08-06에 상·하한을
+#    `_entry_change_reject()` 한 함수로 모으면서 `_entry_change_cap`이라는
+#    문자열이 _execute_buy에서 사라졌고, 이 감사가 **멀쩡한 코드를 실패로
+#    보고했다**(이 파일이 스스로 경고하던 오탐 패턴을 그대로 밟았다).
+#    -> 실제 호출·반환값으로 검증한다.
+_chg_called = {"n": 0}
+_orig_chg = SM.StrategyManager._entry_change_reject
+try:
+    def _spy(self, code, sub, price):
+        _chg_called["n"] += 1
+        return _orig_chg(self, code, sub, price)
+    SM.StrategyManager._entry_change_reject = _spy
+    s_c, _ = build()
+    s_c._stock_names["CG"] = "CG"
+    s_c._cond_names["CG"] = "주도주상위"
+    s_c.phase1b.start_watching("CG")
+    s_c._execute_buy("CG", "CG", 1, {"current_price": 10_000}, sub_strategy="1A")
+finally:
+    SM.StrategyManager._entry_change_reject = _orig_chg
+check("_execute_buy가 등락률 게이트(상·하한)를 실제로 호출한다",
+      _chg_called["n"] > 0, f"호출 {_chg_called['n']}회")
+
+# 상·하한이 **한 함수에** 모여 있는지 — 규칙 분산이 이 코드베이스의 반복 사고다
+_s_chg, _ = build()
+_s_chg.api.get_stock_change_rate = lambda c: 20.0
+_s_chg.api.get_basic_quote = lambda c: {"change_rate": 20.0}
+_s_chg._prev_closes = {}
+_hi = _s_chg._entry_change_reject("X", "1A", 10_000)
+_s_chg.api.get_stock_change_rate = lambda c: -2.0
+_s_chg.api.get_basic_quote = lambda c: {"change_rate": -2.0}
+_s_chg._prev_closes = {}
+_lo = _s_chg._entry_change_reject("Y", "1A", 10_000)
+check("같은 함수가 상한(+20%)을 거절", _hi is not None and "상한" in _hi, str(_hi))
+check("같은 함수가 하한(-2%)을 거절", _lo is not None and "하한" in _lo, str(_lo))
 
 _src_entry = inspect.getsource(SM.StrategyManager._maybe_tick_entry)
 check("_maybe_tick_entry에 무장 확인 존재", "update_strength_timer" in _src_entry)

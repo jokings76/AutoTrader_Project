@@ -317,12 +317,22 @@ class TradeFlowTracker:
         window_sec: float,
         min_value: float,
         now: float = None,
+        side: str = None,
     ) -> int:
         """최근 window_sec 안에서 '단일 체결 금액 >= min_value'인 체결 건수.
 
         (2026-08-01 신규, 사용자 지정 1A 진입조건) 누적 거래대금은 잔챙이
         체결이 길게 쌓여도 채워지지만, 이건 '큰 손이 지금 때리고 있는가'를
         본다 — 같은 틱 버퍼를 재사용하므로 REST 호출도 대기시간도 없다.
+
+        side (2026-08-06 신규): 지정하면 그 방향의 체결만 센다.
+          **기본값 None은 방향 무관 = 기존 동작**이라 다른 호출부가 조용히
+          바뀌지 않는다. 진입 버스트 판정만 `"buy"`를 넘긴다.
+
+          왜 필요한가 — 예전엔 매도 체결도 버스트로 셌다. 무장에 쓰는
+          FID 228 체결강도는 **당일 누적**이라 오전에 강했던 종목은 급락
+          중에도 100 위에 머문다. 그래서 "오전에 강했던 종목이 대량 투매로
+          무너지는 순간"이 그대로 매수 신호가 됐다(08-06 손절 7건의 구조적 원인).
         """
         now = now if now is not None else time.time()
         d = self.ticks.get(stock_code)
@@ -330,8 +340,9 @@ class TradeFlowTracker:
             return 0
         cutoff = now - window_sec
         return sum(
-            1 for ts, price, _, volume in d
+            1 for ts, price, tick_side, volume in d
             if ts >= cutoff and price * volume >= min_value
+            and (side is None or tick_side == side)
         )
 
     def max_single_trade_value(
@@ -339,17 +350,22 @@ class TradeFlowTracker:
         stock_code: str,
         window_sec: float,
         now: float = None,
+        side: str = None,
     ) -> float:
         """최근 window_sec 안의 최대 단일 체결 금액(원). 없으면 0.0.
 
         (2026-08-01 신규) '단일 체결 1억원 이상' 조건 판정용.
+        side는 count_large_trades와 같은 규약 — 기본 None이면 방향 무관(기존 동작).
         """
         now = now if now is not None else time.time()
         d = self.ticks.get(stock_code)
         if not d:
             return 0.0
         cutoff = now - window_sec
-        vals = [price * volume for ts, price, _, volume in d if ts >= cutoff]
+        vals = [
+            price * volume for ts, price, tick_side, volume in d
+            if ts >= cutoff and (side is None or tick_side == side)
+        ]
         return float(max(vals)) if vals else 0.0
     # ──────────────────────────────────────────
 

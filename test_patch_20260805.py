@@ -151,8 +151,10 @@ check("④ 1A 등락률 13% / 눌림 10%",
       SM.MAX_ENTRY_CHANGE_PCT == 13.0 and SM.MAX_ENTRY_CHANGE_PCT_PULLBACK == 10.0)
 check("⑤ 되돌림 -0.3%/-0.7%",
       SM.ENTRY_PULLBACK_TRANCHES == ((0.003, 0.5), (0.007, 0.5)))
-check("⑦ 상승 이탈 +0.3% 활성",
-      SM.ENTRY_BREAKOUT_ENABLED is True and abs(SM.ENTRY_BREAKOUT_PCT - 0.003) < 1e-9)
+# (2026-08-06 사양 변경) 상승 이탈은 OFF. 폭 상수는 보존한다 — 되살릴 때
+# 값까지 다시 정하지 않아도 되게. 상세 근거는 test_patch_20260806.py [5].
+check("⑦ 상승 이탈 OFF (폭 상수 0.3%는 보존)",
+      SM.ENTRY_BREAKOUT_ENABLED is False and abs(SM.ENTRY_BREAKOUT_PCT - 0.003) < 1e-9)
 check("③ 추가매수 상수", SM.RESCUE_ADD_ENABLED is True
       and SM.RESCUE_ADD_ACCEL_MIN == 3.0
       and SM.RESCUE_ADD_MIN_STRENGTH == 100.0
@@ -302,6 +304,13 @@ def make_plan(sm, code="B1", trig=10_000):
     sm._open_entry_plan(code, code, 1, {"current_price": trig}, "1A",
                         "주도주상위", trig, now=time.time())
 
+# ⚠️ (2026-08-06 사양 변경) 상승 이탈은 **OFF**로 전환됐다.
+# 08-06 실거래에서 이 경로가 되돌림보다 뚜렷이 나빴다:
+#   상승이탈 n=9 평균 -1.00% 승률 22% 손절 4건 / 되돌림 n=27 +0.23% 41%
+# 아래 단언은 옛 사양(ON)을 검증하던 것을 새 사양(OFF) 기준으로 교체한 것이다.
+# 로직 자체는 보존돼 있어 ENTRY_BREAKOUT_ENABLED=True면 다시 옛 동작이 된다.
+check("[사양] 상승 이탈 OFF", SM.ENTRY_BREAKOUT_ENABLED is False)
+
 s8, _ = build()
 make_plan(s8)
 check("계획 생성됨", "B1" in s8._entry_plans)
@@ -309,19 +318,32 @@ s8._try_fill_entry_plan("B1", 10_029, now=time.time())    # +0.29%
 check("+0.29%로는 발동하지 않음(경계 아래)",
       "B1" not in s8.holdings and "B1" in s8._entry_plans)
 s8._try_fill_entry_plan("B1", 10_030, now=time.time())    # +0.30%
-check("+0.30% 돌파 -> 즉시 전량 체결", "B1" in s8.holdings)
-check("계획이 닫힘(슬롯 반환)", "B1" not in s8._entry_plans)
-check("한 번에 전량(트랜치 2개 모두)",
-      s8.holdings["B1"].get("tranches_filled", 1) == 1
-      and s8.holdings["B1"]["qty"] > 0)
+check("[신사양] +0.30% 돌파해도 즉시 체결하지 않는다(추격매수 차단)",
+      "B1" not in s8.holdings, str(list(s8.holdings)))
+check("[신사양] 계획은 유지 — 되돌림을 계속 기다린다", "B1" in s8._entry_plans)
+s8._try_fill_entry_plan("B1", 10_100, now=time.time())    # +1.0%
+check("[신사양] 더 크게 올라도 마찬가지", "B1" not in s8.holdings)
 
-s9, _ = build()
-make_plan(s9, "B2")
-s9.api.get_stock_change_rate = lambda c: 20.0     # 등락률 20% (1A 상한 13% 초과)
-s9._prev_closes = {}
-s9._try_fill_entry_plan("B2", 10_030, now=time.time())
-check("상승 이탈해도 등락률 상한 초과면 미집행",
-      "B2" not in s9.holdings, str(list(s9.holdings)))
+# 로직 보존 확인 — 플래그만 되살리면 옛 동작이 그대로 나온다
+_saved = SM.ENTRY_BREAKOUT_ENABLED
+try:
+    SM.ENTRY_BREAKOUT_ENABLED = True
+    s8b, _ = build()
+    make_plan(s8b, "B1B")
+    s8b._try_fill_entry_plan("B1B", 10_030, now=time.time())
+    check("[보존] 플래그를 켜면 +0.30%에 전량 체결(옛 동작 그대로)",
+          "B1B" in s8b.holdings and "B1B" not in s8b._entry_plans)
+
+    s9, _ = build()
+    make_plan(s9, "B2")
+    s9.api.get_stock_change_rate = lambda c: 20.0   # 등락률 20% (1A 상한 13% 초과)
+    s9.api.get_basic_quote = lambda c: {"change_rate": 20.0}
+    s9._prev_closes = {}
+    s9._try_fill_entry_plan("B2", 10_030, now=time.time())
+    check("[보존] 상승 이탈해도 등락률 상한 초과면 미집행",
+          "B2" not in s9.holdings, str(list(s9.holdings)))
+finally:
+    SM.ENTRY_BREAKOUT_ENABLED = _saved
 
 s10, _ = build()
 make_plan(s10, "B3")

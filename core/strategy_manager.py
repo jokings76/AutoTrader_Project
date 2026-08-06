@@ -298,6 +298,21 @@ TICK_BURST_REL_FLOOR = 10_000_000
 TICK_BURST_REL_WINDOW_SEC = 300.0  # 평균을 재는 구간(5분)
 TICK_BURST_REL_COUNT = 2           # 상대경로 요구 건수
 
+# ── 버스트 방향 구분 (2026-08-06 신규) ────────────────────────────────
+# [문제] 버스트 판정이 체결 방향(side)을 버리고 있었다:
+#     for ts, price, _, volume in d      <- 이 '_'가 side다
+# 즉 **대량 투매도 버스트로 셌다.** 그리고 무장에 쓰는 FID 228 체결강도는
+# **당일 누적**이라, 오전에 강했던 종목은 지금 급락 중이어도 100 위에 머문다.
+# 두 개가 겹치면 "오전에 강했던 종목이 대량 투매로 무너지는 순간"이 그대로
+# 매수 신호가 된다 — 08-06에 개장 18분 만에 손절 7건이 난 구조적 원인이다.
+#
+# side는 WS 0B의 FID 15 부호로 정해진다(양수=매수체결 / 음수=매도체결).
+# ⚠️ `neutral`(FID 15 == 0)도 존재하지만 **버스트에는 원리상 영향이 없다** —
+#    파서가 volume = abs(volume_signed)로 넣으므로 neutral이면 volume == 0이고,
+#    price * volume == 0이라 어떤 문턱도 넘지 못한다(테스트로 못박음).
+# 되돌리려면 False (= 방향 무관, 08-05까지의 동작).
+BURST_REQUIRE_BUY_SIDE = True
+
 # ── 주가 스케일 계수 (2026-08-05 사용자 지정, 실측 기반) ─────────────
 # [문제] 버스트 문턱이 전 종목 4천만원 고정이라, 주가가 사실상 '어느 경로로
 # 진입하는가'를 결정하고 있었다. 틱 아카이브 107 종목·일(09:00~09:15)에
@@ -584,6 +599,30 @@ MARKET_DEFENSE_ENABLED = False
 MAX_ENTRY_CHANGE_PCT = 13.0           # 1A 및 기본
 MAX_ENTRY_CHANGE_PCT_PULLBACK = 10.0  # 눌림목자동 조건검색 -> Pullback 전용
 
+# ── 매수 진입 등락률 **하한** (2026-08-06 신규, 사용자 지정) ──────────
+# "매수는 무조건 +일 때만." 08-05까지 상한(13%/10%)만 있고 하한이 없어서
+# 전일종가 대비 마이너스인 종목도 살 수 있었다.
+#
+# 이 봇의 두 전략은 **둘 다 상승을 사는 전략**이다(1A=매수세 폭발,
+# Pullback=상승 중 되돌림). 전일 대비 하락 중인 종목은 어느 쪽 전제에도
+# 맞지 않는다. 게다가 무장에 쓰는 FID 228은 **당일 누적**이라 오전에 강했던
+# 종목은 지금 밀리는 중에도 100 위에 머문다 — [B]의 매도 버스트 문제와
+# 같은 뿌리다. 이 하한은 그 구멍의 **가격 축 방어선**이다.
+#
+# 08-06 소급 검증 (매수 19건):
+#   · 하한에 걸리는 건 주성엔지니어링 2건뿐 (-1.26% / -1.96%)
+#     — 09:01:55 건은 0.00%, 09:07:39 건은 미청산(현재 -3.6%)
+#   · **승자 4건은 전부 통과한다** (코스모 +7.90% / 금호타이어 +0.25% /
+#     현대약품 +4.61% / GS건설 +3.69%)
+#   · 금호타이어가 **+0.25%**로 아슬아슬하다 — 하한을 0보다 올리면
+#     (예: +1%) 그 승자(+2.85%)를 잃는다. 그래서 정확히 0.0이다.
+#
+# ⚠️ **시가 대비 하한은 일부러 두지 않았다.** Pullback은 정의상 당일 고가에서
+#    되돌린 자리를 사는 전략이라 시가 아래에서 사는 것이 정상 동작일 수 있다.
+#    (1A에만 있는 시가대비 상한 8%와는 축이 다르다.)
+# 되돌리려면 -100.0 (사실상 무제한).
+MIN_ENTRY_CHANGE_PCT = 0.0
+
 # 신규매수 전면 하드 컷오프. 1A(~14:50)/1L(~10:50)은 자체 시간 윈도우가 있지만
 # 1B(FSM 감시)는 Pullback 미체결 후보를 계속 지켜보다 READY_TO_BUY가 되면 바로
 # 매수해서 자체 종료 시각이 없음 — 장마감(15:30) 직전까지 실시간 틱이 들어오는
@@ -832,7 +871,33 @@ ENTRY_PULLBACK_TIMEOUT_SEC = 120.0   # 이 시간 안에 안 오면 남은 트�
 # 되돌림 1차(-0.3%)와 대칭인 +0.3%를 쓴다 — "0.3% 내려오면 사고, 0.3% 올라가도
 # 산다. 그 사이에서 머뭇거리면 안 산다"는 ±0.3% 브레이크아웃 밴드가 된다.
 # ⚠️ 고가 추격 위험이 있다(SK오션플랜트가 그 사례). 손절 -3%가 받쳐준다.
-ENTRY_BREAKOUT_ENABLED = True
+#
+# ══════════════════════════════════════════════════════════════════
+# 🔴 2026-08-06: **OFF로 전환** (사용자 지정 "[D] 재검토 후 최적 조건으로")
+# ══════════════════════════════════════════════════════════════════
+# 위 08-05 근거는 **가정 시뮬레이션**(못 산 계획에 "샀다면?"을 얹은 것)이었다.
+# 08-06에 처음으로 **실거래 결과**가 나왔고, 방향이 반대였다:
+#
+#   경로            n(청산)   평균      승률   손절   합계
+#   ─────────────────────────────────────────────────────
+#   상승이탈          9      -1.00%    22%    4건   -8.96%
+#   되돌림(08-05+06) 27      +0.23%    41%    6건   +6.30%
+#
+# 구조적으로도 설명이 된다 — 트리거 시점은 이미 국소 고점인데(되돌림 대기를
+# 넣은 이유가 그것이다), 상승 이탈은 **거기서 더 높은 가격에 사는 추격매수**다.
+# 되돌림 대기의 전제를 정면으로 거스른다. 08-06 손절 7건 중 4건이 이 경로였다.
+#
+# ⚠️ 문턱 상향은 대안이 아니다. 08-06 발동 15건이 전부 +0.30~+0.52%에 몰려
+#    있어(중앙값 0.36%) 0.6%로 올리면 15건 전부 탈락 = 끄는 것과 동일하다.
+#    0.4%로 올려도 5건만 남아 '완화된 버전'이라 부를 표본이 안 된다.
+#
+# ⚠️ **근거는 하루치(08-06, n=9)다.** 이 경로는 08-05 13:54에 도입됐지만
+#    그날은 발동 0건이라, 실거래 표본이 존재하는 날이 08-06 하루뿐이다.
+#    이 프로젝트가 요구해 온 "양일 각각 개선" 기준을 만족하지 못한다.
+#    다만 (a) 방향이 구조적 설명과 일치하고 (b) 되돌림 경로는 이틀 모두
+#    플러스이며 (c) 지금은 손실을 줄이는 게 우선이라 끄는 쪽을 택했다.
+#    되살리려면 True 한 줄. 로직은 그대로 보존돼 있다.
+ENTRY_BREAKOUT_ENABLED = False
 ENTRY_BREAKOUT_PCT = 0.003       # 트리거가 대비 이만큼 오르면 잔여 전량 즉시매수
 
 # ── 손절 대신 추가매수 (Rescue Add, 2026-08-05 신규 — 사용자 지정) ──────
@@ -1276,6 +1341,44 @@ class StrategyManager:
             return MAX_ENTRY_CHANGE_PCT_PULLBACK
         return MAX_ENTRY_CHANGE_PCT
 
+    def _entry_change_reject(
+        self, stock_code: str, sub_strategy: str, price: float
+    ) -> Optional[str]:
+        """등락률(전일종가 대비) 상·하한 판정 — **이 규칙의 유일한 지점**.
+
+        (2026-08-06 신설) 반환값이 None이면 통과, 문자열이면 그게 탈락 사유다.
+
+        왜 함수로 모았나: 같은 규칙이 **세 경로**(계획 생성 `_open_entry_plan` /
+        주문 직전 `_execute_buy` / 상승이탈 재확인 `_try_fill_entry_plan`)에
+        복제돼 있었다. 이 코드베이스에서 반복된 사고 패턴이 정확히 이것이고
+        (`_entry_block_reason`을 하나로 모은 것과 같은 이유), 하한을 추가하면서
+        세 곳 중 하나만 고치면 그 경로로 조용히 새어 나간다.
+        **새 조건을 넣을 일이 생기면 호출부를 늘리지 말고 여기에만 넣을 것.**
+
+        전일종가를 모르면 None(통과)이다 — 모름이 매수를 막지 않는다는
+        기존 규약을 그대로 따른다(REST 실패로 하루가 통째로 죽는 걸 막는다).
+        """
+        try:
+            prev_close = self._get_prev_close(stock_code, price)
+        except Exception:
+            prev_close = None
+        if not prev_close:
+            return None
+
+        change_pct = (price - prev_close) / prev_close * 100
+
+        cap = self._entry_change_cap(sub_strategy)
+        if change_pct > cap:
+            return f"등락률 상한 초과 (전일종가대비 {change_pct:+.1f}% > +{cap:.0f}%)"
+
+        # 하한 — "매수는 +일 때만" (2026-08-06 사용자 지정)
+        if change_pct <= MIN_ENTRY_CHANGE_PCT:
+            return (
+                f"등락률 하한 미달 (전일종가대비 {change_pct:+.1f}% "
+                f"<= {MIN_ENTRY_CHANGE_PCT:+.0f}%)"
+            )
+        return None
+
     @staticmethod
     def cond_perf_key(cond_name: str) -> str:
         """조건검색식 성과 추적용 정규화 키 (2026-08-01, 제안 B).
@@ -1326,6 +1429,20 @@ class StrategyManager:
         time_str로 오늘 봉만 걸러 가장 이른 봉의 시가를 쓴다. 오늘 봉이
         하나도 없으면 0.0 — 호출부는 0이면 시가 기반 필터를 건너뛴다
         (모르는 값으로 막지 않는다).
+
+        ⚠️ **조회 창 절단 가드 (2026-08-06 추가)** — 위 로직만으로는
+        **장중 재편입**에서 틀린 값을 낸다. 09:18에 분봉 15개를 받으면 창이
+        09:03~09:18이라 09:00봉이 아예 없는데, "오늘 봉 중 가장 이른 것"을
+        시가로 쓰면 **09:03봉의 시가**를 당일 시가로 착각한다.
+        08-06 실측(금호타이어 073240): 진짜 시가 7,200 -> 반환값 7,650이 되어
+        시가대비 +14.03%짜리 매수가 +7.32%로 계산돼 8% 상한을 통과했다.
+
+        판별법: 리스트에서 **가장 오래된 봉**이 전일 것이면 창이 하루 전체를
+        덮으므로 그 안의 '오늘 첫 봉'은 진짜 첫 봉이다(거래가 뜸해 09:00봉이
+        없는 종목도 이 경우엔 정상 처리된다). 반대로 가장 오래된 봉까지
+        오늘 것이면 창이 잘렸을 수 있으므로, 그 첫 봉이 실제 개장봉
+        (GROUP_A_START)이 아닌 한 **0.0(판단 포기)** 을 반환한다.
+        모르는 값으로 막지도, 틀린 값으로 통과시키지도 않는다.
         """
         if not candles:
             return 0.0
@@ -1337,6 +1454,20 @@ class StrategyManager:
         if not today_only:
             return 0.0
         first = min(today_only, key=lambda c: str(c.get("time_str", "")))
+        first_ts = str(first.get("time_str", ""))
+
+        # ── 창 절단 가드 ────────────────────────────────────────────
+        oldest_ts = str(
+            min(candles, key=lambda c: str(c.get("time_str", ""))).get("time_str", "")
+        )
+        if oldest_ts.startswith(today_str):
+            # 창 전체가 오늘 것 -> 과거 방향으로 잘렸을 수 있다.
+            # 첫 봉이 개장봉(09:00)이 아니면 당일 시가로 쓸 수 없다.
+            if len(first_ts) < 12:
+                return 0.0  # 포맷을 못 읽으면 판단 포기
+            if first_ts[8:12] > GROUP_A_START.strftime("%H%M"):
+                return 0.0
+
         try:
             return float(first.get("open") or 0.0)
         except (TypeError, ValueError):
@@ -1845,6 +1976,12 @@ class StrategyManager:
         # 10:30 이후 탈락의 대부분이 이것이었다(2,222회, 대한광통신 2,110회).
         # 뭉뚱그리면 "왜 안 사는가"의 답이 통째로 사라진다.
         ("등락률 상한 초과", ("등락률 상한",)),
+        # (2026-08-06) 하한(= 전일종가 대비 마이너스라 매수 안 함)은 상한과
+        # **정반대 상황**이라 반드시 따로 센다. 하나로 뭉치면 "너무 오른 걸
+        # 걸렀는지" "떨어지는 걸 걸렀는지"를 구분할 수 없다.
+        # ⚠️ '상한' 규칙보다 먼저 와야 한다 — 아래 "매수 컷오프"가 부분문자열
+        #    "상한"을 잡으므로, 순서가 밀리면 하한이 컷오프로 오분류된다.
+        ("등락률 하한 미달(하락중)", ("등락률 하한",)),
         ("매수 컷오프", ("컷오프", "상한",)),
     )
     # '코드/인프라 이상'을 의심해야 하는 분류 — 정상 필터링과 구분해서 경고한다.
@@ -2494,9 +2631,14 @@ class StrategyManager:
         # 캐시 예열). 트리거가 걸린 뒤에 준비하면 그만큼 늦게 산다.
         self.prearm_candidate(stock_code, current_price, candles)
 
+        # (2026-08-06) **캐시 우선**. 예전엔 `open_price or 캐시`라 갓 계산한
+        # 값이 항상 이겼는데, 장중 재편입에서는 그 값이 창 절단으로 틀릴 수
+        # 있다(위 _today_open 주석의 금호타이어 사례 — 09:00:55에 정확한
+        # 7,200이 캐시돼 있었는데 09:03봉의 7,650이 이겨서 필터가 뚫렸다).
+        # 캐시는 ka10001의 `open_pric`(거래소 확정 시가)이라 분봉 추정보다 정확하다.
         ok, info = self.evaluate_tick_entry(
             stock_code, sub_strategy, current_price,
-            open_price=open_price or self._opening_prices.get(stock_code, 0.0),
+            open_price=self._opening_prices.get(stock_code, 0.0) or open_price,
             cond_name=cond_name, now_dt=self._now(),
         )
         self._record_watch_list(stock_code, stock_name, phase, info, cond_name)
@@ -3056,13 +3198,17 @@ class StrategyManager:
         burst_min = PHASE1A_BURST_TRADE_VALUE * tmul * pmul * smul * value_mult
         single_min = PHASE1A_SINGLE_TRADE_VALUE * tmul * pmul * smul
 
+        # (2026-08-06) 매수 체결만 센다 — 대량 투매를 매수 신호로 읽던 결함.
+        # None이면 방향 무관(08-05까지의 동작).
+        bside = "buy" if BURST_REQUIRE_BUY_SIDE else None
+
         try:
             burst_count = tf.count_large_trades(
                 stock_code, window_sec=TICK_BURST_WINDOW_SEC,
-                min_value=burst_min, now=now,
+                min_value=burst_min, now=now, side=bside,
             )
             max_single = tf.max_single_trade_value(
-                stock_code, window_sec=TICK_BURST_WINDOW_SEC, now=now
+                stock_code, window_sec=TICK_BURST_WINDOW_SEC, now=now, side=bside
             )
             # 버스트 창(최근 5초)은 평균에서 **제외**한다 — 지금 터지는
             # 대량체결이 분모에 섞이면 체결이 클수록 문턱도 같이 올라가
@@ -3092,9 +3238,11 @@ class StrategyManager:
             # '그 종목 평균이 유난히 큰 경우 더 엄격하게'라는 원래 목적만 남는다.
             rel_min = max(burst_min, avg_tick * TICK_BURST_REL_MULT)
             try:
+                # 분자만 매수로 좁힌다. 분모(avg_tick)는 '평상시 1틱 크기'라
+                # 방향 무관이 맞고, 그 조합은 판정을 **더 엄격하게** 만든다.
                 rel_count = tf.count_large_trades(
                     stock_code, window_sec=TICK_BURST_WINDOW_SEC,
-                    min_value=rel_min, now=now,
+                    min_value=rel_min, now=now, side=bside,
                 )
             except Exception:
                 rel_count = 0
@@ -3410,23 +3558,13 @@ class StrategyManager:
         # 살 수 없는 종목에 계획을 걸면 그 슬롯이 ENTRY_PULLBACK_TIMEOUT_SEC
         # 동안 묶인다(구버전은 _execute_buy 안에서 즉시 걸러져 pending이 바로
         # 회수됐다). 진입 자체를 막는 값싼 게이트는 **계획 생성 전에** 본다.
-        entry_cap = self._entry_change_cap(sub_strategy)
-        try:
-            prev_close = self._get_prev_close(stock_code, trigger_price)
-        except Exception:
-            prev_close = None
-        if prev_close:
-            change_pct = (trigger_price - prev_close) / prev_close * 100
-            if change_pct > entry_cap:
-                self._note_reject(
-                    stock_code,
-                    f"등락률 상한 초과 (전일종가대비 +{change_pct:.1f}% > +{entry_cap:.0f}%)",
-                )
-                logger.info(
-                    "[%s] %s 되돌림 대기 생략: 전일종가대비 +%.1f%% (상한 +%.0f%%)",
-                    stock_code, stock_name, change_pct, entry_cap,
-                )
-                return
+        chg_reject = self._entry_change_reject(stock_code, sub_strategy, trigger_price)
+        if chg_reject:
+            self._note_reject(stock_code, chg_reject)
+            logger.info(
+                "[%s] %s 되돌림 대기 생략: %s", stock_code, stock_name, chg_reject
+            )
+            return
 
         # VI 상단 근접 매수차단 (2026-08-06) — 등락률 상한과 같은 이유로
         # **계획 생성 전에** 본다. 여기서 안 막으면 살 수 없는 종목이
@@ -3527,27 +3665,21 @@ class StrategyManager:
             return filled_any
         plan["breakout_done"] = True
 
-        # 가격이 올랐으므로 등락률 상한을 **다시** 본다. 계획 생성 시점엔
-        # 통과했어도 지금은 넘었을 수 있다(그대로 사면 상한이 무의미해진다).
-        try:
-            prev_close = self._get_prev_close(stock_code, price)
-        except Exception:
-            prev_close = None
-        if prev_close:
-            cap = self._entry_change_cap(plan["sub_strategy"])
-            change_pct = (price - prev_close) / prev_close * 100
-            if change_pct > cap:
-                self._note_reject(
-                    stock_code,
-                    f"등락률 상한 초과 (전일종가대비 +{change_pct:.1f}% > +{cap:.0f}%)",
-                )
-                logger.info(
-                    "[%s] %s 상승 이탈했으나 등락률 상한 초과로 미집행 "
-                    "(전일종가대비 +%.1f%% > +%.0f%%)",
-                    stock_code, plan["stock_name"], change_pct, cap,
-                )
-                self._close_entry_plan(stock_code, "상승 이탈(등락률 초과)")
-                return filled_any
+        # 가격이 올랐으므로 등락률을 **다시** 본다. 계획 생성 시점엔 통과했어도
+        # 지금은 상한을 넘었을 수 있다(그대로 사면 상한이 무의미해진다).
+        # 하한도 같은 함수가 본다 — 상승 이탈은 정의상 오른 것이라 하한에
+        # 걸릴 일은 드물지만, 규칙을 한 곳에만 두는 것이 이 함수의 목적이다.
+        chg_reject = self._entry_change_reject(
+            stock_code, plan["sub_strategy"], price
+        )
+        if chg_reject:
+            self._note_reject(stock_code, chg_reject)
+            logger.info(
+                "[%s] %s 상승 이탈했으나 미집행 — %s",
+                stock_code, plan["stock_name"], chg_reject,
+            )
+            self._close_entry_plan(stock_code, "상승 이탈(등락률)")
+            return filled_any
 
         frac = sum(t["frac"] for t in remain)
         for t in remain:
@@ -4314,20 +4446,14 @@ class StrategyManager:
                 )
                 return
 
-        entry_cap = self._entry_change_cap(sub_strategy)
-        prev_close = self._get_prev_close(stock_code, current_price)
-        if prev_close:
-            change_pct = (current_price - prev_close) / prev_close * 100
-            if change_pct > entry_cap:
-                logger.info(
-                    "[%s] %s 매수 차단: 전일종가대비 +%.1f%% (상한 +%.0f%%) [%s]",
-                    stock_code, stock_name, change_pct, entry_cap, sub_strategy,
-                )
-                self._note_reject(
-                    stock_code,
-                    f"등락률 상한 초과 (전일종가대비 +{change_pct:.1f}% > +{entry_cap:.0f}%)",
-                )
-                return
+        chg_reject = self._entry_change_reject(stock_code, sub_strategy, current_price)
+        if chg_reject:
+            logger.info(
+                "[%s] %s 매수 차단: %s [%s]",
+                stock_code, stock_name, chg_reject, sub_strategy,
+            )
+            self._note_reject(stock_code, chg_reject)
+            return
 
         # VI 상단 근접 매수차단 (2026-08-06) — 주문 직전 하드가드.
         # `_open_entry_plan`에서 이미 보지만 여기도 두는 이유: `_execute_buy`
