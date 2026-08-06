@@ -97,7 +97,7 @@ check("매수금액 3곳 일치 = 200만원",
       f"{SM.POSITION_AMOUNT:,} / {DEFAULT_BASE_AMOUNT:,} / {BUY_AMOUNT_PER_STOCK:,}")
 check("버스트 주가 스케일 상수",
       (SM.BURST_PRICE_REF, SM.BURST_PRICE_ALPHA,
-       SM.BURST_PRICE_MIN, SM.BURST_PRICE_MAX) == (10_000.0, 0.55, 0.30, 2.00),
+       SM.BURST_PRICE_MIN, SM.BURST_PRICE_MAX) == (10_000.0, 0.55, 0.30, 3.00),
       f"{SM.BURST_PRICE_REF}/{SM.BURST_PRICE_ALPHA}/{SM.BURST_PRICE_MIN}/{SM.BURST_PRICE_MAX}")
 check("재매수 배수 2.5", SM.REBUY_BURST_VALUE_MULT == 2.5)
 check("VI 상수", (SM.VI_UPPER_EXIT_ENABLED, SM.VI_STATIC_RATIO,
@@ -106,11 +106,11 @@ check("VI 상수", (SM.VI_UPPER_EXIT_ENABLED, SM.VI_STATIC_RATIO,
 
 # 상한 클램프가 걸리는 주가 (오해 방지용 — MAX만 보면 안 된다)
 bind = 10_000 * SM.BURST_PRICE_MAX ** (1 / SM.BURST_PRICE_ALPHA)
-check("상한 클램프 시작 주가 35,264원 부근", 35_000 <= bind <= 35_500, f"{bind:,.0f}원")
+check("상한 클램프 시작 주가 73,704원 부근", 73_000 <= bind <= 74_500, f"{bind:,.0f}원")
 
 # 실제 문턱표 — 수치를 눈으로 확인할 수 있게 출력
 print("\n  주가별 실효 문턱:")
-for px in (1_000, 2_000, 5_000, 10_000, 20_000, 35_264, 50_000, 150_000):
+for px in (1_000, 2_000, 5_000, 10_000, 20_000, 32_600, 73_704, 113_900, 150_000):
     m = SM.burst_price_scale(px)
     print(f"    {px:>8,}원  x{m:.3f}  절대 {SM.PHASE1A_BURST_TRADE_VALUE*m/10000:>7,.0f}만"
           f"  단일 {SM.PHASE1A_SINGLE_TRADE_VALUE*m/1e8:>5.2f}억"
