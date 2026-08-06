@@ -651,6 +651,43 @@ MIN_ENTRY_CHANGE_PCT = 0.0
 # 되돌리려면 0.0 (숙성 요구 없음 = 08-05까지의 동작).
 MIN_ENTRY_DELAY_SEC = 60.0
 
+# ── 버스트 '파동 순번' 상한 (2026-08-06 신규) ─────────────────────
+# [배경] 사용자가 "거래대금이 터질 때마다 올라갔다"며 5종목(뉴엔AI/JW신약/
+# 현대약품/져스텍/KBI메탈)을 지목한 데서 출발. 분봉으로 재구성해 보니 지목한
+# 시각 중 둘은 **터지기 직전**이었고(뉴엔AI 10:09 = 중앙값의 1.1배),
+# 정작 가장 크게 터진 분은 그 뒤로 하락했다(뉴엔AI 10:20 -3.62%/5분).
+#
+# [측정] 08-03~06 편입 종목 167 종목·일의 분봉에서 '분 거래대금 >= 그날
+# 중앙값 x10'을 폭발로 정의하고 **그날 그 종목의 몇 번째 폭발인가**로 갈랐다
+# (n=3,370):
+#     순번        n      +5분     상승확률   플러스일
+#     1번째      163   +1.09%     64%       4/4
+#     2번째      158   +0.27%     48%       3/4
+#     3번째      156   +0.16%     43%       2/4
+#     6번째~   2,595   -0.23%     38%       1/4
+#     [1~3]      477   +0.51%     52%      **4/4**
+#     [4~]     2,893   -0.18%     39%       1/4
+# **완전히 단조**다. 반면 거래대금 '배수'(10x/25x/40x/70x)는 4일로 보면
+# 판별력이 사라진다(08-06 단독의 단조성은 날짜 효과였다).
+#
+# [우리 실거래 검증] 75건을 매수 시점의 파동 순번으로 갈라 현행 청산으로 재생:
+#     컷오프            n    4일합계   플러스일
+#     제한 없음(현행)   73   -35.9%     1/4
+#     + 숙성60초만      54   -16.1%     1/4
+#     파동3까지+숙성    16    +7.8%    **4/4**
+#     파동2까지+숙성    14    +8.5%    **4/4**
+#     파동1까지+숙성    11    +9.0%    **4/4**
+# 8번째 이후 매수 30건이 -27.4%로 **4일 손실의 70%**를 만들었다.
+# 3을 고른 이유: 1/2/3 모두 4/4인데 3이 표본이 가장 많고, 독립적인 대규모
+# 분석(3,370건)도 정확히 "1~3번째"를 지목해 **두 분석이 같은 컷을 가리킨다.**
+#
+# ⚠️ 재시작하면 카운트가 리셋된다(메모리 전용). 버스트는 DB에 남지 않아
+#    복원이 불가능하다 — 장중 재시작 시 후기 파동이 통과할 수 있다.
+#    08:59 자동기동만 쓰면 실무상 문제없다.
+# 되돌리려면 매우 큰 값(예: 999) = 파동 제한 없음.
+BURST_WAVE_MAX = 3
+BURST_WAVE_COOLDOWN_SEC = 60.0   # 이 간격 안의 연속 발화는 같은 파동으로 본다
+
 # 신규매수 전면 하드 컷오프. 1A(~14:50)/1L(~10:50)은 자체 시간 윈도우가 있지만
 # 1B(FSM 감시)는 Pullback 미체결 후보를 계속 지켜보다 READY_TO_BUY가 되면 바로
 # 매수해서 자체 종료 시각이 없음 — 장마감(15:30) 직전까지 실시간 틱이 들어오는
@@ -1174,6 +1211,8 @@ class StrategyManager:
         # stock_code -> 그 종목을 **처음 본 시각**(monotonic). [F] 진입 숙성 판정용.
         # 편입/pre-arm 어느 경로로 들어와도 여기 한 번만 찍힌다(setdefault).
         self._first_seen: dict[str, float] = {}
+        # stock_code -> 그날 카운트된 버스트 파동의 발생 시각들 (BURST_WAVE_MAX용).
+        self._burst_waves: dict[str, list[float]] = {}
         # 평상시 상한(MAX_HOLDINGS)이 꽉 찬 시각 — 확장 슬롯(7~8) 판정용 (2026-07-31)
         self._soft_cap_full_since: Optional[datetime] = None
         # 장중 전략 성과 추적 — 잘 되는 전략의 컷라인을 낮추고 안 되는 전략은
@@ -1431,6 +1470,33 @@ class StrategyManager:
             return (
                 f"등락률 하한 미달 (전일종가대비 {change_pct:+.1f}% "
                 f"<= {MIN_ENTRY_CHANGE_PCT:+.0f}%)"
+            )
+        return None
+
+    def _note_burst_wave(self, stock_code: str, now: float = None) -> int:
+        """버스트 발화를 '파동'으로 카운트하고 지금까지의 파동 수를 반환.
+
+        (2026-08-06 신설) 무장 상태에서는 check_burst가 매 틱 참일 수 있으므로
+        BURST_WAVE_COOLDOWN_SEC 안의 연속 발화는 **같은 파동 하나**로 접는다.
+        (근거 분석이 1분봉 단위였으므로 쿨다운도 60초로 맞췄다.)
+        """
+        now = now if now is not None else _time_mod.time()
+        waves = self._burst_waves.setdefault(stock_code, [])
+        if not waves or (now - waves[-1]) >= BURST_WAVE_COOLDOWN_SEC:
+            waves.append(now)
+        return len(waves)
+
+    def _burst_wave_reject(self, stock_code: str, wave_no: int) -> Optional[str]:
+        """파동 순번 상한 판정. None이면 통과, 문자열이면 탈락 사유.
+
+        근거는 BURST_WAVE_MAX 주석 참고 — 4번째 이후 폭발은 4일 2,893건에서
+        평균 -0.18%/플러스일 1/4이고, 우리 실거래에서도 8번째 이후 30건이
+        4일 손실의 70%를 만들었다.
+        """
+        if wave_no > BURST_WAVE_MAX:
+            return (
+                f"버스트 파동 상한 초과 ({wave_no}번째 > {BURST_WAVE_MAX}번째 "
+                f"— 이미 여러 번 터진 자리)"
             )
         return None
 
@@ -2066,6 +2132,10 @@ class StrategyManager:
         # 없으면 "기타"로 뭉개져 매수가 준 이유를 장중에 판단할 수 없다.
         # ⚠️ 라벨에 초 수를 박지 말 것(상수를 바꾸면 거짓말이 된다).
         ("진입 숙성 대기", ("진입 숙성",)),
+        # (2026-08-06) 이미 여러 번 터진 자리 — 정상 필터링이다.
+        # ⚠️ '상한'이라는 부분문자열을 아래 "매수 컷오프"가 잡으므로
+        #    반드시 그보다 먼저 와야 한다.
+        ("버스트 파동 상한(후기 파동)", ("버스트 파동",)),
         ("매수 컷오프", ("컷오프", "상한",)),
     )
     # '코드/인프라 이상'을 의심해야 하는 분류 — 정상 필터링과 구분해서 경고한다.
@@ -3441,6 +3511,17 @@ class StrategyManager:
         info["current_price"] = current_price
         info["strength_sustained_sec"] = round(sustained, 2)
         if not ok:
+            return False, info
+
+        # 버스트가 성립한 지금이 그 종목의 '몇 번째 파동'인가 (2026-08-06).
+        # 카운트는 발화할 때마다 하고(쿨다운 60초로 같은 파동은 접는다),
+        # 상한을 넘으면 진입만 막는다 — 카운트 자체는 계속 돌아야
+        # 나중 파동의 순번이 정확해진다.
+        wave_no = self._note_burst_wave(stock_code, now=now)
+        info["burst_wave"] = wave_no
+        wave_reject = self._burst_wave_reject(stock_code, wave_no)
+        if wave_reject:
+            info["reason"] = wave_reject
             return False, info
 
         # score/score_threshold는 확장슬롯·슬롯교체가 전략 공통으로 읽는 필드.

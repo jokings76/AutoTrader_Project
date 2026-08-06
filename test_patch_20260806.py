@@ -578,6 +578,74 @@ finally:
     SM.MIN_ENTRY_DELAY_SEC = _oldd
 
 # ═════════════════════════════════════════════════════════
+print("\n[10] [H] 버스트 파동 상한 — 이미 여러 번 터진 자리는 안 산다")
+# ═════════════════════════════════════════════════════════
+check("BURST_WAVE_MAX == 3", SM.BURST_WAVE_MAX == 3)
+check("쿨다운 60초 (근거 분석이 1분봉 단위였다)",
+      abs(SM.BURST_WAVE_COOLDOWN_SEC - 60.0) < 1e-9)
+
+s10 = build()
+n0 = time.time()
+# 같은 파동 안의 연속 발화는 하나로 접힌다
+check("1회차 -> 파동 1", s10._note_burst_wave("W", now=n0) == 1)
+check("[핵심] 쿨다운 내 재발화는 같은 파동", s10._note_burst_wave("W", now=n0 + 10) == 1)
+check("[핵심] 쿨다운 내 여러 번도 같은 파동",
+      s10._note_burst_wave("W", now=n0 + 59.9) == 1)
+check("쿨다운 경과 -> 파동 2", s10._note_burst_wave("W", now=n0 + 60) == 2)
+check("또 경과 -> 파동 3", s10._note_burst_wave("W", now=n0 + 120) == 3)
+check("또 경과 -> 파동 4", s10._note_burst_wave("W", now=n0 + 180) == 4)
+
+check("[통과] 1~3번째는 진입 허용",
+      all(s10._burst_wave_reject("W", w) is None for w in (1, 2, 3)))
+r10 = s10._burst_wave_reject("W", 4)
+check("[핵심] 4번째부터 차단", r10 is not None and "파동" in r10, str(r10))
+check("[핵심] 8번째도 당연히 차단", s10._burst_wave_reject("W", 8) is not None)
+
+# 종목별로 독립인가 — 한 종목이 많이 터졌다고 다른 종목이 막히면 안 된다
+s10b = build()
+for i in range(5):
+    s10b._note_burst_wave("A", now=n0 + i * 61)
+check("[독립성] 다른 종목은 영향 없음", s10b._note_burst_wave("B", now=n0) == 1)
+check("[독립성] A는 5번째까지 셌다", len(s10b._burst_waves["A"]) == 5)
+
+# 실제 진입 경로 — 4번째 파동에서는 계획이 안 열린다
+s10c = build()
+setup(s10c, "LATE")
+for i in range(3):
+    s10c._note_burst_wave("LATE", now=T - 300 + i * 61)   # 이미 3파동 지남
+trigger(s10c, "LATE", T)
+check("[경로] 4번째 파동이면 되돌림 계획조차 안 열린다",
+      "LATE" not in s10c._entry_plans and "LATE" not in s10c.holdings,
+      f"waves={len(s10c._burst_waves.get('LATE', []))}")
+
+# 대조군 — 첫 파동이면 정상
+s10d = build()
+setup(s10d, "FIRST")
+trigger(s10d, "FIRST", T)
+check("[대조군] 첫 파동은 정상적으로 계획이 열린다", "FIRST" in s10d._entry_plans)
+check("[대조군] info에 파동 순번이 실린다",
+      s10d._burst_waves.get("FIRST") is not None)
+
+# 상한을 넘어도 **카운트는 계속** 돌아야 순번이 정확하다
+s10e = build()
+for i in range(6):
+    w = s10e._note_burst_wave("CNT", now=n0 + i * 61)
+check("[핵심] 상한 초과 후에도 카운트는 계속된다(순번 정확성)", w == 6, str(w))
+
+# 롤백
+_oldw = SM.BURST_WAVE_MAX
+try:
+    SM.BURST_WAVE_MAX = 999
+    check("[롤백] 999로 두면 파동 제한이 사라진다",
+          s10._burst_wave_reject("W", 50) is None)
+finally:
+    SM.BURST_WAVE_MAX = _oldw
+
+check("[진단] 파동 상한이 '매수 컷오프'로 오분류되지 않는다",
+      SM.StrategyManager._reject_category(
+          "버스트 파동 상한 초과 (5번째 > 3번째)") == "버스트 파동 상한(후기 파동)")
+
+# ═════════════════════════════════════════════════════════
 print("\n" + "=" * 62)
 print(f"통과 {len(PASS)} / 실패 {len(FAIL)}")
 if FAIL:

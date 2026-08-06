@@ -143,6 +143,13 @@ check("죽은 슬롯 없음 — 캡 합이 공유 상한 이상",
       f"{SM.PHASE1A_MAX_SLOTS}+{SM.PULLBACK_MAX_SLOTS} vs {SM.MAX_HOLDINGS}")
 check("확장 슬롯 도달 가능 — 캡 합이 하드 상한 이상",
       SM.PHASE1A_MAX_SLOTS + SM.PULLBACK_MAX_SLOTS >= SM.MAX_HOLDINGS_HARD)
+# (2026-08-06) 파동 쿨다운이 요구 숙성보다 길면, 첫 파동이 카운트되기도 전에
+#    숙성이 끝나 순번 판정이 무의미해지는 구간이 생긴다. 둘의 관계를 못박는다.
+check("파동 쿨다운 <= 진입 숙성 (순번이 숙성보다 늦게 세어지지 않는다)",
+      SM.BURST_WAVE_COOLDOWN_SEC <= max(SM.MIN_ENTRY_DELAY_SEC, 1e-9)
+      or SM.MIN_ENTRY_DELAY_SEC <= 0,
+      f"쿨다운 {SM.BURST_WAVE_COOLDOWN_SEC} vs 숙성 {SM.MIN_ENTRY_DELAY_SEC}")
+check("파동 상한 >= 1 (0이면 아무것도 못 산다)", SM.BURST_WAVE_MAX >= 1)
 check("MAX_HOLDINGS <= HARD", SM.MAX_HOLDINGS <= SM.MAX_HOLDINGS_HARD)
 check("무장 시간 < 무장 TTL", SM.TICK_STRENGTH_SUSTAIN_SEC < SM.TICK_ARM_TTL_SEC)
 check("시간계수 전부 <= 1.0", all(v <= 1.0 for _, v in SM.TICK_BURST_TIME_MULT))
@@ -542,6 +549,7 @@ if _doc:
     doc_has("슬롯", f"슬롯 {SM.PHASE1A_MAX_SLOTS} {SM.PULLBACK_MAX_SLOTS} "
                    f"{SM.MAX_HOLDINGS} {SM.MAX_HOLDINGS_HARD}")
     doc_has("진입숙성", f"진입숙성 {SM.MIN_ENTRY_DELAY_SEC}")
+    doc_has("파동상한", f"파동상한 {SM.BURST_WAVE_MAX}")
     doc_has("무장", f"무장 {SM.TICK_STRENGTH_MIN} {SM.TICK_STRENGTH_SUSTAIN_SEC}")
     doc_has("버스트", f"버스트 {SM.PHASE1A_BURST_TRADE_VALUE} "
                     f"{SM.PHASE1A_BURST_TRADE_COUNT} {SM.PHASE1A_SINGLE_TRADE_VALUE}")

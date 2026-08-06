@@ -2396,6 +2396,62 @@ claude --remote-control
   · ⚠️ **창을 닫으면 연결이 끊긴다** — 코드 실행은 전부 이 PC에서 일어난다.
     PC와 이 창을 켜 둔 채로 나갈 것.
 
+- 2026-08-06 (15:00~16:00, **[H] 버스트 파동 상한 신설 — 이번 세션 최대 발견**) —
+  사용자가 "거래대금이 터질 때마다 올라갔다"며 5종목(뉴엔AI 10:09 / JW신약 10:10 /
+  현대약품 09:11 / 져스텍 09:22 / KBI메탈 09:45)을 지목하며 정밀 분석을 요청했다.
+
+  [🔎 지목 시각을 분봉으로 재구성하니 전제가 뒤집혔다]
+  · 지목한 시각 중 **둘은 거래대금이 터진 게 아니라 터지기 직전**이었다:
+    뉴엔AI 10:09 = 중앙값의 **1.1배**(+5분 +5.96%), JW신약 10:10 = 2.2배.
+  · 반대로 **가장 크게 터진 분이 고점**이었다:
+    뉴엔AI 10:20(17.8배) +5분 **-3.62%** / 현대약품 09:19(76.5배) **-4.42%** /
+    져스텍 09:31(61.9배) **-3.74%**.
+  · 즉 "터질 때 사라"가 아니라 **"터지기 시작할 때 사고, 반복되면 빠져라"**다.
+
+  [📊 진짜 축은 '몇 번째 폭발인가' — 4일 3,370건, 완전 단조]
+  편입 종목 167 종목·일의 분봉에서 '분 거래대금 >= 그날 중앙값 x10'을 폭발로 정의:
+  | 순번 | n | +5분 | 상승확률 | 플러스일 |
+  |---|---|---|---|---|
+  | 1번째 | 163 | **+1.09%** | 64% | **4/4** |
+  | 2번째 | 158 | +0.27% | 48% | 3/4 |
+  | 3번째 | 156 | +0.16% | 43% | 2/4 |
+  | 6번째~ | 2,595 | -0.23% | 38% | 1/4 |
+  | **[1~3]** | **477** | **+0.51%** | 52% | **4/4** |
+  | **[4~]** | **2,893** | **-0.18%** | 39% | **1/4** |
+  · ⚠️ 반면 거래대금 **'배수'는 4일로 보면 판별력이 사라진다**(10~15x +0.07% 3/4 /
+    25~40x -0.19% 0/4 / 70x~ +0.01% 2/4). 08-06 단독에서 보였던 "클수록 나쁨"
+    단조성은 **날짜 효과**였다. 이 프로젝트가 반복해서 밟는 함정이라 명시한다.
+  · 절대 금액(억 단위)도 판별력이 약하다(10~20억만 소폭 플러스).
+
+  [✅ 우리 실거래 75건으로 교차 검증 — 두 분석이 같은 컷을 지목]
+  | 컷오프 | n | 4일 합계 | 플러스일 |
+  |---|---|---|---|
+  | 제한 없음(현행) | 73 | **-35.9%** | 1/4 |
+  | [F] 숙성 60초만 | 54 | -16.1% | 1/4 |
+  | **파동3까지 + 숙성** | **16** | **+7.8%** | **4/4** |
+  | 파동2까지 + 숙성 | 14 | +8.5% | 4/4 |
+  | 파동1까지 + 숙성 | 11 | +9.0% | 4/4 |
+  · **8번째 이후 매수 30건이 -27.4%로 4일 손실의 70%**를 만들었다.
+  · [F]와 **충돌이 아니라 시너지**다 — 숙성 없이 파동2/3만 걸면 1/4인데
+    숙성과 함께면 4/4가 된다(숙성이 '급한 첫 진입'을, 파동이 '늦은 반복 진입'을
+    각각 막아 서로 다른 실패 모드를 덮는다).
+  · 3을 고른 이유: 1/2/3 모두 4/4인데 3이 표본이 가장 많고(16), 독립적인
+    대규모 분석(3,370건)도 정확히 "1~3번째"를 지목한다.
+
+  [구현] `BURST_WAVE_MAX=3` / `BURST_WAVE_COOLDOWN_SEC=60`.
+  `_note_burst_wave()`가 발화를 세고(쿨다운 60초로 같은 파동은 접는다),
+  `_burst_wave_reject()`가 상한을 본다. `evaluate_tick_entry`에서 버스트 성립
+  직후에 판정하므로 두 진입 경로(틱/폴링)가 자동으로 같은 규칙을 쓴다.
+  · **상한을 넘어도 카운트는 계속 돈다** — 안 그러면 이후 파동의 순번이 틀어진다.
+  · ⚠️ **재시작하면 카운트가 리셋된다**(메모리 전용, 버스트는 DB에 안 남아
+    복원 불가). 장중 재시작 시 후기 파동이 통과할 수 있다 —
+    08-02에 겪은 "재시작 시 당일 리스크 상태 소실"과 같은 클래스의 한계다.
+  · 진단 분류 `버스트 파동 상한(후기 파동)` 신설(정상 필터링임을 구분).
+
+  [검증] `test_patch_20260806.py` 85 -> **104건**(섹션 10). 쿨다운 접힘/경계/
+  종목 독립성/상한 초과 후 카운트 지속/실제 진입 경로 차단/대조군/롤백.
+  10개 스위트 **1,202건 전원 통과**. 감사에 `파동 쿨다운 <= 진입 숙성` 불변식 추가.
+
 \## 세션 이관 체크리스트 (2026-08-01 신설)
 
 새 세션(PC 터미널 / 모바일 원격 / 새 대화창 어디서든)이 이 프로젝트를
@@ -2438,13 +2494,13 @@ with get_connection() as c:
 | 6 | `python test_live_dryrun_20260803.py` | **164건 전원 통과** (종일 통합 + 기동 인프라 + 상수 불변식 + 설정조합 + 전면차단 교차감사) |
 | 7 | `python test_closing_bet_routing.py` | **24건 전원 통과** (종가베팅 분리 라우팅) |
 | 8 | `python test_patch_20260805.py` | **142건 전원 통과** (장중수술 + 매도시점 + 버스트 주가 스케일 + VI 확정매도 + 시가대비 8%/급등강화 + **상승이탈 OFF 전환**) |
-| 9 | `python test_patch_20260806.py` | **85건 전원 통과** (🔴 **[A] 시가 절단 / [B] 버스트 side / [C] 등락률 하한 / [D] 상승이탈 OFF / [E] 눌림 슬롯0 / [F] 진입 숙성**) |
+| 9 | `python test_patch_20260806.py` | **104건 전원 통과** (🔴 **[A] 시가 절단 / [B] 버스트 side / [C] 등락률 하한 / [D] 상승이탈 OFF / [E] 눌림 슬롯0 / [F] 진입 숙성**) |
 | 10 | `python test_live_20260805.py` | **63건 전원 통과** (⚠️ 실전 전환 감사 — 모의 하드코딩/예수금 필드/**기존 보유 불가침**/매수금액 3곳 정합/노출한도) |
-| 11 | `python audit_20260805.py` | **130건 전원 통과** (⚠️ **경로별 오작동 감사** — 잘못된 매수/매도 + **문서↔코드 정합성** + 청산 충돌 매트릭스 + **죽은 슬롯 불변식**) |
+| 11 | `python audit_20260805.py` | **133건 전원 통과** (⚠️ **경로별 오작동 감사** — 잘못된 매수/매도 + **문서↔코드 정합성** + 청산 충돌 매트릭스 + **죽은 슬롯 불변식**) |
 | 12 | `git log --oneline -5` | 최신 커밋이 `c3cc37c` 이후인지 |
 | 13 | `git status --short` | 비어 있어야 정상(작업 중이면 예외) |
 
-**합계 1,183건 전원 통과**(295 + 89 + 126 + 66 + 164 + 24 + 142 + 85 + 63 + 130).
+**합계 1,202건 전원 통과**(295 + 89 + 126 + 66 + 164 + 24 + 142 + 104 + 63 + 133).
 하나라도 실패하면 그 지점부터 원인 추적.
 **2026-08-06 15:00 실행으로 검증한 값이다.**
 
@@ -2464,7 +2520,7 @@ with get_connection() as c:
 - ⚠️ 6번의 `이관 플래그가 남아있지 않음`은 **코드 결함이 아니라 환경 상태** 검사다.
   프로젝트 루트에 `NEW_SESSION_REQUESTED`가 있으면 **실패로 뜨는 게 정상**이다
   (이관작업 직후 일부러 만들어 둔 것 — 다음 원격 세션 1회만 새 대화로 시작하고
-  플래그는 즉시 삭제된다). 그 경우 합계는 **1,182건 통과 / 실패 1건**이 된다.
+  플래그는 즉시 삭제된다). 그 경우 합계는 **1,201건 통과 / 실패 1건**이 된다.
   그 외의 실패는 전부 실제 결함으로 볼 것.
 
 - ⚠️ **4번(통합)이 가장 중요하다.** 2·3번이 전부 통과하는 상태에서도 08-03에
@@ -2480,7 +2536,7 @@ with get_connection() as c:
 
 설정값이 의도대로인지 한 번에 보는 명령:
 ```
-python -c "import core.strategy_manager as s; from core.order_manager import FORCE_CLOSE_TIME; print('1A', s.GROUP_A_START, '~', s.PHASE1A_END); print('PB', s.PULLBACK_START, '~', s.PULLBACK_END); print('중복전환', s.DUAL_SOURCE_PULLBACK_FROM); print('청산', FORCE_CLOSE_TIME); print('슬롯', s.PHASE1A_MAX_SLOTS, s.PULLBACK_MAX_SLOTS, s.MAX_HOLDINGS, s.MAX_HOLDINGS_HARD); print('무장', s.TICK_STRENGTH_MIN, s.TICK_STRENGTH_SUSTAIN_SEC); print('버스트', s.PHASE1A_BURST_TRADE_VALUE, s.PHASE1A_BURST_TRADE_COUNT, s.PHASE1A_SINGLE_TRADE_VALUE); print('버스트방향', s.BURST_REQUIRE_BUY_SIDE); print('시간계수', sorted(set(v for _,v in s.TICK_BURST_TIME_MULT))); print('되돌림', s.ENTRY_PULLBACK_ENABLED, s.ENTRY_PULLBACK_TRANCHES, s.ENTRY_PULLBACK_TIMEOUT_SEC); print('상승이탈', s.ENTRY_BREAKOUT_ENABLED, s.ENTRY_BREAKOUT_PCT); print('등락률하한', s.MIN_ENTRY_CHANGE_PCT); print('진입숙성', s.MIN_ENTRY_DELAY_SEC); print('분할매도', s.PARTIAL_EXIT_ENABLED, s.PARTIAL_EXIT_FRACTION, s.PARTIAL_EXIT_TRAIL); print('지수가드', s.INDEX_GUARD_THRESHOLD, s.INDEX_GUARD_FROM, s.INDEX_GUARD_BREAKEVEN_UNTIL, s.INDEX_GUARD_FORCE_CLOSE); print('캡', s.TAKE_PROFIT_CAP, s.TAKE_PROFIT_CAP_PULLBACK, s.TAKE_PROFIT_CAP_EARLY, s.TP_CAP_UPGRADED_MAX); print('본전스톱', s.BREAKEVEN_STOP_ENABLED); print('1B잔재', hasattr(s, 'PHASE1B_ENABLED')); print('틱구동', s.TICK_ENTRY_ENABLED)"
+python -c "import core.strategy_manager as s; from core.order_manager import FORCE_CLOSE_TIME; print('1A', s.GROUP_A_START, '~', s.PHASE1A_END); print('PB', s.PULLBACK_START, '~', s.PULLBACK_END); print('중복전환', s.DUAL_SOURCE_PULLBACK_FROM); print('청산', FORCE_CLOSE_TIME); print('슬롯', s.PHASE1A_MAX_SLOTS, s.PULLBACK_MAX_SLOTS, s.MAX_HOLDINGS, s.MAX_HOLDINGS_HARD); print('무장', s.TICK_STRENGTH_MIN, s.TICK_STRENGTH_SUSTAIN_SEC); print('버스트', s.PHASE1A_BURST_TRADE_VALUE, s.PHASE1A_BURST_TRADE_COUNT, s.PHASE1A_SINGLE_TRADE_VALUE); print('버스트방향', s.BURST_REQUIRE_BUY_SIDE); print('시간계수', sorted(set(v for _,v in s.TICK_BURST_TIME_MULT))); print('되돌림', s.ENTRY_PULLBACK_ENABLED, s.ENTRY_PULLBACK_TRANCHES, s.ENTRY_PULLBACK_TIMEOUT_SEC); print('상승이탈', s.ENTRY_BREAKOUT_ENABLED, s.ENTRY_BREAKOUT_PCT); print('등락률하한', s.MIN_ENTRY_CHANGE_PCT); print('진입숙성', s.MIN_ENTRY_DELAY_SEC); print('파동상한', s.BURST_WAVE_MAX); print('분할매도', s.PARTIAL_EXIT_ENABLED, s.PARTIAL_EXIT_FRACTION, s.PARTIAL_EXIT_TRAIL); print('지수가드', s.INDEX_GUARD_THRESHOLD, s.INDEX_GUARD_FROM, s.INDEX_GUARD_BREAKEVEN_UNTIL, s.INDEX_GUARD_FORCE_CLOSE); print('캡', s.TAKE_PROFIT_CAP, s.TAKE_PROFIT_CAP_PULLBACK, s.TAKE_PROFIT_CAP_EARLY, s.TP_CAP_UPGRADED_MAX); print('본전스톱', s.BREAKEVEN_STOP_ENABLED); print('1B잔재', hasattr(s, 'PHASE1B_ENABLED')); print('틱구동', s.TICK_ENTRY_ENABLED)"
 ```
 기대값(**2026-08-06 [A][B][C][D] 수정 기준**):
 ```
@@ -2493,6 +2549,7 @@ python -c "import core.strategy_manager as s; from core.order_manager import FOR
 상승이탈 False 0.003   <- [D] 08-06에 OFF. 폭 상수는 보존(되살릴 때 재사용)
 등락률하한 0.0        <- [C] 전일종가 대비 이 값 '초과'여야 매수 (= +일 때만)
 진입숙성 60.0         <- [F] 편입 후 이 초가 지나야 매수(급한 진입 차단)
+파동상한 3            <- [H] 그날 그 종목의 4번째 이후 거래대금 폭발은 매수 안 함
 분할매도 True 0.5 0.03
 지수가드 -5.0 11:00:00 11:30:00 14:50:00
 캡 0.04 0.025 0.025 0.06      본전스톱 True   1B잔재 False   틱구동 True
@@ -2620,6 +2677,7 @@ python -c "import core.strategy_manager as s; print('주가계수', s.BURST_PRIC
 | **시가대비 6~8% 버스트 강화** | 버스트 문턱 **x1.5** (매수를 막지 않고 대금만 더 요구) | 동일 |
 | 슬롯 | **8** | **0** — [E] 매매 중단(공유 상한 6, 확장 8) |
 | **진입 숙성** | 편입 후 **60초** 경과해야 매수 (2026-08-06 [F]) | 동일 |
+| **버스트 파동 상한** | 그날 그 종목의 **1~3번째 폭발**까지만 매수 (2026-08-06 [H]) | 동일 |
 | 중복 편입 시 | ~10:30 | 10:30~ |
 | 익절 캡 | **4.0%** (개장초반 2.5%) | **2.5%** |
 | 상향 캡(강도상승/주도테마) | **6.0%** | 6.0% |
@@ -3045,6 +3103,7 @@ for ts, price, _, volume in d          # <- 이 '_'가 side다. 버려졌다.
 | **[D] 상승 이탈** | 현재 **OFF**. 되살리려면 `ENTRY_BREAKOUT_ENABLED = True` (폭 `ENTRY_BREAKOUT_PCT` 0.003은 보존돼 있다) |
 | **[E] 눌림목 매매** | `PULLBACK_MAX_SLOTS = 4` **+ `PHASE1A_MAX_SLOTS = 4`** — ⚠️ **반드시 둘 다**. 눌림만 되살리고 1A를 8로 두면 1A가 6칸을 독식한다 |
 | **[F] 진입 숙성** | `MIN_ENTRY_DELAY_SEC = 0.0` -> 편입 즉시 매수 가능(08-05까지의 동작) |
+| **[H] 파동 상한** | `BURST_WAVE_MAX = 999` -> 파동 제한 없음. 쿨다운은 `BURST_WAVE_COOLDOWN_SEC`(60초) |
 | **되돌림 끄기(즉시매수)** | `ENTRY_PULLBACK_ENABLED = False` / 폭은 `ENTRY_PULLBACK_TRANCHES` |
 | **시가대비 상한** | `PHASE1A_LEADING_OPEN_SURGE_CAP`(8.0, 구값 5.0) |
 | **급등 버스트 강화** | `PHASE1A_OPEN_SURGE_STRICT_FROM`(6.0) / `PHASE1A_OPEN_SURGE_BURST_MULT`(1.5). 배수 1.0이면 무효 |
