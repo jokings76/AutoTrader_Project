@@ -35,7 +35,7 @@ from utils.price_helper import add_ticks, round_to_tick
 #    **예수금이 실질적인 슬롯 상한으로 작동**한다는 점이 달라졌다.
 #    실측 동시보유는 최대 2/6(08-03)이라 통상은 도달하지 않는다.
 # ⚠️ 슬롯 개수·tier 배수·MDD 한도는 **모의와 동일하게 유지**한다(사용자 지정).
-BUY_AMOUNT_PER_STOCK = 2_000_000
+BUY_AMOUNT_PER_STOCK = 1_000_000
 MAX_POSITIONS = 8  # 동시 보유 최대 종목수 (strategy_manager.MAX_HOLDINGS_HARD와 일치,
                    # 2026-07-31 확장 슬롯 도입으로 6->8. 평상시 상한 6은 전략 쪽에서 관리)
 BUY_COOLDOWN_SEC = 300  # 같은 종목 재매수 쿨다운 (5분)

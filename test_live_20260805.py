@@ -272,9 +272,12 @@ from core.order_manager import BUY_AMOUNT_PER_STOCK
 check("POSITION_AMOUNT == DEFAULT_BASE_AMOUNT == BUY_AMOUNT_PER_STOCK",
       SM.POSITION_AMOUNT == DEFAULT_BASE_AMOUNT == BUY_AMOUNT_PER_STOCK,
       f"{SM.POSITION_AMOUNT:,} / {DEFAULT_BASE_AMOUNT:,} / {BUY_AMOUNT_PER_STOCK:,}")
-# (2026-08-05 장마감 후 사용자 지정) 50만 -> 200만원 환원.
-check("종목당 기본 매수금액 200만원", SM.POSITION_AMOUNT == 2_000_000,
-      f"{SM.POSITION_AMOUNT:,}원")
+# 08-05: 50만 -> 200만 환원 / **08-06: 200만 -> 100만 축소**(사용자 지정,
+# 진입 신호 우위 재검증 기간의 관찰 비용 절반). 금액 자체는 사용자 결정이라
+# 특정 값을 못박지 않고 **3곳 일치**와 안전 범위만 검사한다 — 그래야 금액을
+# 바꿀 때마다 테스트가 깨지지 않는다(수치 하드코딩 금지 규칙).
+check("매수금액이 상식적 범위(10만~1,000만원)",
+      100_000 <= SM.POSITION_AMOUNT <= 10_000_000, f"{SM.POSITION_AMOUNT:,}원")
 
 # 조건검색식 주가 상한(150,000원)에서도 트랜치가 1주 이상을 사는가.
 # final_weight는 [0.3, 2.0]로 클리핑되고, 되돌림 1차 트랜치는 50%.

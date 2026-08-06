@@ -18,7 +18,7 @@ COMMON = {
     #    ② portfolio_optimizer.DEFAULT_BASE_AMOUNT — **실제로 이게 우선 적용된다**
     #       (main.py가 PortfolioOptimizer(rest_api=...)로 base_amount를 안 넘김)
     #    ③ order_manager.BUY_AMOUNT_PER_STOCK — 레거시 경로
-    "position_amount": 2_000_000,
+    "position_amount": 1_000_000,
     "max_holdings": 6,                  # 평상시 상한 (1A/Pullback/1B/1L 공유)
     "max_holdings_hard": 8,             # 확장 포함 절대 상한 (2026-07-31)
                                         # 평소엔 6개만 쓰고, 점수가 컷라인을 크게

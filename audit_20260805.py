@@ -92,8 +92,10 @@ check("지연 import 심볼 전수 실존", not missing, ", ".join(missing))
 # ──────────────────────────────────────────────────────────────
 section("[2] 오늘 바뀐 수치 — 정확성")
 # ──────────────────────────────────────────────────────────────
-check("매수금액 3곳 일치 = 200만원",
-      SM.POSITION_AMOUNT == DEFAULT_BASE_AMOUNT == BUY_AMOUNT_PER_STOCK == 2_000_000,
+# 금액 자체는 사용자 결정 사항이라 값을 못박지 않는다(08-05 200만 -> 08-06 100만).
+# 감사가 지켜야 할 불변식은 **3곳이 어긋나지 않는 것**이다 — 실제 사고가 그거였다.
+check("매수금액 3곳 일치",
+      SM.POSITION_AMOUNT == DEFAULT_BASE_AMOUNT == BUY_AMOUNT_PER_STOCK,
       f"{SM.POSITION_AMOUNT:,} / {DEFAULT_BASE_AMOUNT:,} / {BUY_AMOUNT_PER_STOCK:,}")
 check("버스트 주가 스케일 상수",
       (SM.BURST_PRICE_REF, SM.BURST_PRICE_ALPHA,
