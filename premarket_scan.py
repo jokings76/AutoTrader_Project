@@ -72,7 +72,16 @@ OUT_DIR = os.path.join("observations", "premarket")
 # 종목이면 "HTS 조건식이 관심을 보인 적 있는 모집단"이라 충분히 좁고,
 # 우리가 실제로 살 수 있는 종목과 겹친다.
 UNIVERSE_DAYS = 5           # 최근 며칠치 편입 로그를 볼지
-UNIVERSE_MAX = 220          # REST 상한(0.6초 간격이라 220콜 ≈ 2분 20초)
+UNIVERSE_MAX = 400          # REST 상한(0.6초 간격이라 400콜 ≈ 4분)
+
+# 수동 목록 — **다윤님이 직접 넣는 곳**. 한 줄에 종목코드 하나(6자리).
+# `#` 뒤는 주석. 여기 넣은 종목은 눌림이 아니어도 판정 결과를 기록한다
+# (왜 후보가 아닌지를 봐야 감이 생긴다).
+MANUAL_FILE = "watchlist_premarket.txt"
+
+# 거래량 급증 상위(ka10023) — 눌림의 D0(폭발일)를 **직접 겨냥**하는 소스다.
+# 조건검색 이력만 쓰면 "이미 조건검색에 걸린 종목"만 보는 순환 논리가 된다.
+SURGE_PER_MARKET = 70       # 시장별 상위 몇 개까지 볼지(200개 중)
 
 # ── 등급 경계 (⚠️ 가설이다. Phase 0에서 검증할 대상) ─────────────
 # 돌파선까지의 거리 = (돌파선 - 전일종가) / 전일종가
@@ -126,17 +135,89 @@ def build_universe(today: str) -> dict:
 
     recent = sorted(dates)[-UNIVERSE_DAYS:]
     uni = {c: e for c, e in seen.items() if e["days"] & set(recent)}
-    # 최근에 자주 걸린 종목 우선 — REST 상한에 걸릴 때 무엇을 버릴지의 기준
-    ranked = sorted(uni.items(),
-                    key=lambda kv: (kv[1]["last"], len(kv[1]["days"])), reverse=True)
-    if len(ranked) > UNIVERSE_MAX:
+    for e in uni.values():
+        e["src"] = "조건검색"
+    return uni, recent
+
+
+def load_manual() -> dict:
+    """수동 목록(`watchlist_premarket.txt`) — 다윤님이 직접 넣는 곳.
+
+    한 줄에 6자리 종목코드. `#` 뒤는 주석. 파일이 없으면 그냥 비어 있다.
+    HTS 관심그룹을 읽는 API 대신 파일을 쓰는 이유:
+      · 키움 REST에 관심종목 조회 TR이 있는지 불확실하고, 있어도 HTS 설정에
+        묶이면 "왜 안 읽히는지"를 장전에 디버깅해야 한다.
+      · 파일은 실패할 구석이 없고, 편집하면 다음 날 바로 반영된다.
+    """
+    out = {}
+    if not os.path.exists(MANUAL_FILE):
+        return out
+    try:
+        for line in io.open(MANUAL_FILE, encoding="utf-8"):
+            code = line.split("#")[0].strip()
+            if len(code) == 6 and code.isalnum():
+                out[code] = {"name": code, "conds": [], "days": [],
+                             "last": "", "src": "수동"}
+    except Exception:
+        logger.exception("장전스캔: 수동 목록 읽기 실패(무시하고 계속)")
+    return out
+
+
+def load_surge(rest) -> dict:
+    """거래량 급증 상위(ka10023) — 눌림의 **D0(폭발일)를 직접 겨냥**한다.
+
+    조건검색 이력만 쓰면 '이미 조건검색에 걸린 종목'만 보는 순환 논리가 된다.
+    이 소스는 그 밖을 본다 — 즉 **"조건검색이 놓친 눌림이 있었나"**를
+    측정할 수 있게 해주는 대조군이다.
+    시장별 200개가 오는데 상위는 ETF·초대형주라 자기 대비 급증이 아니다.
+    실패해도 조용히 빈 dict — 이 소스가 없다고 스캔이 죽으면 안 된다.
+    """
+    out = {}
+    for mrkt, lab in (("001", "코스피"), ("101", "코스닥")):
+        try:
+            res = rest._request("/api/dostk/rkinfo", "ka10023",
+                                {"mrkt_tp": mrkt, "sort_tp": "1", "tm_tp": "2",
+                                 "trde_qty_tp": "5", "stk_cnd": "0",
+                                 "pric_tp": "0", "stex_tp": "1"})
+            rows = (res.get("trde_qty_sdnin") or [])[:SURGE_PER_MARKET]
+            for x in rows:
+                code = (x.get("stk_cd") or "").strip()
+                if len(code) == 6:
+                    out.setdefault(code, {"name": (x.get("stk_nm") or code).strip(),
+                                          "conds": [], "days": [], "last": "",
+                                          "src": "거래량급증"})
+            logger.info("장전스캔: 거래량급증 %s %d개", lab, len(rows))
+        except Exception:
+            logger.exception("장전스캔: 거래량급증(%s) 조회 실패(무시)", lab)
+    return out
+
+
+def merge_universe(*sources) -> dict:
+    """앞쪽 소스가 우선. 같은 종목이면 출처를 합쳐 기록한다."""
+    out = {}
+    for src in sources:
+        for code, e in src.items():
+            if code in out:
+                cur = out[code]
+                if e.get("src") and e["src"] not in cur["src"]:
+                    cur["src"] = f"{cur['src']}+{e['src']}"
+                if cur["name"] in ("", code, "조건검색") and e.get("name"):
+                    cur["name"] = e["name"]
+            else:
+                out[code] = dict(e)
+    for e in out.values():
+        e["conds"] = sorted(e.get("conds") or [])
+        e["days"] = sorted(e.get("days") or [])
+    if len(out) > UNIVERSE_MAX:
+        # 자를 땐 조건검색·수동을 남긴다 — 봇이 실제로 살 수 있는 쪽이 우선
+        pri = {"수동": 0, "조건검색": 1}
+        keep = sorted(out.items(),
+                      key=lambda kv: (pri.get(kv[1]["src"].split("+")[0], 2),
+                                      kv[1]["last"]), reverse=False)[:UNIVERSE_MAX]
         logger.warning("장전스캔: 유니버스 %d개 -> 상한 %d개로 자름",
-                       len(ranked), UNIVERSE_MAX)
-        ranked = ranked[:UNIVERSE_MAX]
-    for _, e in ranked:
-        e["conds"] = sorted(e["conds"])
-        e["days"] = sorted(e["days"])
-    return dict(ranked), recent
+                       len(out), UNIVERSE_MAX)
+        out = dict(keep)
+    return out
 
 
 # ════════════════════════════════════════════════════════════════
@@ -216,6 +297,7 @@ def scan(rest, uni: dict, now_dt: datetime) -> tuple[list, dict]:
         out.append({
             "code": code,
             "name": meta["name"],
+            "src": meta.get("src", "?"),          # 조건검색 / 거래량급증 / 수동
             "conds": meta["conds"],
             "last_seen": meta["last"],
             "grade": grade(dist, liq),
@@ -347,8 +429,11 @@ def render(today: str, cands: list, rv: dict | None, uni_n: int, days: list) -> 
         for c in sub[:12]:
             dp = f"{c['dist_pct']:+.1f}%" if c["dist_pct"] is not None else "-"
             dr = "/".join(f"{d*100:.0f}" for d in c["drops"]) or "-"
+            # 출처 표시 — 조건검색 밖(급증/수동)은 봇이 못 살 수도 있다.
+            mark = {"조건검색": "", "거래량급증": " ⚠️급증만", "수동": " ✋수동"}.get(
+                c.get("src", ""), f" [{c.get('src','')}]")
             L.append(f"  {c['name'][:9]}({c['code']}) 돌파선 {c['breakout_line']:,} "
-                     f"({dp}) D-{c['gap']} 눌림{dr}% {c['liq_eok']:.0f}억")
+                     f"({dp}) D-{c['gap']} 눌림{dr}% {c['liq_eok']:.0f}억{mark}")
         if len(sub) > 12:
             L.append(f"  … 외 {len(sub)-12}개")
         L.append("")
@@ -383,15 +468,23 @@ def main() -> int:
     logger.info("장전 일봉 눌림 스캔 시작 (기준일 %s, IS_MOCK=%s)",
                 today, settings.IS_MOCK)
 
-    uni, days = build_universe(today)
+    rest = KiwoomREST(get_access_token(), is_mock=settings.IS_MOCK)
+
+    # 유니버스 3층 — 앞쪽이 우선순위가 높다(상한에 걸리면 뒤쪽부터 잘린다).
+    #   ① 수동      : 다윤님이 직접 넣은 목록
+    #   ② 조건검색   : 최근 편입 이력 = **봇이 실제로 살 수 있는 종목**
+    #   ③ 거래량급증 : 조건검색 밖 = "우리가 놓친 눌림이 있었나"의 대조군
+    log_uni, days = build_universe(today)
+    uni = merge_universe(load_manual(), log_uni, load_surge(rest))
     if not uni:
-        msg = "🔭 장전 스캔: 유니버스가 비었다(편입 로그 없음) — 스캔 생략"
+        msg = "🔭 장전 스캔: 유니버스가 비었다 — 스캔 생략"
         logger.warning(msg)
         if not args.no_send:
             send_telegram(msg, target="signal")
         return 0
+    logger.info("장전스캔: 유니버스 %d개 (%s)", len(uni),
+                dict(Counter(e["src"] for e in uni.values())))
 
-    rest = KiwoomREST(get_access_token(), is_mock=settings.IS_MOCK)
     cands, bars_all = scan(rest, uni, now_dt)
 
     # 직전 스캔 복기 — **가장 최근 파일이 아니라 '채점 가능한' 가장 최근 파일**을
