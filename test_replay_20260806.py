@@ -144,6 +144,11 @@ def setup(strat, code, cond="주도주상위", ask=10_000, open_px=10_000, ripe=
                "ask_volumes": [3_000, 3_000, 3_000]}, now=time.time())
 
 
+# (2026-08-08) 발사 조건이 09:05부터 버스트 -> 거래대금 가속도로 바뀌었다.
+# 픽스처가 **신·구 사양을 모두** 만족하도록 틱 수만 올린다(건당 금액은 그대로).
+_FIRE_N = max(SM.PHASE1A_BURST_TRADE_COUNT, SM.FIRE_ACCEL_MIN_TICKS)
+
+
 def feed(tf, code, n, value_each, now, span=0.5, side="buy", price=10_000):
     vol = max(1, int(value_each // price))
     for i in range(n):
@@ -213,7 +218,7 @@ s1 = build(datetime(2026, 8, 6, 9, 5, 9))
 setup(s1, "058610", open_px=113_700)
 now1 = time.time()
 s1._strength_since["058610"] = now1 - 1.6      # 에스피지 실측 1.6초
-feed(s1.phase1b.trade_flow, "058610", 2,
+feed(s1.phase1b.trade_flow, "058610", _FIRE_N,
      SM.PHASE1A_BURST_TRADE_VALUE * SM.burst_price_scale(117_800) * 1.2,
      now=now1, price=117_800)
 ok1, info1 = s1.evaluate_tick_entry("058610", "1A", 117_800,
@@ -225,7 +230,7 @@ s2 = build(datetime(2026, 8, 6, 9, 10, 13))
 setup(s2, "004310", open_px=5_925)
 now2 = time.time()
 s2._strength_since["004310"] = now2 - 81.1     # 현대약품 실측 81.1초
-feed(s2.phase1b.trade_flow, "004310", 2,
+feed(s2.phase1b.trade_flow, "004310", _FIRE_N,
      SM.PHASE1A_BURST_TRADE_VALUE * SM.burst_price_scale(6_120) * 1.2,
      now=now2, price=6_120)
 ok2, info2 = s2.evaluate_tick_entry("004310", "1A", 6_120,
@@ -266,7 +271,7 @@ s5 = build(datetime(2026, 8, 6, 9, 18, 21), change_rate=11.50)
 setup(s5, "073240", open_px=7_200)            # 진짜 시가(ka10001 확정)
 now5 = time.time()
 s5._strength_since["073240"] = now5 - 22.3
-feed(s5.phase1b.trade_flow, "073240", 2,
+feed(s5.phase1b.trade_flow, "073240", _FIRE_N,
      SM.PHASE1A_BURST_TRADE_VALUE * SM.burst_price_scale(8_210) * 1.5,
      now=now5, price=8_210)
 ok5, info5 = s5.evaluate_tick_entry("073240", "1A", 8_210,
@@ -343,7 +348,7 @@ waves = []
 for i in range(6):
     at = now9 + i * 120          # 쿨다운(60초)보다 크게 -> 매번 새 파동
     s9._strength_since["WV"] = at - 10
-    feed(s9.phase1b.trade_flow, "WV", 2,
+    feed(s9.phase1b.trade_flow, "WV", _FIRE_N,
          SM.PHASE1A_BURST_TRADE_VALUE * 1.3, now=at, price=10_000)
     ok, info = s9.evaluate_tick_entry("WV", "1A", 10_000,
                                       open_price=10_000, now=at)
@@ -372,7 +377,7 @@ s11 = build(datetime(2026, 8, 6, 9, 30, 0))
 setup(s11, "SELLB", open_px=10_000)
 now11 = time.time()
 s11._strength_since["SELLB"] = now11 - 30      # FID228 당일누적이라 급락 중에도 100+
-feed(s11.phase1b.trade_flow, "SELLB", 4,
+feed(s11.phase1b.trade_flow, "SELLB", _FIRE_N,
      SM.PHASE1A_BURST_TRADE_VALUE * 2.0, now=now11, price=10_000, side="sell")
 okb, infob = s11.check_burst("SELLB", now=now11)
 check("[실코드] 대량 '매도' 체결만으로는 버스트 미발화", not okb,
@@ -382,7 +387,7 @@ s12 = build(datetime(2026, 8, 6, 9, 30, 0))
 setup(s12, "BUYB", open_px=10_000)
 now12 = time.time()
 s12._strength_since["BUYB"] = now12 - 30
-feed(s12.phase1b.trade_flow, "BUYB", 4,
+feed(s12.phase1b.trade_flow, "BUYB", _FIRE_N,
      SM.PHASE1A_BURST_TRADE_VALUE * 2.0, now=now12, price=10_000, side="buy")
 okb2, _ = s12.check_burst("BUYB", now=now12)
 check("[실코드·대조군] 같은 규모가 '매수'면 정상 발화", okb2)

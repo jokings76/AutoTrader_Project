@@ -582,6 +582,12 @@ if _doc:
     doc_has("등락률하한", f"등락률하한 {SM.MIN_ENTRY_CHANGE_PCT}")
     doc_has("상승이탈", f"상승이탈 {SM.ENTRY_BREAKOUT_ENABLED} {SM.ENTRY_BREAKOUT_PCT}")
     doc_has("버스트방향", f"버스트방향 {SM.BURST_REQUIRE_BUY_SIDE}")
+    # (2026-08-08 신규) 발사 게이트 시간대 분리 — 매수를 만드는 조건이 통째로
+    # 바뀌는 상수라 문서와 어긋나면 장중 판단이 불가능해진다.
+    doc_has("발사분리", f"발사분리 {SM.FIRE_GATE_SPLIT_ENABLED} "
+                     f"{SM.FIRE_GATE_ACCEL_FROM} {SM.FIRE_ACCEL_MIN} "
+                     f"{SM.FIRE_ACCEL_SHORT_SEC} {SM.FIRE_ACCEL_LONG_SEC} "
+                     f"{SM.FIRE_ACCEL_MIN_TICKS}")
 
     # 주가계수 예시표 — 문서에 적힌 배수가 실제와 같은가
     for px in (1_000, 2_000, 10_000, 50_000, 150_000):
@@ -728,14 +734,17 @@ check("같은 함수가 하한(-2%)을 거절", _lo is not None and "하한" in 
 _src_entry = inspect.getsource(SM.StrategyManager._maybe_tick_entry)
 check("_maybe_tick_entry에 무장 확인 존재", "update_strength_timer" in _src_entry)
 check("_maybe_tick_entry에 되돌림 계획 존재", "_open_entry_plan" in _src_entry)
-# ⚠️ 버스트는 evaluate_tick_entry를 **거쳐** 호출된다. 소스 문자열로 찾으면
+# ⚠️ 발사 판정은 evaluate_tick_entry를 **거쳐** 호출된다. 소스 문자열로 찾으면
 #    없다고 나온다(실제로 이 감사를 쓰다가 한 번 오탐을 냈다).
 #    -> 소스가 아니라 **호출이 실제로 일어나는지**로 검증한다.
+# (2026-08-08) 발사 조건이 시간대로 갈렸다 — check_burst 직접 호출이 아니라
+#    `_fire_gate` 단일 창구를 거쳐야 한다. 여기서 check_burst를 그대로 단언하면
+#    09:05 이전 면제 구간을 감사가 '회귀'로 오판한다.
 _called = {"n": 0}
-_orig = SM.StrategyManager.check_burst
+_orig = SM.StrategyManager._fire_gate
 try:
-    SM.StrategyManager.check_burst = lambda self, *a, **k: (_called.__setitem__("n", _called["n"] + 1),
-                                                            (False, {"reason": "감사스텁"}))[1]
+    SM.StrategyManager._fire_gate = lambda self, *a, **k: (_called.__setitem__("n", _called["n"] + 1),
+                                                           (False, {"reason": "감사스텁"}))[1]
     s_b, _ = build()
     s_b.phase1b.start_watching("CB")
     tfb = s_b.phase1b.trade_flow
@@ -746,9 +755,31 @@ try:
     s_b._armed_at["CB"] = nwb - 5
     s_b.evaluate_tick_entry("CB", "1A", 10_000, now=nwb)
 finally:
-    SM.StrategyManager.check_burst = _orig
-check("진입 평가가 실제로 check_burst를 호출한다", _called["n"] > 0,
+    SM.StrategyManager._fire_gate = _orig
+check("진입 평가가 실제로 발사 게이트(_fire_gate)를 호출한다", _called["n"] > 0,
       f"호출 {_called['n']}회")
+
+# 발사 게이트가 시간대로 갈리는지 — 실제 반환값으로 확인(소스 단언 금지)
+_s_fg, _ = build()
+_s_fg.phase1b.start_watching("FG")
+_ok_early, _d_early = _s_fg._fire_gate(
+    "FG", now=_t.time(), now_dt=datetime(2026, 8, 10, 9, 2, 0))
+_ok_late, _d_late = _s_fg._fire_gate(
+    "FG", now=_t.time(), now_dt=datetime(2026, 8, 10, 9, 6, 0))
+check("09:05 이전은 발사 면제(틱 없이도 통과)", _ok_early is True,
+      str(_d_early.get("trigger")))
+check("09:05 이후는 가속도 판정(틱 없으면 탈락)",
+      _ok_late is False and _d_late.get("fire_gate") == "accel",
+      str(_d_late.get("reason"))[:60])
+check("가속 문턱이 수학적 상한(LONG/SHORT) 미만 — 도달 불가 문턱 방지",
+      SM.FIRE_ACCEL_MIN < SM.FIRE_ACCEL_LONG_SEC / SM.FIRE_ACCEL_SHORT_SEC,
+      f"{SM.FIRE_ACCEL_MIN} < {SM.FIRE_ACCEL_LONG_SEC / SM.FIRE_ACCEL_SHORT_SEC}")
+from core.strategy.trade_flow import TradeFlowTracker as _TFT   # noqa: E402
+check("가속 LONG == 틱버퍼 창(조용한 절단 방지)",
+      SM.FIRE_ACCEL_LONG_SEC == _TFT().max_window_sec,
+      f"{SM.FIRE_ACCEL_LONG_SEC} vs {_TFT().max_window_sec}")
+check("재매수 경로는 여전히 check_burst를 쓴다(발사 교체가 번지지 않았다)",
+      "check_burst" in inspect.getsource(SM.StrategyManager._rebuy_after_loss_ok))
 
 # 전면차단 사유 — 소스 문자열이 아니라 **반환값**으로 검증한다
 check("전면차단 판정이 _entry_block_reason 단일 창구",

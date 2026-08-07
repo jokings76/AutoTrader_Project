@@ -118,6 +118,12 @@ class _OrderMgr:
     def get_stock_name(self, code): return code
 
 
+# (2026-08-08) 발사 조건이 09:05부터 버스트 -> 거래대금 가속도로 바뀌었다.
+# 픽스처가 **신·구 사양을 모두** 만족하도록 틱 수만 올린다(건당 금액은 그대로라
+# 롤백해도 옛 버스트 경로가 그대로 성립한다). 수치를 박지 않고 상수를 따라간다.
+_FIRE_N = max(SM.PHASE1A_BURST_TRADE_COUNT, SM.FIRE_ACCEL_MIN_TICKS)
+
+
 def build(now_dt=datetime(2026, 8, 6, 9, 30, 0), change_rate=3.0):
     SM.TradeRepository = _Repo
     SM.WatchListRepository = _Repo
@@ -160,7 +166,7 @@ def trigger(strat, code, t0, price=10_000):
     """무장(1.5초) + 버스트 -> 되돌림 대기 계획 생성까지."""
     tick(strat, code, 130.0, t0, price=price)
     feed(strat.phase1b.trade_flow, code,
-         SM.PHASE1A_BURST_TRADE_COUNT,
+         _FIRE_N,
          SM.PHASE1A_BURST_TRADE_VALUE * SM.burst_price_scale(price) * 1.05,
          now=t0 + 3.5, price=price)
     tick(strat, code, 130.0, t0 + 3.5, price=price)
@@ -664,7 +670,7 @@ ok, info = s11.evaluate_tick_entry("ARM1", "1A", 10_000, now=_n)
 check("2.9초는 무장 미달로 탈락", (not ok) and "미무장" in info.get("reason", ""),
       info.get("reason", "")[:40])
 s11._strength_since["ARM1"] = _n - 3.0
-feed(s11.phase1b.trade_flow, "ARM1", 2, SM.PHASE1A_BURST_TRADE_VALUE * 1.2, _n)
+feed(s11.phase1b.trade_flow, "ARM1", _FIRE_N, SM.PHASE1A_BURST_TRADE_VALUE * 1.2, _n)
 ok2, info2 = s11.evaluate_tick_entry("ARM1", "1A", 10_000, now=_n)
 check("3.0초 + 버스트면 통과", ok2, info2.get("reason", "")[:40])
 

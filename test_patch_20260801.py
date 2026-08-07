@@ -121,6 +121,12 @@ def build_strat(now_dt=datetime(2026, 8, 3, 9, 5, 0)):
     return strat
 
 
+# (2026-08-08) 발사 조건이 09:05부터 버스트 -> 거래대금 가속도로 바뀌었다.
+# 픽스처가 **신·구 사양을 모두** 만족하도록 틱 수만 올린다(건당 금액은 그대로라
+# 롤백해도 옛 버스트 경로가 그대로 성립한다). 수치를 박지 않고 상수를 따라간다.
+_FIRE_N = max(SM.PHASE1A_BURST_TRADE_COUNT, SM.FIRE_ACCEL_MIN_TICKS)
+
+
 def feed(tf, code, n, value_each, side="buy", now=None, span=1.0):
     """가격*수량 = value_each 인 체결 n건을 최근 span초 안에 넣는다."""
     now = now or time.time()
@@ -725,7 +731,7 @@ s.on_trade({"stock_code": "INT1", "price": 10_000, "side": "buy",
 check(f"{SM.TICK_STRENGTH_SUSTAIN_SEC:.1f}초 경과 시 무장 성립", "INT1" in s._armed_at)
 
 # 3.5초 경과 + 그 틱 자체가 대량체결(3천만원 x 2건)
-feed(s.phase1b.trade_flow, "INT1", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5, span=1.0)
+feed(s.phase1b.trade_flow, "INT1", _FIRE_N, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5, span=1.0)
 s.on_trade({"stock_code": "INT1", "price": 10_000, "side": "buy",
             "volume": 3_000, "strength": 130.0}, now=t0 + 3.5)
 check("3초 연속 유지 -> 무장 성립", "INT1" in s._armed_at)
@@ -773,7 +779,7 @@ s2.on_trade({"stock_code": "RST1", "price": 10_000, "side": "sell",
              "volume": 10, "strength": 88.0}, now=t0 + 1.0)
 check("강도가 100 밑으로 떨어지면 연속 타이머 리셋",
       "RST1" not in s2._strength_since)
-feed(s2.phase1b.trade_flow, "RST1", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 4.0, span=1.0)
+feed(s2.phase1b.trade_flow, "RST1", _FIRE_N, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 4.0, span=1.0)
 s2.on_trade({"stock_code": "RST1", "price": 10_000, "side": "buy",
              "volume": 3_000, "strength": 130.0}, now=t0 + 4.0)
 check("리셋 후엔 버스트가 와도 매수 안 됨(3초 다시 채워야 함)",
@@ -853,7 +859,7 @@ _t = time.time()
 s4._first_seen["FAST"] = _t - 999   # [F] 숙성 완료 상태
 # 무장만 시켜두고(버스트는 아직) 슬롯이 꽉 찼다가 풀린 상황을 가정
 s4._strength_since["FAST"] = _t - 5.0
-feed(s4.phase1b.trade_flow, "FAST", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=_t, span=1.0)
+feed(s4.phase1b.trade_flow, "FAST", _FIRE_N, SM.PHASE1A_BURST_TRADE_VALUE, now=_t, span=1.0)
 s4.api.calls.clear()
 n = try_watchlist_reentry(s4, s4._now())
 # (2026-08-04) 폴링 경로도 즉시 사지 않고 **되돌림 대기 계획**을 연다.
@@ -977,7 +983,7 @@ s.candidate_tier = lambda c: (tier_calls.append(c), orig_tier(c))[1]
 s.phase1b.start_watching("FREE")
 s.phase1b.orderbook.update("FREE", {"ask_prices": [10_000, 10_010, 10_020],
                                     "ask_volumes": [3_000, 3_000, 3_000]}, now=now)
-feed(s.phase1b.trade_flow, "FREE", 3, SM.PHASE1A_BURST_TRADE_VALUE)
+feed(s.phase1b.trade_flow, "FREE", _FIRE_N, SM.PHASE1A_BURST_TRADE_VALUE)
 s._cond_names["FREE"] = "주도주상위"
 s._first_seen["FREE"] = time.time() - 999   # [F] 숙성 완료
 # (2026-08-02) 무장(강도 100+ 3초 연속)이 진입의 선행조건 — 버스트만으로는 안 산다.

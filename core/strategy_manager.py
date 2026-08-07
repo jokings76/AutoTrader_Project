@@ -834,6 +834,68 @@ DAILY_PULLBACK_MIN_BARS = 2         # 눌림 구간 최소 봉 수(D+1,D+2)
 BURST_WAVE_MAX = 3
 BURST_WAVE_COOLDOWN_SEC = 60.0   # 이 간격 안의 연속 발화는 같은 파동으로 본다
 
+# ── 발사 게이트 시간대 분리 (2026-08-08 신규, 사용자 지정) ─────────────
+# 09:00~09:05는 **버스트를 끄고**, 09:05부터는 버스트 대신 **거래대금 가속도**를
+# 발사 조건으로 쓴다. 무장(FID228)·숙성·등락률·VWAP·파동 상한·되돌림 대기는
+# 전 구간 **그대로**다 — 이 상수가 바꾸는 것은 '발사' 한 칸뿐이다.
+#
+# [측정] 틱 아카이브 5일(08-03/04/05/06/07) 146 종목·일, 09:02~09:10,
+#   +5분 지평. 기준선은 **시간 균등** 격자(틱 인덱스 균등 금지 — 활발한 순간을
+#   과대표집해 기준선이 인위적으로 낮아진다). 평가는 **종목·일당 첫 신호 1건**
+#   (독립표본) — 봇이 조건 성립 '첫 순간'에 발화하므로 이것이 동형이다:
+#       규칙                        n     평균      수수료후   플러스일
+#       [기준선] 그냥 매수         146   +0.395%   +0.165%    4/5
+#       현행 버스트                 28   -0.349%   -0.579%   **1/5**
+#       버스트 AND VWAP AND 강도     9   -1.394%      —        1/4
+#       09:02~09:05 버스트만        12   -0.895%   -1.125%    1/3
+#       09:05~ 가속 2.5             54   +0.688%   +0.458%  **4/5**
+#   즉 버스트는 무해한 게 아니라 **기준선보다 0.74%p 나쁘고**, VWAP·강도를
+#   AND로 얹으면 **더 나빠진다**(그래서 '가속도를 더한다'가 아니라 '버스트를
+#   대체한다'이다 — 버스트 AND 가속2.0은 -1.071%p / 0승 4패였다).
+#
+# ⚠️ **절대 대금 하한을 두지 않는다.** 08-08 이관 문서의 항목 Q는 "가속도엔
+#    하한이 없어 저유동에서 튄다 -> 하한을 같이 둘 것"이라 적었으나 **실측이
+#    정반대**다(하한 없음 +0.218% / 1억 -0.049% / 3억 -0.217% / 5억 -0.572%,
+#    전부 단조 악화). 절대 금액이 클수록 나쁘다는 점에서 버스트가 음수인 것과
+#    같은 기전이다 — 큰돈이 이미 들어온 자리는 늦은 자리다.
+#
+# ⚠️ 격자 평균으로 보면 결론이 뒤집힌다(VWAP AND 가속2.0: 격자 +0.531%p인데
+#    독립표본 -0.046%). '조건 성립 구간의 평균'과 '조건 성립 첫 순간'은 다른
+#    숫자다 — 이 프로젝트가 반복 확인한 "트리거 시점은 국소 고점" 그대로다.
+#    **앞으로 진입 규칙 평가는 반드시 독립표본(첫 신호)으로 할 것.**
+#
+# [한계] 09:00~09:15 창뿐이고(+5분 지평이라 09:10까지만 평가 가능),
+#   **무장은 검증하지 못했다** — 아카이브에 FID228이 없어 틱룰 30초 강도로
+#   근사했고 성격이 상당히 다르다. 5일 146 종목·일이며 반사실(버스트를 빼면
+#   다른 종목이 그 슬롯을 채웠을 경우)은 재현되지 않았다.
+FIRE_GATE_SPLIT_ENABLED = True      # False -> 전 구간 check_burst (08-07까지의 동작)
+FIRE_GATE_ACCEL_FROM = time(9, 5)   # 이 시각 **이전**에는 발사 게이트를 적용하지 않는다
+FIRE_ACCEL_MIN = 2.5                # 이 시각 이후 요구 배수 (사용자 지정)
+FIRE_ACCEL_SHORT_SEC = 30.0
+FIRE_ACCEL_LONG_SEC = 120.0
+# 🔴 최소 틱수 가드 — **금액 하한이 아니라 개수 하한이다**(둘을 혼동하지 말 것).
+# [발견 경위] 08-08 구현 중 기존 테스트(test_patch_20260802 무장 TTL 2건)가
+#   잡아냈다. 120초 창에 틱이 2개뿐인데 둘 다 최근 30초에 있으면 가속도가
+#   **수학적 최대 4.0**이 되어 무조건 발화한다. 즉 **데이터가 없을수록 쉽게
+#   뚫리는 구조**이며, 이는 `compute_strength`가 틱 부족 시 중립값 100.0을
+#   돌려주는데 임계값도 100이라 그냥 통과하던 것과 **같은 실패 모드**다
+#   (07-31에 보유종목이 매수 66초 만에 잘려나간 사고의 원인).
+# [실측] 아카이브 5일 09:05~09:10 독립표본에서 가드는 **거의 공짜다**:
+#     하한 없음 n=54 +0.688% / >=20틱 n=53 +0.754% / >=30틱 n=50 +0.741%
+#     (전부 플러스일 4/5. 20틱 가드가 걸러내는 건 54건 중 1건뿐이다.)
+#   반면 **금액** 하한은 정반대로 해롭다(1억 -0.049% / 3억 -0.217% / 5억 -0.572%).
+#   개수는 '판단할 표본이 있는가'를, 금액은 '큰돈이 이미 들어왔는가'를 본다.
+# 20은 `avg_trade_value(min_ticks=20)`과 같은 값이다 — 같은 이유(표본이 적으면
+# 비율이 우연에 휘둘린다)라 굳이 다른 숫자를 쓰지 않는다.
+FIRE_ACCEL_MIN_TICKS = 20
+# ⚠️ LONG은 TradeFlowTracker(max_window_sec=120)와 **정확히 같아야 한다.**
+#    180/300으로 늘리면 버퍼가 조용히 잘려 **경고 없이 틀린 값**이 나온다.
+# ⚠️ 가속도의 수학적 상한은 LONG/SHORT = 4.0이다(short 구간이 long에 포함되므로).
+#    2.5 = 최근 30초에 2분치 대금의 62.5%가 몰림. 5.0 같은 값은 도달 불가.
+# [문턱별 실측] 2.0 +0.363%(4/5, 하루 20.6종목) / **2.5 +0.688%(4/5, 하루 10.8)** /
+#    3.0 +1.968%(4/5, 하루 5.6) / 3.5 +2.797%(4/5, 하루 4.0).
+#    문턱을 올릴수록 단조 개선이지만 표본이 줄어든다. 2.5는 사용자 지정값이다.
+
 # 신규매수 전면 하드 컷오프. 1A(~14:50)/1L(~10:50)은 자체 시간 윈도우가 있지만
 # 1B(FSM 감시)는 Pullback 미체결 후보를 계속 지켜보다 READY_TO_BUY가 되면 바로
 # 매수해서 자체 종료 시각이 없음 — 장마감(15:30) 직전까지 실시간 틱이 들어오는
@@ -2417,6 +2479,12 @@ class StrategyManager:
     # (분류, 원문에 포함된 문자열들)
     _REJECT_RULES = (
         ("대량체결 부족", ("대량체결 부족",)),
+        # (2026-08-08) 09:05부터 버스트를 대체한 발사 조건. 위 '대량체결 부족'과
+        # **반드시 분리**한다 — 둘이 뭉개지면 발사 규칙이 바뀐 뒤에도 진단이
+        # 옛 이름으로 나와 어느 게이트가 막았는지 판단할 수 없다.
+        # 정상 필터링이므로 인프라 경고(_REJECT_INFRA)가 아니다.
+        # ⚠️ 라벨에 배수를 박지 말 것(상수를 바꿔도 안 따라온다).
+        ("거래대금 가속 미달", ("거래대금 가속",)),
         # (2026-08-02) check_burst의 예외 핸들러가 내는 사유.
         # 이건 '시장에 신호가 없다'가 아니라 **우리 코드가 터졌다**는 뜻이라
         # 반드시 분류해서 인프라 경고로 올린다. 규칙이 없으면 "기타"로 뭉개져,
@@ -2523,6 +2591,10 @@ class StrategyManager:
     _MISS_TIERS = (
         ("🥇", "되돌림 미도달(대기 만료)", "신호 완벽, 가격만 안 옴"),
         ("🥈", "대량체결 부족", "무장 완료, 대금 미달"),
+        # (2026-08-08) 09:05부터 발사 조건이 버스트 -> 거래대금 가속도로 바뀌었다.
+        # 이 줄이 없으면 그 시각 이후의 '무장 완료, 발사만 미달'이 통째로
+        # 놓친기회 알림에서 사라진다(버킷이 라벨 기준이라 조용히 빠진다).
+        ("🥈", "거래대금 가속 미달", "무장 완료, 가속 미달"),
         ("🥉", "강도 미무장(요구시간 미달)", "강도 유지중, 시간 미달"),
         ("⛔", "등락률 상한 초과", "참고만 — 실측 성과 부진"),
     )
@@ -3808,6 +3880,89 @@ class StrategyManager:
             return False, detail
         return True, detail
 
+    def _fire_gate(self, stock_code: str, now: float = None,
+                   now_dt: datetime = None) -> tuple[bool, dict]:
+        """발사 조건 판정 — **시간대에 따라 규칙이 다르다** (2026-08-08 신설).
+
+          · FIRE_GATE_SPLIT_ENABLED=False -> 전 구간 check_burst(08-07까지의 동작)
+          · 09:00 ~ FIRE_GATE_ACCEL_FROM  -> 발사 게이트 **면제**(무장만으로 발사)
+          · FIRE_GATE_ACCEL_FROM ~        -> 거래대금 가속도 >= FIRE_ACCEL_MIN
+
+        근거·한계는 FIRE_GATE_SPLIT_ENABLED 주석 참고. 요약하면 버스트는
+        독립표본에서 기준선보다 나쁘고(플러스일 1/5), 초반 5분에서 특히 나쁘다.
+
+        ⚠️ **check_burst는 그대로 남긴다** — 재매수 판정(`_rebuy_burst_ok`)과
+        슬롯 교체(`slot_replacement`)가 여전히 쓴다. 여기서 갈아끼우는 것은
+        **신규 진입의 발사 조건 하나**뿐이다. 그 둘까지 같이 바꾸면 검증되지
+        않은 경로가 조용히 따라 움직인다(이 코드베이스의 반복 사고 패턴).
+
+        반환 형식은 check_burst와 같다 — 통과 시 `trigger`(진입 사유 문자열),
+        탈락 시 `reason`. 호출부가 두 경로를 구분하지 않아도 되게 맞춘 것이다.
+        """
+        if not FIRE_GATE_SPLIT_ENABLED:
+            return self.check_burst(stock_code, now=now, now_dt=now_dt)
+
+        now_dt = now_dt if now_dt is not None else self._now()
+        if now_dt.time() < FIRE_GATE_ACCEL_FROM:
+            # 개장 초반 — 발사 게이트를 걸지 않는다. '거를 것이 없어서'가
+            # 아니라 **걸수록 나빠져서**다(그 구간 버스트 -0.895% vs 기준선
+            # +0.391%). 리스크는 숙성·등락률·파동 상한·되돌림 대기가 받는다.
+            return True, {
+                "burst_path": "개장초반",
+                "fire_gate": "early_open",
+                "trigger": f"개장초반 발사면제({FIRE_GATE_ACCEL_FROM:%H:%M} 이전)",
+            }
+
+        tf = self.phase1b.trade_flow if (self.phase1b and self.phase1b.trade_flow) else None
+        if tf is None:
+            # check_burst와 같은 사유 문자열을 쓴다 — 인프라 경고(_REJECT_INFRA)로
+            # 분류돼야 하는 상태이므로 새 문구를 만들면 진단에서 사라진다.
+            return False, {"reason": "체결강도 데이터 소스 없음(phase1b 미연결)"}
+
+        try:
+            n_ticks = tf.tick_count(stock_code, FIRE_ACCEL_LONG_SEC, now=now)
+            accel = tf.value_acceleration(
+                stock_code,
+                short_sec=FIRE_ACCEL_SHORT_SEC,
+                long_sec=FIRE_ACCEL_LONG_SEC,
+                now=now,
+            )
+        except Exception:
+            logger.exception("[%s] 거래대금 가속 계산 실패 — 매수 보류", stock_code)
+            return False, {"reason": "버스트 계산 실패"}
+
+        detail = {
+            "fire_gate": "accel",
+            "accel": round(accel, 3),
+            "accel_min": FIRE_ACCEL_MIN,
+            "accel_ticks": n_ticks,
+        }
+        # 🔴 표본이 없으면 가속도는 무조건 최대치(LONG/SHORT)가 나온다 —
+        # '데이터가 없을수록 쉽게 뚫리는' 구조를 여기서 닫는다.
+        # 사유 문자열에 '체결틱 부족'을 넣어 기존 인프라 분류를 그대로 탄다.
+        if n_ticks < FIRE_ACCEL_MIN_TICKS:
+            detail["reason"] = (
+                f"체결틱 부족 (최근 {FIRE_ACCEL_LONG_SEC:.0f}초 {n_ticks}틱 "
+                f"< {FIRE_ACCEL_MIN_TICKS}틱 — 가속 판단 불가)"
+            )
+            return False, detail
+        # 데이터 부족이면 value_acceleration이 0.0을 돌려준다 -> 그대로 탈락.
+        # 여기서는 '모름'을 통과시키지 않는다 — 발사는 매수를 **만드는** 조건이라
+        # 등락률/시가 게이트('모름은 통과')와 방향이 반대여야 한다.
+        if accel < FIRE_ACCEL_MIN:
+            detail["reason"] = (
+                f"거래대금 가속 미달 ({accel:.2f} < {FIRE_ACCEL_MIN:.2f}배, "
+                f"최근 {FIRE_ACCEL_SHORT_SEC:.0f}초/{FIRE_ACCEL_LONG_SEC:.0f}초 균일기대)"
+            )
+            return False, detail
+        detail["burst_path"] = "가속"
+        detail["trigger"] = (
+            f"거래대금 가속 {accel:.2f}배"
+            f"({FIRE_ACCEL_SHORT_SEC:.0f}초/{FIRE_ACCEL_LONG_SEC:.0f}초, "
+            f"기준 {FIRE_ACCEL_MIN:.2f}배)"
+        )
+        return True, detail
+
     def evaluate_tick_entry(
         self, stock_code: str, sub_strategy: str, current_price: float,
         open_price: float = 0.0, cond_name: str = "",
@@ -3828,7 +3983,11 @@ class StrategyManager:
           1) 무장: 체결강도(FID 228) 100 이상 연속 유지  <- 호출부에서 이미 확인
           2) 1A 한정, 당일 시가 대비 PHASE1A_LEADING_OPEN_SURGE_CAP 이상이면 매수 보류
           3) 지수 HALT 차단
-          4) 발사: 대량체결 버스트 3경로 OR
+          4) 발사: `_fire_gate` — **시간대에 따라 규칙이 다르다** (2026-08-08)
+             · 09:00~09:05 : 게이트 면제(무장만으로 발사)
+             · 09:05~      : 거래대금 가속도 >= FIRE_ACCEL_MIN
+             · 롤백(FIRE_GATE_SPLIT_ENABLED=False) 시 전 구간 대량체결 버스트
+          5) 파동 순번 상한(BURST_WAVE_MAX)
         """
         now = now if now is not None else _time_mod.time()
         sustained = self._strength_sustained_sec(stock_code, now)
@@ -3866,7 +4025,9 @@ class StrategyManager:
                 "reason": "지수 -5% 초과로 인한 전면 매매 중단",
             }
 
-        ok, detail = self.check_burst(stock_code, now=now, now_dt=now_dt)
+        # 발사 — 시간대별 규칙(2026-08-08). check_burst를 직접 부르지 말 것:
+        # 초반 면제/가속도 전환이 여기서만 갈리므로 우회하면 조용히 옛 동작이 된다.
+        ok, detail = self._fire_gate(stock_code, now=now, now_dt=now_dt)
         info = dict(detail)
         info["current_price"] = current_price
         info["strength_sustained_sec"] = round(sustained, 2)

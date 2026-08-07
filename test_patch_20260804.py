@@ -122,6 +122,12 @@ def setup(strat, code, cond="주도주상위", ask=10_000):
                "ask_volumes": [3_000, 3_000, 3_000]}, now=time.time())
 
 
+# (2026-08-08) 발사 조건이 09:05부터 버스트 -> 거래대금 가속도로 바뀌었다.
+# 픽스처가 **신·구 사양을 모두** 만족하도록 틱 수만 올린다(건당 금액은 그대로라
+# 롤백해도 옛 버스트 경로가 그대로 성립한다). 수치를 박지 않고 상수를 따라간다.
+_FIRE_N = max(SM.PHASE1A_BURST_TRADE_COUNT, SM.FIRE_ACCEL_MIN_TICKS)
+
+
 def feed(tf, code, n, value_each, now, span=0.5):
     vol = max(1, int(value_each // 10_000))
     for i in range(n):
@@ -136,7 +142,7 @@ def tick(strat, code, strength, at, price=10_000, side="buy", volume=10):
 def trigger(strat, code, t0):
     """무장(1.5초) + 버스트 -> 되돌림 대기 계획 생성까지."""
     tick(strat, code, 130.0, t0)
-    feed(strat.phase1b.trade_flow, code, 2, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5)
+    feed(strat.phase1b.trade_flow, code, _FIRE_N, SM.PHASE1A_BURST_TRADE_VALUE, now=t0 + 3.5)
     tick(strat, code, 130.0, t0 + 3.5)
 
 
@@ -389,7 +395,7 @@ check("계획은 그대로 유지됨(폴링이 지우지도 않음)", "V1" in s8
 s9 = build()
 setup(s9, "V2")
 s9._strength_since["V2"] = T - 5.0
-feed(s9.phase1b.trade_flow, "V2", 2, SM.PHASE1A_BURST_TRADE_VALUE, now=T)
+feed(s9.phase1b.trade_flow, "V2", _FIRE_N, SM.PHASE1A_BURST_TRADE_VALUE, now=T)
 s9._evaluate_1a_pullback_entry(
     "V2", "V2", 1, None, 10_000, 9_800, s9._now().time())
 check("폴링이 먼저 와도 즉시매수가 아니라 대기 계획을 연다",

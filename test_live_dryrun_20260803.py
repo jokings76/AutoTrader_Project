@@ -158,6 +158,10 @@ def burst(strat, code, at, n=2, value=None):
     value = SM.PHASE1A_BURST_TRADE_VALUE if value is None else value
     price = 10_000
     vol = max(1, int(value // price))
+    # (2026-08-08) 09:05부터 발사 조건이 거래대금 가속도라 **최소 틱수**를 요구한다.
+    # 건당 금액은 그대로 두고 개수만 올려 신·구 사양을 모두 만족시킨다
+    # (롤백해도 옛 버스트 경로가 그대로 성립한다).
+    n = max(n, SM.FIRE_ACCEL_MIN_TICKS)
     for i in range(n):
         strat.phase1b.trade_flow.add_tick(code, price, "buy", vol, now=at - i * 0.3)
 
