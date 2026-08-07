@@ -38,6 +38,7 @@
   익절은 전 전략 flat 캡 — 트레일링은 1L 전용이었으므로 1L과 함께 제거됨.
 """
 
+import statistics
 import threading
 import time as _time_mod
 from datetime import datetime, time, timedelta
@@ -748,6 +749,54 @@ MIN_ENTRY_DELAY_SEC_BY_COND = {
     "돌파자동매매용": 30.0,
 }
 
+# ══════════════════════════════════════════════════════════════════
+# 일봉 눌림 태그 (2026-08-07 신설) — 🔴 **관측 전용. 매매 판정에 쓰지 않는다.**
+# ══════════════════════════════════════════════════════════════════
+# [무엇] "일봉 거래량이 폭발한 뒤 며칠간 40% 이상 말랐다(=눌림)"를 판정해
+#   entry_reason에 `[일봉눌림 D-N]` 태그만 남긴다. **어떤 게이트도 건드리지
+#   않는다** — 진입/청산/비중 어디에도 영향이 없다(테스트로 못박음).
+#
+# [왜 태그부터인가] 08-07 기준 미검증 변경이 이미 3건(VWAP ON / 조건식별 숙성 /
+#   폴링 재활성화) 도는 상태다. 4번째를 얹으면 내일 결과의 원인 분리가
+#   불가능해진다. 태그는 매매를 안 바꾸므로 그 문제 없이 표본만 쌓인다.
+#
+# [근거 — 2026-08-07 분석]
+#  · 일봉 레벨(90종목 x 2025-01~, 33,924봉): 눌림 **패턴 자체는 우위 없음**
+#    (1,894건 +5일 +2.00% vs 기준선 +1.55%). 그런데 여기에 **재상승 트리거**
+#    (눌림구간 고가 돌파 + 거래량 회복)를 붙이면 549건 +5일 **+4.66%**로
+#    같은 트리거만 쓴 대조군(+2.18%)의 **2배**가 된다 — 눌림 선행조건이
+#    실제로 기여한다. 파라미터 민감도도 안정적(폭발 2~4배 x 회복 1.2~2.0배
+#    전 조합에서 +4% 내외 = 과최적화 아님).
+#  · 우리 실거래(08-03~07, 76건): 눌림 상태 매수 **17건 +0.68% 승률 59%
+#    (+57,600원)** vs 그 외 59건 -0.36% 승률 41%(-26,711원). 날짜로 쪼개도
+#    4일 중 3일 우세(08-03만 열등, 08-04는 표본 0).
+#  · 🔴 **가장 중요한 관측** — 청산 사유가 갈린다:
+#      눌림 17건: 익절 캡류 도달 **7건(41%)**
+#      그 외 59건: 익절 캡류 도달 **2건(3%)**
+#    그런데 일봉은 이 종목들이 +5일 평균 +4.66% 간다고 말한다.
+#    => **눌림 종목은 더 갈 힘이 있는데 우리 익절캡(4.0%/2.5%)이 자른다.**
+#       현대약품 +4.25% / 아진엑스텍 +4.01% / 코스모 +3.17%가 전부 캡에서 끊겼다.
+#       이게 다음 단계(눌림 종목 캡 상향)의 근거다.
+#
+# [⚠️ 한계 — 캡 상향을 결정하기 전에 반드시 같이 볼 것]
+#  · 549건 +5일 평균은 +4.66%인데 **중앙값은 +0.19%**, 승률 50%다.
+#    소수의 대박이 평균을 만드는 **꼬리가 두꺼운** 분포다.
+#  · 기간 5구간 중 **1개가 마이너스**(25년 5~8월 -0.24%, 승 38%)이고,
+#    26년 1~4월(**+12.72%**) 한 구간이 전체 평균을 지배한다.
+#  · 실거래 표본이 **17건 / 5일**이다.
+#  · **구조적 불일치** — 일봉 눌림은 '+5일 보유'가 전제인데 우리는 15:10
+#    당일청산이다. 그래서 '며칠 보유'가 아니라 '당일 안에서 캡만 늘리기'가
+#    현실적인 적용 방향이다.
+#
+# [비용] `ka10081` **종목당 하루 1콜**(일봉은 하루 불변). pre-arm에서만 채우고
+#   진입 핫패스는 캐시만 읽는다 — 이 코드베이스의 기존 원칙 그대로다.
+DAILY_PULLBACK_TAG_ENABLED = True   # False면 태그도 REST도 완전히 꺼진다
+DAILY_PULLBACK_VOL_SPIKE = 3.0      # D0 거래량 >= 최근 20일 중앙값 x 이 값
+DAILY_PULLBACK_VOL_DROP = 0.6       # 이후 봉 거래량 <= D0 x 이 값 (= 40%+ 감소)
+DAILY_PULLBACK_LOOKBACK = 20        # 폭발 판정용 중앙값 구간(거래일)
+DAILY_PULLBACK_MAX_GAP = 5          # 오늘 기준 몇 거래일 전까지 폭발일을 찾을지
+DAILY_PULLBACK_MIN_BARS = 2         # 눌림 구간 최소 봉 수(D+1,D+2)
+
 # ── 버스트 '파동 순번' 상한 (2026-08-06 신규) ─────────────────────
 # [배경] 사용자가 "거래대금이 터질 때마다 올라갔다"며 5종목(뉴엔AI/JW신약/
 # 현대약품/져스텍/KBI메탈)을 지목한 데서 출발. 분봉으로 재구성해 보니 지목한
@@ -1310,6 +1359,9 @@ class StrategyManager:
         # stock_code -> 그 종목을 **처음 본 시각**(monotonic). [F] 진입 숙성 판정용.
         # 편입/pre-arm 어느 경로로 들어와도 여기 한 번만 찍힌다(setdefault).
         self._first_seen: dict[str, float] = {}
+        # 일봉 캐시 (2026-08-07) — {code: {'asof':'YYYYMMDD','bars':[...]}}
+        # 하루 1회만 채우고 판정은 여기서만 읽는다(진입 핫패스 REST 0콜).
+        self._daily_bars: dict[str, dict] = {}
         # stock_code -> 그날 카운트된 버스트 파동의 발생 시각들 (BURST_WAVE_MAX용).
         self._burst_waves: dict[str, list[float]] = {}
         # stock_code -> 세션 VWAP(거래소 누적 기준). 0B의 FID 13/14로 매 틱 갱신.
@@ -1676,6 +1728,88 @@ class StrategyManager:
                 f"VWAP 이격 미달 (VWAP대비 {gap:+.2f}% "
                 f"<= +{VWAP_ENTRY_MIN_GAP_PCT:.1f}%)"
             )
+        return None
+
+    def _warm_daily_bars(self, stock_code: str) -> None:
+        """일봉을 하루 1회만 받아 캐시한다 (2026-08-07). pre-arm 전용.
+
+        ⚠️ **진입 핫패스에서 부르지 말 것.** 이 함수만 REST를 타고,
+        판정(`daily_pullback_state`)은 캐시만 읽는다 — 08-02에 429 예산 때문에
+        없앤 병목을 되살리지 않기 위한 이 코드베이스의 기존 원칙이다.
+        어떤 실패도 밖으로 던지지 않는다(태그가 없어도 매매는 그대로 돌아야 한다).
+        """
+        if not DAILY_PULLBACK_TAG_ENABLED:
+            return
+        today = self._now().strftime("%Y%m%d")
+        cached = self._daily_bars.get(stock_code)
+        if cached is not None and cached.get("asof") == today:
+            return
+        try:
+            bars = self.api.get_daily_candles(
+                stock_code, count=DAILY_PULLBACK_LOOKBACK + DAILY_PULLBACK_MAX_GAP + 10
+            )
+        except Exception:
+            logger.warning("[%s] 일봉 예열 실패(태그만 비활성, 매매 영향 없음)", stock_code)
+            bars = []
+        # 실패해도 asof를 찍어 **하루 안에 재시도로 REST를 낭비하지 않는다**.
+        self._daily_bars[stock_code] = {"asof": today, "bars": bars}
+
+    def daily_pullback_state(self, stock_code: str) -> Optional[dict]:
+        """오늘이 '일봉 눌림 후 재상승 후보일'인가 (2026-08-07 신설, 관측 전용).
+
+        🔴 **이 함수의 반환값을 매매 판정에 쓰지 말 것.** 지금은 entry_reason
+        태그에만 쓰인다. 쓰게 될 때는 근거(상수 블록 주석)와 한계를 먼저 읽을 것.
+
+        판정은 **완결된 일봉만** 본다 — 오늘 봉은 진행 중이라 제외한다.
+        그래서 장중 아무 시각에나 불러도 값이 흔들리지 않는다.
+
+            D0(폭발)  : 거래량 >= 최근 LOOKBACK일 중앙값 x VOL_SPIKE
+            D+1..어제 : 전부 D0 거래량 x VOL_DROP 이하 (= 40%+ 감소), 최소 2봉
+            오늘      : 재상승 후보일
+
+        반환 None이면 눌림 아님. dict면:
+            {'gap': 오늘로부터 폭발일까지 거래일수,
+             'pullback_high': 눌림 구간 고가(= 재상승 돌파 기준선),
+             'spike_dt': 폭발일, 'spike_vol': 폭발일 거래량}
+        """
+        if not DAILY_PULLBACK_TAG_ENABLED:
+            return None
+        entry = self._daily_bars.get(stock_code) or {}
+        rows = entry.get("bars") or []
+        if len(rows) < DAILY_PULLBACK_LOOKBACK + DAILY_PULLBACK_MAX_GAP:
+            return None
+        today = self._now().strftime("%Y%m%d")
+
+        # 오늘 봉이 이미 들어와 있으면 그 앞까지만 쓴다. 없으면 전부가 과거다.
+        ti = len(rows)
+        for k, r in enumerate(rows):
+            if r["dt"] >= today:
+                ti = k
+                break
+
+        lb = DAILY_PULLBACK_LOOKBACK
+        for gap in range(DAILY_PULLBACK_MIN_BARS + 1, DAILY_PULLBACK_MAX_GAP + 1):
+            i = ti - gap                      # 폭발 후보일
+            if i - lb < 0:
+                continue
+            window = [r["v"] for r in rows[i - lb:i]]
+            if not window:
+                continue
+            base = statistics.median(window)
+            v0 = rows[i]["v"]
+            if base <= 0 or v0 < base * DAILY_PULLBACK_VOL_SPIKE:
+                continue
+            mid = rows[i + 1:ti]              # 폭발 다음날 ~ 어제
+            if len(mid) < DAILY_PULLBACK_MIN_BARS:
+                continue
+            if any(m["v"] > v0 * DAILY_PULLBACK_VOL_DROP for m in mid):
+                continue
+            return {
+                "gap": gap,
+                "pullback_high": max(m["h"] for m in mid),
+                "spike_dt": rows[i]["dt"],
+                "spike_vol": v0,
+            }
         return None
 
     def entry_delay_sec(self, stock_code: str) -> float:
@@ -3431,6 +3565,10 @@ class StrategyManager:
             except Exception:
                 logger.warning("[%s] pre-arm 시가 예열 실패", stock_code)
 
+        # ④ 일봉 예열 (2026-08-07) — 일봉 눌림 **태그 관측 전용**.
+        # 종목당 하루 1콜이고 실패해도 조용히 넘어간다(태그가 없을 뿐).
+        self._warm_daily_bars(stock_code)
+
     def update_strength_timer(
         self, stock_code: str, strength: float, now: float = None
     ) -> float:
@@ -4948,6 +5086,20 @@ class StrategyManager:
                 )
             if opt_info:
                 entry_reason += f" | 비중x{opt_info.get('final_weight', 1.0):.2f}"
+
+            # 일봉 눌림 태그 (2026-08-07) — 🔴 **관측 전용**.
+            # 매수 여부/수량/캡 어디에도 영향이 없다. 사후 분석에서
+            # "이 매수가 일봉 눌림 후 재상승 자리였나"를 가르기 위한 표식이다.
+            # 캐시만 읽으므로 REST 0콜이고, 실패해도 매수를 막지 않는다.
+            try:
+                _pb = self.daily_pullback_state(stock_code)
+                if _pb:
+                    entry_reason += (
+                        f" | [일봉눌림 D-{_pb['gap']} "
+                        f"돌파선 {_pb['pullback_high']:,}]"
+                    )
+            except Exception:
+                logger.exception("[%s] 일봉 눌림 태그 실패(매매 영향 없음)", stock_code)
 
             if "vwap" in info:
                 vwap = info["vwap"]

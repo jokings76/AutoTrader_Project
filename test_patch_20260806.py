@@ -936,6 +936,97 @@ check("폴링 주기 60초(백업 경로라 20초는 과함)", _m14.POLL_INTERVA
       f"{_m14.POLL_INTERVAL_SEC}초")
 
 # ═════════════════════════════════════════════════════════
+print("\n[15] 일봉 눌림 태그 (2026-08-07) — 🔴 관측 전용, 매매 무영향")
+# ═════════════════════════════════════════════════════════
+check("태그 ON", SM.DAILY_PULLBACK_TAG_ENABLED is True)
+check("파라미터", (SM.DAILY_PULLBACK_VOL_SPIKE, SM.DAILY_PULLBACK_VOL_DROP,
+                 SM.DAILY_PULLBACK_LOOKBACK, SM.DAILY_PULLBACK_MAX_GAP,
+                 SM.DAILY_PULLBACK_MIN_BARS) == (3.0, 0.6, 20, 5, 2))
+
+
+def _bars(spike_at=3, spike_mult=5.0, drop=0.3, base_v=1_000_000, n=30):
+    """마지막 봉이 '어제'가 되도록 일봉을 만든다.
+       spike_at: 오늘로부터 N거래일 전에 거래량 폭발을 둔다."""
+    out = []
+    for k in range(n, 0, -1):                     # k = 오늘로부터 며칠 전
+        dt = f"202607{31 - k:02d}" if k > 6 else f"2026080{7 - k}"
+        v = base_v
+        if k == spike_at:
+            v = int(base_v * spike_mult)
+        elif k < spike_at:
+            v = int(base_v * spike_mult * drop)   # 눌림 구간
+        out.append({"dt": dt, "o": 10_000, "h": 10_200, "l": 9_900,
+                    "c": 10_000, "v": v})
+    return out
+
+
+s15 = build(now_dt=datetime(2026, 8, 7, 10, 0, 0))
+s15._daily_bars["PB"] = {"asof": "20260807", "bars": _bars(spike_at=3)}
+st15 = s15.daily_pullback_state("PB")
+check("🔴 눌림 인식 (D-3 폭발 + 이후 -70%)", st15 is not None and st15["gap"] == 3,
+      str(st15))
+check("돌파선 = 눌림 구간 고가", st15 and st15["pullback_high"] == 10_200,
+      str(st15 and st15["pullback_high"]))
+
+# 폭발이 없으면 눌림 아님
+s15._daily_bars["NOSPIKE"] = {"asof": "20260807", "bars": _bars(spike_at=3, spike_mult=1.2)}
+check("[대조] 거래량 폭발이 없으면 None", s15.daily_pullback_state("NOSPIKE") is None)
+# 눌림이 얕으면(감소 40% 미만) 아님
+s15._daily_bars["SHALLOW"] = {"asof": "20260807", "bars": _bars(spike_at=3, drop=0.8)}
+check("[대조] 감소가 40% 미만이면 None", s15.daily_pullback_state("SHALLOW") is None)
+# 눌림 구간이 1봉뿐이면 아님
+s15._daily_bars["ONE"] = {"asof": "20260807", "bars": _bars(spike_at=2)}
+check("[대조] 눌림 구간 1봉이면 None(최소 2봉)",
+      s15.daily_pullback_state("ONE") is None)
+# 데이터 부족
+s15._daily_bars["SHORT"] = {"asof": "20260807", "bars": _bars(n=10)}
+check("[안전] 봉이 부족하면 None(예외 없음)", s15.daily_pullback_state("SHORT") is None)
+check("[안전] 캐시가 아예 없으면 None", s15.daily_pullback_state("NOCACHE") is None)
+
+# 🔴 판정이 REST를 타지 않는다 (진입 핫패스 원칙)
+_calls_before = len(s15.api.calls)
+for _ in range(50):
+    s15.daily_pullback_state("PB")
+check("🔴 판정은 캐시만 읽는다 (REST 0콜)", len(s15.api.calls) == _calls_before,
+      f"REST {len(s15.api.calls) - _calls_before}콜")
+
+# 🔴 관측 전용 — 매매 판정 어디에도 안 쓰인다
+import inspect as _i15
+for _fn, _nm in ((SM.StrategyManager.evaluate_tick_entry, "evaluate_tick_entry"),
+                 (SM.StrategyManager._open_entry_plan, "_open_entry_plan"),
+                 (SM.StrategyManager._entry_change_reject, "_entry_change_reject"),
+                 (SM.StrategyManager.check_burst, "check_burst"),
+                 (SM.StrategyManager.on_price_update, "on_price_update")):
+    check(f"🔴 {_nm}은 일봉 눌림을 보지 않는다(관측 전용)",
+          "daily_pullback_state" not in _i15.getsource(_fn))
+
+# 태그가 실제로 entry_reason에 붙는가 + 붙어도 매수는 그대로인가
+s15b = build(now_dt=datetime(2026, 8, 7, 10, 0, 0))
+setup(s15b, "TAG")
+s15b._daily_bars["TAG"] = {"asof": "20260807", "bars": _bars(spike_at=3)}
+s15b._execute_buy("TAG", "TAG", 1, {"current_price": 10_000, "entry_mode": "tick_driven",
+                                    "reason": "1A 틱즉시진입"}, sub_strategy="1A")
+_rows = [r for r in _Repo.rows if r.get("stock_code") == "TAG"]
+check("매수는 정상 체결된다(태그가 막지 않는다)", "TAG" in s15b.holdings)
+check("entry_reason에 [일봉눌림 D-3] 태그가 붙는다",
+      bool(_rows) and "[일봉눌림 D-3" in str(_rows[0].get("entry_reason", "")),
+      str(_rows[0].get("entry_reason", ""))[-40:] if _rows else "행 없음")
+
+# 태그를 끄면 REST도 판정도 완전히 꺼진다
+_bak15 = SM.DAILY_PULLBACK_TAG_ENABLED
+try:
+    SM.DAILY_PULLBACK_TAG_ENABLED = False
+    check("[롤백] OFF면 판정이 None", s15.daily_pullback_state("PB") is None)
+    s15c = build(now_dt=datetime(2026, 8, 7, 10, 0, 0))
+    _n15 = len(s15c.api.calls)
+    s15c._warm_daily_bars("X")
+    check("[롤백] OFF면 일봉 REST를 아예 안 부른다",
+          len(s15c.api.calls) == _n15 and "X" not in s15c._daily_bars)
+finally:
+    SM.DAILY_PULLBACK_TAG_ENABLED = _bak15
+check("[롤백 후] 정상 복원", s15.daily_pullback_state("PB") is not None)
+
+# ═════════════════════════════════════════════════════════
 print("\n" + "=" * 62)
 print(f"통과 {len(PASS)} / 실패 {len(FAIL)}")
 if FAIL:

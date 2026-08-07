@@ -279,6 +279,53 @@ class KiwoomREST:
         return result.get("pred_pre_flu_rt_upper") or []
 
     # ─────────────────────────────────────
+    # 일봉 차트 조회 (ka10081) — 2026-08-07 신설
+    # ─────────────────────────────────────
+    def get_daily_candles(self, stock_code: str, base_dt: str = None,
+                          count: int = 60) -> list:
+        """일봉 조회 (ka10081). 오름차순(과거->최신)으로 돌려준다.
+
+        ⚠️ **캐시는 호출부 책임이다.** 일봉은 하루 불변이라 종목당 하루 1콜이면
+        충분한데, 여기서 캐시하면 분봉 캐시(8초 TTL)와 정책이 뒤섞인다.
+        지금 유일한 호출부인 `strategy_manager.prearm_candidate`가
+        `_daily_bars`에 담아두고 그날 안에는 다시 부르지 않는다.
+
+        반환 원소: {'dt','o','h','l','c','v'} — 실패하면 빈 리스트(예외 없음).
+        진입 판정이 이 값의 유무로 죽지 않게 하기 위함이다.
+        """
+        body = {
+            "stk_cd": stock_code,
+            "base_dt": base_dt or datetime.now().strftime("%Y%m%d"),
+            "upd_stkpc_tp": "1",          # 수정주가 반영
+        }
+        try:
+            result = self._request("/api/dostk/chart", "ka10081", body)
+        except Exception as e:
+            logger.warning("[%s] 일봉 조회 실패: %s", stock_code, e)
+            return []
+        if result.get("return_code") != 0:
+            logger.warning("[%s] 일봉 응답 실패: %s", stock_code,
+                           result.get("return_msg"))
+            return []
+        rows = result.get("stk_dt_pole_chart_qry") or []
+        out = []
+        for x in rows[:max(count, 1) * 2]:
+            try:
+                out.append({
+                    "dt": str(x.get("dt") or ""),
+                    "o": abs(int(x.get("open_pric") or 0)),
+                    "h": abs(int(x.get("high_pric") or 0)),
+                    "l": abs(int(x.get("low_pric") or 0)),
+                    "c": abs(int(x.get("cur_prc") or 0)),
+                    "v": abs(int(x.get("trde_qty") or 0)),
+                })
+            except (TypeError, ValueError):
+                continue
+        out = [r for r in out if r["dt"]]
+        out.sort(key=lambda r: r["dt"])          # 과거 -> 최신
+        return out[-count:] if count else out
+
+    # ─────────────────────────────────────
     # 분봉 차트 조회 (ka10080)
     # ─────────────────────────────────────
     def get_minute_candles(self, stock_code: str, interval: int = 1,
