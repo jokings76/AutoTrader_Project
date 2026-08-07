@@ -1770,7 +1770,15 @@ class StrategyManager:
         반환 None이면 눌림 아님. dict면:
             {'gap': 오늘로부터 폭발일까지 거래일수,
              'pullback_high': 눌림 구간 고가(= 재상승 돌파 기준선),
-             'spike_dt': 폭발일, 'spike_vol': 폭발일 거래량}
+             'spike_dt': 폭발일, 'spike_vol': 폭발일 거래량,
+             'drops': [D+1, D+2, ...] 각 봉의 D0 대비 거래량 비율(0~1)}
+
+        ⚠️ **`drops`는 판정에 안 쓴다 — 관측용이다.** 통과 조건은 '전부
+        VOL_DROP 이하'라는 불리언인데, 그것만 남기면 **D+1이 얼마나 깊게
+        줄었는지를 사후에 되살릴 수 없다**(태그에 gap만 남기 때문이다).
+        다음 단계인 '눌림 종목 익절캡 상향'을 판단할 때 눌림 깊이가 강도
+        지표가 될 수 있어 지금부터 쌓아둔다. `gap`으로 인덱스를 되짚으면
+        같은 값을 계산할 수 있지만, 그건 그때 일봉을 다시 받아야 한다.
         """
         if not DAILY_PULLBACK_TAG_ENABLED:
             return None
@@ -1809,6 +1817,8 @@ class StrategyManager:
                 "pullback_high": max(m["h"] for m in mid),
                 "spike_dt": rows[i]["dt"],
                 "spike_vol": v0,
+                # D+1, D+2, ... 순서 그대로. v0 > 0은 위 spike 검사에서 보장된다.
+                "drops": [round(m["v"] / v0, 3) for m in mid],
             }
         return None
 
@@ -5094,9 +5104,14 @@ class StrategyManager:
             try:
                 _pb = self.daily_pullback_state(stock_code)
                 if _pb:
+                    # 눌림 깊이(D+1/D+2/... 의 D0 대비 %)를 같이 남긴다 —
+                    # 태그에 gap만 남기면 나중에 깊이를 되살릴 수 없다.
+                    _dp = "/".join(f"{d * 100:.0f}" for d in _pb.get("drops") or [])
                     entry_reason += (
                         f" | [일봉눌림 D-{_pb['gap']} "
-                        f"돌파선 {_pb['pullback_high']:,}]"
+                        f"돌파선 {_pb['pullback_high']:,}"
+                        + (f" 눌림 {_dp}%" if _dp else "")
+                        + "]"
                     )
             except Exception:
                 logger.exception("[%s] 일봉 눌림 태그 실패(매매 영향 없음)", stock_code)

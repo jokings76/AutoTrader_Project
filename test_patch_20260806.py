@@ -968,6 +968,26 @@ check("🔴 눌림 인식 (D-3 폭발 + 이후 -70%)", st15 is not None and st15
 check("돌파선 = 눌림 구간 고가", st15 and st15["pullback_high"] == 10_200,
       str(st15 and st15["pullback_high"]))
 
+# ── drops: 눌림 깊이 관측값 (2026-08-08 신설) ────────────────────
+# [왜] 통과 조건은 '전부 VOL_DROP 이하'라는 불리언이라, 그것만 남기면
+#      D+1이 얼마나 깊게 줄었는지를 사후에 되살릴 수 없다(태그에 gap만 남는다).
+#      다음 단계('눌림 종목 익절캡 상향')에서 깊이가 강도 지표가 될 수 있어
+#      지금부터 쌓는다. **판정에는 절대 쓰지 않는다.**
+check("🆕 drops가 D+1,D+2 순서로 담긴다", st15 and st15.get("drops") == [0.3, 0.3],
+      str(st15 and st15.get("drops")))
+check("🆕 drops 길이 = 눌림 봉 수 = gap-1",
+      st15 and len(st15["drops"]) == st15["gap"] - 1)
+# D+1과 D+2가 서로 다른 값이면 각각 구분돼 나오는가 (같은 값이면 순서 검증이 안 된다)
+_b_asym = _bars(spike_at=3)
+_b_asym[-2]["v"] = int(5_000_000 * 0.20)      # D+1 = 20%
+_b_asym[-1]["v"] = int(5_000_000 * 0.50)      # D+2 = 50%
+s15._daily_bars["ASYM"] = {"asof": "20260807", "bars": _b_asym}
+_st_asym = s15.daily_pullback_state("ASYM")
+check("🔴 D+1/D+2가 개별 값으로 구분된다",
+      _st_asym and _st_asym["drops"] == [0.2, 0.5], str(_st_asym and _st_asym["drops"]))
+check("🔴 drops는 판정을 바꾸지 않는다(깊이 달라도 통과 여부 동일)",
+      _st_asym is not None and _st_asym["gap"] == 3)
+
 # 폭발이 없으면 눌림 아님
 s15._daily_bars["NOSPIKE"] = {"asof": "20260807", "bars": _bars(spike_at=3, spike_mult=1.2)}
 check("[대조] 거래량 폭발이 없으면 None", s15.daily_pullback_state("NOSPIKE") is None)
@@ -1011,6 +1031,10 @@ check("매수는 정상 체결된다(태그가 막지 않는다)", "TAG" in s15b
 check("entry_reason에 [일봉눌림 D-3] 태그가 붙는다",
       bool(_rows) and "[일봉눌림 D-3" in str(_rows[0].get("entry_reason", "")),
       str(_rows[0].get("entry_reason", ""))[-40:] if _rows else "행 없음")
+# 🆕 깊이가 태그에 실려 DB에 남는가 — 이게 없으면 사후 분석에서 되살릴 수 없다
+check("🆕 태그에 눌림 깊이(%)가 함께 남는다",
+      bool(_rows) and "눌림 30/30%" in str(_rows[0].get("entry_reason", "")),
+      str(_rows[0].get("entry_reason", ""))[-50:] if _rows else "행 없음")
 
 # 태그를 끄면 REST도 판정도 완전히 꺼진다
 _bak15 = SM.DAILY_PULLBACK_TAG_ENABLED
