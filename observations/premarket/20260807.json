@@ -1,0 +1,530 @@
+{
+ "date": "20260807",
+ "generated_at": "2026-08-07T22:53:22",
+ "universe_size": 117,
+ "universe_days": [
+  "2026-08-03",
+  "2026-08-04",
+  "2026-08-05",
+  "2026-08-06",
+  "2026-08-07"
+ ],
+ "params": {
+  "UNIVERSE_DAYS": 5,
+  "NEAR_PCT": 3.0,
+  "REACH_PCT": 7.0,
+  "LIQ_MIN_EOK": 20.0
+ },
+ "candidates": [
+  {
+   "code": "255440",
+   "name": "야스",
+   "conds": [
+    "눌림목자동",
+    "주도주상위"
+   ],
+   "last_seen": "2026-08-07",
+   "grade": "A",
+   "gap": 4,
+   "drops": [
+    0.261,
+    0.339,
+    0.304
+   ],
+   "spike_dt": "20260803",
+   "spike_vol": 2282345,
+   "breakout_line": 7700,
+   "prev_close": 7660,
+   "dist_pct": 0.52,
+   "liq_eok": 103.5
+  },
+  {
+   "code": "052460",
+   "name": "아이크래프트",
+   "conds": [
+    "주도주상위"
+   ],
+   "last_seen": "2026-08-07",
+   "grade": "A",
+   "gap": 3,
+   "drops": [
+    0.399,
+    0.526
+   ],
+   "spike_dt": "20260804",
+   "spike_vol": 1829601,
+   "breakout_line": 6400,
+   "prev_close": 6240,
+   "dist_pct": 2.56,
+   "liq_eok": 73.5
+  },
+  {
+   "code": "347700",
+   "name": "스피어",
+   "conds": [
+    "눌림목자동",
+    "주도주상위"
+   ],
+   "last_seen": "2026-08-07",
+   "grade": "B",
+   "gap": 3,
+   "drops": [
+    0.41,
+    0.435
+   ],
+   "spike_dt": "20260804",
+   "spike_vol": 3538155,
+   "breakout_line": 20700,
+   "prev_close": 20050,
+   "dist_pct": 3.24,
+   "liq_eok": 309.7
+  },
+  {
+   "code": "459510",
+   "name": "나우로보틱스",
+   "conds": [
+    "눌림목자동",
+    "주도주상위",
+    "주도주상위+눌림목자동"
+   ],
+   "last_seen": "2026-08-06",
+   "grade": "B",
+   "gap": 4,
+   "drops": [
+    0.393,
+    0.275,
+    0.337
+   ],
+   "spike_dt": "20260803",
+   "spike_vol": 784624,
+   "breakout_line": 18390,
+   "prev_close": 17730,
+   "dist_pct": 3.72,
+   "liq_eok": 58.1
+  },
+  {
+   "code": "061970",
+   "name": "LB세미콘",
+   "conds": [
+    "주도주상위"
+   ],
+   "last_seen": "2026-08-04",
+   "grade": "B",
+   "gap": 4,
+   "drops": [
+    0.308,
+    0.304,
+    0.168
+   ],
+   "spike_dt": "20260803",
+   "spike_vol": 4006816,
+   "breakout_line": 4395,
+   "prev_close": 4215,
+   "dist_pct": 4.27,
+   "liq_eok": 55.8
+  },
+  {
+   "code": "119850",
+   "name": "지엔씨에너지",
+   "conds": [
+    "눌림목자동",
+    "주도주상위"
+   ],
+   "last_seen": "2026-08-07",
+   "grade": "B",
+   "gap": 3,
+   "drops": [
+    0.294,
+    0.245
+   ],
+   "spike_dt": "20260804",
+   "spike_vol": 3593699,
+   "breakout_line": 53300,
+   "prev_close": 51100,
+   "dist_pct": 4.31,
+   "liq_eok": 788.1
+  },
+  {
+   "code": "066590",
+   "name": "스모트로닉",
+   "conds": [
+    "주도주상위"
+   ],
+   "last_seen": "2026-08-05",
+   "grade": "B",
+   "gap": 3,
+   "drops": [
+    0.225,
+    0.089
+   ],
+   "spike_dt": "20260804",
+   "spike_vol": 1828814,
+   "breakout_line": 2720,
+   "prev_close": 2605,
+   "dist_pct": 4.41,
+   "liq_eok": 17.9
+  },
+  {
+   "code": "455900",
+   "name": "엔젤로보틱스",
+   "conds": [
+    "눌림목자동",
+    "주도주상위",
+    "주도주상위+눌림목자동"
+   ],
+   "last_seen": "2026-08-06",
+   "grade": "B",
+   "gap": 4,
+   "drops": [
+    0.303,
+    0.222,
+    0.287
+   ],
+   "spike_dt": "20260803",
+   "spike_vol": 872218,
+   "breakout_line": 24150,
+   "prev_close": 23100,
+   "dist_pct": 4.55,
+   "liq_eok": 92.7
+  },
+  {
+   "code": "270660",
+   "name": "에브리봇",
+   "conds": [
+    "주도주상위"
+   ],
+   "last_seen": "2026-08-04",
+   "grade": "B",
+   "gap": 3,
+   "drops": [
+    0.258,
+    0.112
+   ],
+   "spike_dt": "20260804",
+   "spike_vol": 1705169,
+   "breakout_line": 15850,
+   "prev_close": 15100,
+   "dist_pct": 4.97,
+   "liq_eok": 85.2
+  },
+  {
+   "code": "333430",
+   "name": "일승",
+   "conds": [
+    "눌림목자동",
+    "돌파자동매매용",
+    "주도주상위"
+   ],
+   "last_seen": "2026-08-05",
+   "grade": "B",
+   "gap": 5,
+   "drops": [
+    0.376,
+    0.56,
+    0.494,
+    0.108
+   ],
+   "spike_dt": "20260731",
+   "spike_vol": 8927074,
+   "breakout_line": 4550,
+   "prev_close": 4295,
+   "dist_pct": 5.94,
+   "liq_eok": 186.3
+  },
+  {
+   "code": "208710",
+   "name": "포톤",
+   "conds": [
+    "주도주상위"
+   ],
+   "last_seen": "2026-08-07",
+   "grade": "B",
+   "gap": 3,
+   "drops": [
+    0.429,
+    0.156
+   ],
+   "spike_dt": "20260804",
+   "spike_vol": 1236973,
+   "breakout_line": 2790,
+   "prev_close": 2620,
+   "dist_pct": 6.49,
+   "liq_eok": 15.1
+  },
+  {
+   "code": "126730",
+   "name": "코칩",
+   "conds": [
+    "주도주상위"
+   ],
+   "last_seen": "2026-08-07",
+   "grade": "B",
+   "gap": 5,
+   "drops": [
+    0.316,
+    0.27,
+    0.348,
+    0.265
+   ],
+   "spike_dt": "20260731",
+   "spike_vol": 208695,
+   "breakout_line": 13750,
+   "prev_close": 12900,
+   "dist_pct": 6.59,
+   "liq_eok": 11.3
+  },
+  {
+   "code": "089230",
+   "name": "THE E&M",
+   "conds": [
+    "주도주상위"
+   ],
+   "last_seen": "2026-08-04",
+   "grade": "B",
+   "gap": 3,
+   "drops": [
+    0.298,
+    0.12
+   ],
+   "spike_dt": "20260804",
+   "spike_vol": 995466,
+   "breakout_line": 1899,
+   "prev_close": 1779,
+   "dist_pct": 6.75,
+   "liq_eok": 7.0
+  },
+  {
+   "code": "475400",
+   "name": "씨메스로보틱스",
+   "conds": [
+    "눌림목자동"
+   ],
+   "last_seen": "2026-08-06",
+   "grade": "B",
+   "gap": 4,
+   "drops": [
+    0.57,
+    0.59,
+    0.354
+   ],
+   "spike_dt": "20260803",
+   "spike_vol": 279979,
+   "breakout_line": 22300,
+   "prev_close": 20850,
+   "dist_pct": 6.95,
+   "liq_eok": 63.5
+  },
+  {
+   "code": "030530",
+   "name": "원익홀딩스",
+   "conds": [
+    "돌파자동매매용",
+    "주도주상위"
+   ],
+   "last_seen": "2026-08-07",
+   "grade": "C",
+   "gap": 3,
+   "drops": [
+    0.543,
+    0.422
+   ],
+   "spike_dt": "20260804",
+   "spike_vol": 3352946,
+   "breakout_line": 21200,
+   "prev_close": 19720,
+   "dist_pct": 7.51,
+   "liq_eok": 455.9
+  },
+  {
+   "code": "108860",
+   "name": "셀바스AI",
+   "conds": [
+    "눌림목자동"
+   ],
+   "last_seen": "2026-08-04",
+   "grade": "C",
+   "gap": 3,
+   "drops": [
+    0.538,
+    0.457
+   ],
+   "spike_dt": "20260804",
+   "spike_vol": 3787600,
+   "breakout_line": 11430,
+   "prev_close": 10630,
+   "dist_pct": 7.53,
+   "liq_eok": 266.4
+  },
+  {
+   "code": "189330",
+   "name": "씨이랩",
+   "conds": [
+    "주도주상위"
+   ],
+   "last_seen": "2026-08-07",
+   "grade": "C",
+   "gap": 3,
+   "drops": [
+    0.589,
+    0.239
+   ],
+   "spike_dt": "20260804",
+   "spike_vol": 1268777,
+   "breakout_line": 11390,
+   "prev_close": 10500,
+   "dist_pct": 8.48,
+   "liq_eok": 57.1
+  },
+  {
+   "code": "058610",
+   "name": "에스피지",
+   "conds": [
+    "눌림목자동",
+    "돌파자동매매용",
+    "주도주상위"
+   ],
+   "last_seen": "2026-08-06",
+   "grade": "C",
+   "gap": 4,
+   "drops": [
+    0.484,
+    0.225,
+    0.299
+   ],
+   "spike_dt": "20260803",
+   "spike_vol": 2808007,
+   "breakout_line": 118300,
+   "prev_close": 108400,
+   "dist_pct": 9.13,
+   "liq_eok": 1622.6
+  },
+  {
+   "code": "340810",
+   "name": "시선AI",
+   "conds": [
+    "주도주상위"
+   ],
+   "last_seen": "2026-08-04",
+   "grade": "C",
+   "gap": 5,
+   "drops": [
+    0.206,
+    0.279,
+    0.178,
+    0.117
+   ],
+   "spike_dt": "20260731",
+   "spike_vol": 2093762,
+   "breakout_line": 3530,
+   "prev_close": 3230,
+   "dist_pct": 9.29,
+   "liq_eok": 23.9
+  },
+  {
+   "code": "066430",
+   "name": "아이로보틱스",
+   "conds": [
+    "눌림목자동",
+    "주도주상위"
+   ],
+   "last_seen": "2026-08-06",
+   "grade": "C",
+   "gap": 4,
+   "drops": [
+    0.356,
+    0.319,
+    0.374
+   ],
+   "spike_dt": "20260803",
+   "spike_vol": 4358411,
+   "breakout_line": 2400,
+   "prev_close": 2160,
+   "dist_pct": 11.11,
+   "liq_eok": 45.1
+  },
+  {
+   "code": "323280",
+   "name": "태성",
+   "conds": [
+    "돌파자동매매용"
+   ],
+   "last_seen": "2026-08-05",
+   "grade": "C",
+   "gap": 4,
+   "drops": [
+    0.569,
+    0.58,
+    0.484
+   ],
+   "spike_dt": "20260803",
+   "spike_vol": 852532,
+   "breakout_line": 46650,
+   "prev_close": 40750,
+   "dist_pct": 14.48,
+   "liq_eok": 214.1
+  },
+  {
+   "code": "439960",
+   "name": "코스모로보틱스",
+   "conds": [
+    "눌림목자동",
+    "주도주상위"
+   ],
+   "last_seen": "2026-08-06",
+   "grade": "C",
+   "gap": 4,
+   "drops": [
+    0.366,
+    0.451,
+    0.417
+   ],
+   "spike_dt": "20260803",
+   "spike_vol": 18377140,
+   "breakout_line": 21700,
+   "prev_close": 18460,
+   "dist_pct": 17.55,
+   "liq_eok": 1590.9
+  },
+  {
+   "code": "044340",
+   "name": "위닉스",
+   "conds": [
+    "눌림목자동"
+   ],
+   "last_seen": "2026-08-04",
+   "grade": "C",
+   "gap": 3,
+   "drops": [
+    0.197,
+    0.257
+   ],
+   "spike_dt": "20260804",
+   "spike_vol": 10519027,
+   "breakout_line": 6030,
+   "prev_close": 5120,
+   "dist_pct": 17.77,
+   "liq_eok": 316.5
+  },
+  {
+   "code": "002070",
+   "name": "비비안",
+   "conds": [
+    "주도주상위"
+   ],
+   "last_seen": "2026-08-04",
+   "grade": "C",
+   "gap": 3,
+   "drops": [
+    0.24,
+    0.109
+   ],
+   "spike_dt": "20260804",
+   "spike_vol": 1589654,
+   "breakout_line": 7230,
+   "prev_close": 5690,
+   "dist_pct": 27.07,
+   "liq_eok": 35.6
+  }
+ ],
+ "review_of_prev": null
+}
