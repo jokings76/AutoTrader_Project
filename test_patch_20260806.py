@@ -669,9 +669,13 @@ ok2, info2 = s11.evaluate_tick_entry("ARM1", "1A", 10_000, now=_n)
 check("3.0초 + 버스트면 통과", ok2, info2.get("reason", "")[:40])
 
 # ═════════════════════════════════════════════════════════
-print("\n[12] 세션 VWAP 인프라 (2026-08-07 신설, 기본 OFF)")
+print("\n[12] 세션 VWAP 진입 필터 (2026-08-07 장마감 후 ON)")
 # ═════════════════════════════════════════════════════════
-check("VWAP 진입 필터는 기본 OFF", SM.VWAP_ENTRY_ENABLED is False)
+# 08-07 실거래 10건 소급: 손실 2건을 정확히 차단(심텍 09:12 이격 -2.01% /
+# 샘씨엔에스 -1.18%). 가격기준 -4.35% -> -0.20%, 실현 -42,120 -> -17,110원.
+# ⚠️ 4일 69건으로는 손익비 1.03 -> 1.09에 그치고, 08-07 이랜시스는 이격
+#    +2.36%로 통과했는데 -3.11% 손절이었다(만능이 아니다).
+check("VWAP 진입 필터 ON", SM.VWAP_ENTRY_ENABLED is True)
 check("이격 기준 +0.5%", SM.VWAP_ENTRY_MIN_GAP_PCT == 0.5)
 check("적용 시작 09:05 (그 전엔 VWAP이 요동쳐 판정 무의미)",
       SM.VWAP_ENTRY_FROM == SM.time(9, 5))   # SM.time = datetime.time
@@ -701,9 +705,19 @@ check("[실측 460940] VWAP이 현재가와 같은 자릿수 (비율 0.9~1.1)",
       0.9 <= _v / 5_640 <= 1.1, f"VWAP={_v:,.1f} / 현재가=5,640 / 비율={_v/5_640:.4f}")
 check("VWAP 미수신 종목은 0.0", s12.session_vwap("NOPE") == 0.0)
 
-# OFF일 때는 어떤 가격이어도 통과해야 한다
-check("[OFF] 기능이 꺼져 있으면 항상 통과",
-      s12.vwap_entry_reject("VW1", 9_000) is None)
+# 롤백 경로 — OFF로 되돌리면 어떤 가격이어도 통과해야 한다
+_off = SM.VWAP_ENTRY_ENABLED
+try:
+    SM.VWAP_ENTRY_ENABLED = False
+    check("[롤백] OFF로 되돌리면 항상 통과(즉시 복귀 가능)",
+          s12.vwap_entry_reject("VW1", 9_000) is None)
+finally:
+    SM.VWAP_ENTRY_ENABLED = _off
+
+# ON 상태(현행)에서 VWAP 아래 가격은 실제로 막혀야 한다
+check("[ON·현행] VWAP 아래 가격은 차단된다",
+      s12.vwap_entry_reject("VW1", 9_000) is not None,
+      str(s12.vwap_entry_reject("VW1", 9_000))[:44])
 
 _old = SM.VWAP_ENTRY_ENABLED
 try:
@@ -738,6 +752,188 @@ for _fn, _nm in ((SM.StrategyManager._open_entry_plan, "_open_entry_plan"),
     _src = _insp.getsource(_fn)
     check(f"{_nm}은 vwap_entry_reject만 부른다(상수 직접 참조 금지)",
           "vwap_entry_reject" in _src and "VWAP_ENTRY_MIN_GAP_PCT" not in _src)
+
+# ═════════════════════════════════════════════════════════
+print("\n[13] 조건식별 숙성 예외 — 돌파자동매매용만 30초 (2026-08-07)")
+# ═════════════════════════════════════════════════════════
+# [왜] 돌파는 편입의 78%(14/18)가 09:00~09:02에 몰리는데 60초 숙성이 그
+# 구간을 통째로 덮었다. 08-07에 숙성으로 막힌 4종목이 **전부 돌파 최초편입**
+# (원익홀딩스 55초/후성 31초는 끝내 미매수).
+check("기본 숙성은 60초 유지", SM.MIN_ENTRY_DELAY_SEC == 60.0)
+check("돌파자동매매용만 30초", SM.MIN_ENTRY_DELAY_SEC_BY_COND == {"돌파자동매매용": 30.0},
+      str(SM.MIN_ENTRY_DELAY_SEC_BY_COND))
+
+s13 = build(now_dt=datetime(2026, 8, 7, 9, 30, 0))
+for _c, _cond, _want in (("BRK", "돌파자동매매용", 30.0),
+                         ("LEAD", "주도주상위", 60.0),
+                         ("PB", "눌림목자동", 60.0),
+                         ("MIX", "돌파자동매매용+주도주상위", 30.0),
+                         ("MIX2", "주도주상위+돌파자동매매용", 30.0)):
+    s13._cond_names[_c] = _cond
+    check(f"[{_cond}] 요구시간 {_want:.0f}초",
+          s13.entry_delay_sec(_c) == _want, f"{s13.entry_delay_sec(_c):.0f}초")
+check("조건식을 모르면 기본값(보수적)", s13.entry_delay_sec("UNKNOWN") == 60.0,
+      f"{s13.entry_delay_sec('UNKNOWN'):.0f}초")
+
+# 실제 판정까지 — 편입 40초 경과 시점
+_n13 = time.time()
+s13._first_seen["BRK"] = _n13 - 40
+s13._first_seen["LEAD"] = _n13 - 40
+check("🔴 돌파는 40초면 통과(구버전이라면 탈락)",
+      s13._entry_delay_reject("BRK", now=_n13) is None)
+check("주도주상위는 40초면 여전히 탈락(예외가 전체로 새지 않는다)",
+      s13._entry_delay_reject("LEAD", now=_n13) is not None,
+      str(s13._entry_delay_reject("LEAD", now=_n13))[:40])
+# 경계
+s13._first_seen["BRK"] = _n13 - 29.9
+check("돌파 경계: 29.9초는 탈락", s13._entry_delay_reject("BRK", now=_n13) is not None)
+s13._first_seen["BRK"] = _n13 - 30.1
+check("돌파 경계: 30.1초는 통과", s13._entry_delay_reject("BRK", now=_n13) is None)
+
+# 08-07 실측 재생 — 원익홀딩스(돌파, 편입 후 55초)가 이제 통과하는가
+s13b = build(now_dt=datetime(2026, 8, 7, 9, 1, 11))
+s13b._cond_names["030530"] = "돌파자동매매용"
+_n13b = time.time()
+s13b._first_seen["030530"] = _n13b - 55
+check("🔴 [실측] 원익홀딩스 편입 후 55초 -> 이제 통과 (그날은 5초 차이로 탈락)",
+      s13b._entry_delay_reject("030530", now=_n13b) is None)
+
+# 롤백 경로
+_bak13 = dict(SM.MIN_ENTRY_DELAY_SEC_BY_COND)
+try:
+    SM.MIN_ENTRY_DELAY_SEC_BY_COND.clear()
+    check("[롤백] dict를 비우면 전 종목 60초로 복귀",
+          s13.entry_delay_sec("BRK") == 60.0)
+finally:
+    SM.MIN_ENTRY_DELAY_SEC_BY_COND.update(_bak13)
+check("[롤백 후] 예외가 정상 복원됨", s13.entry_delay_sec("BRK") == 30.0)
+
+# 규칙이 한 곳에만 있는가 (이 코드베이스의 반복 사고 패턴 방지)
+_src13 = _insp.getsource(SM.StrategyManager._entry_delay_reject)
+check("_entry_delay_reject는 entry_delay_sec만 부른다(상수 직접 참조 금지)",
+      "entry_delay_sec" in _src13 and "MIN_ENTRY_DELAY_SEC_BY_COND" not in _src13)
+
+# ═════════════════════════════════════════════════════════
+print("\n[14] WS 스냅샷 응답을 listen() 경유로 (2026-08-07) — 장중 폴링 안전화")
+# ═════════════════════════════════════════════════════════
+# 🔴 이게 오늘 변경 중 가장 위험하다. 기존 _wait_for는 self.ws.recv()를 **직접**
+#    돌면서 기다리는 응답이 아닌 메시지를 전부 버렸다 — 장중에 부르면 체결틱
+#    (0B)·호가·조건편입(02)이 최대 10초 유실되고, listen()과 동시에 recv()를
+#    부르면 websockets가 concurrent recv 에러를 던진다. 그래서 스냅샷 폴링을
+#    켤 수 없었다. 이제 listen()이 도는 중에는 future로 받는다.
+#
+#    ⚠️ CNSRREQ는 (a)요청 응답 (b)실시간 편입 push 두 용도로 쓰인다.
+#       (b)를 삼키면 조건검색 편입이 조용히 사라진다 — 그걸 여기서 못박는다.
+import asyncio as _aio
+import json as _json
+from api import kiwoom_ws as _KWS
+
+
+class _CM14:
+    def __init__(self): self.calls = []
+    def update_snapshot(self, *a, **kw): self.calls.append((a, kw))
+
+
+def _mkws():
+    got = []
+    ws = _KWS.KiwoomWS("tok", _CM14(), is_mock=True,
+                       on_signal=lambda *a, **kw: got.append(("signal", a)))
+    return ws, got
+
+
+_ws14, _got14 = _mkws()
+check("초기엔 listen 중이 아니다(_listening=False)", _ws14._listening is False)
+check("대기 큐가 비어 있다", _ws14._pending_resp == {})
+
+# ── (1) 실시간 편입 push는 절대 삼키지 않는다 ──────────────────────
+_ws14._listening = True
+_loop14 = _aio.new_event_loop()
+try:
+    _fut14 = _loop14.create_future()
+    _ws14._pending_resp[("CNSRREQ", "1")] = _fut14
+    # return_code가 **없는** CNSRREQ = 실시간 편입 push
+    _push = _json.dumps({"trnm": "CNSRREQ", "seq": "1",
+                        "data": [{"type": "02", "item": "079650",
+                                  "name": "조건검색", "values": {}}]})
+    _loop14.run_until_complete(_ws14._handle_message(_push))
+    check("🔴 실시간 편입 push(return_code 없음)는 future로 안 감",
+          not _fut14.done())
+    check("🔴 그 push는 정상 디스패치된다(편입 유실 0)",
+          len(_got14) >= 1, f"콜백 {len(_got14)}회")
+
+    # ── (2) 요청 응답(return_code 있음)은 future로 간다 ──────────────
+    _resp = _json.dumps({"trnm": "CNSRREQ", "seq": "1", "return_code": 0,
+                        "data": [{"9001": "005930"}]})
+    _loop14.run_until_complete(_ws14._handle_message(_resp))
+    check("요청 응답(return_code 있음)은 future로 전달", _fut14.done())
+    check("응답 본문이 그대로 전달됨",
+          _fut14.result().get("return_code") == 0)
+
+    # ── (3) 대기 중인 future가 없으면 예전과 동일하게 흘려보낸다 ─────
+    # ⚠️ on_signal 호출 횟수로는 못 잰다 — 스냅샷 형태(`9001` 키)는 item에
+    #    `type`이 없어 애초에 콜백을 안 탄다. _dispatch_signal 도달 자체를 본다.
+    _seen14 = []
+    _orig_disp = _ws14._dispatch_signal
+
+    async def _spy_disp(msg):
+        _seen14.append(msg)
+        return await _orig_disp(msg)
+
+    _ws14._dispatch_signal = _spy_disp
+    _ws14._pending_resp.clear()
+    _loop14.run_until_complete(_ws14._handle_message(_resp))
+    check("대기 future가 없으면 가로채지 않고 디스패치(기존 동작 보존)",
+          len(_seen14) == 1, f"_dispatch_signal {len(_seen14)}회")
+
+    # 대기 future가 있으면 반대로 디스패치로 **안** 가야 한다
+    _seen14.clear()
+    _f2 = _loop14.create_future()
+    _ws14._pending_resp[("CNSRREQ", "1")] = _f2
+    _loop14.run_until_complete(_ws14._handle_message(_resp))
+    check("대기 future가 있으면 디스패치로 가지 않는다(중복 처리 방지)",
+          len(_seen14) == 0 and _f2.done(), f"_dispatch_signal {len(_seen14)}회")
+    _ws14._dispatch_signal = _orig_disp
+
+    # ── (4) seq가 다르면 내 응답이 아니다 ───────────────────────────
+    _f3 = _loop14.create_future()
+    _ws14._pending_resp[("CNSRREQ", "3")] = _f3
+    _loop14.run_until_complete(_ws14._handle_message(_resp))   # seq=1 응답
+    check("seq 불일치 응답은 내 future를 건드리지 않는다", not _f3.done())
+
+    # ── (5) 연결이 끊기면 대기자를 즉시 깨운다(영구 대기 방지) ───────
+    _ws14._abort_pending("테스트")
+    check("_abort_pending이 대기 future를 예외로 깨운다",
+          _f3.done() and _f3.exception() is not None)
+    check("깨운 뒤 대기 큐가 비워진다", _ws14._pending_resp == {})
+finally:
+    _loop14.close()
+    _ws14._listening = False
+
+# ── (6) 배선: listen()이 플래그를 켜고, 예외 경로에서 끈다 ────────────
+_lsrc = _insp.getsource(_KWS.KiwoomWS.listen)
+check("listen()이 recv 루프 직전에 _listening=True", "_listening = True" in _lsrc)
+check("listen()이 루프 이탈 시 _listening=False", "_listening = False" in _lsrc)
+check("listen()이 이탈 시 _abort_pending 호출", "_abort_pending" in _lsrc)
+# 재연결 중 fetch_condition_list는 _listening=False 상태여야 한다
+# (그때 켜져 있으면 아무도 future를 넘겨주지 않아 영구 대기)
+_i_true = _lsrc.index("_listening = True")
+_i_fetch = _lsrc.index("fetch_condition_list")
+check("🔴 fetch_condition_list가 _listening=True보다 **앞**에 있다",
+      _i_fetch < _i_true, "재연결 중 영구 대기 방지")
+
+# ── (7) _wait_for가 두 경로를 모두 갖는가 ──────────────────────────
+_wsrc = _insp.getsource(_KWS.KiwoomWS._wait_for)
+check("_wait_for에 listen 경유 분기가 있다", "self._listening" in _wsrc)
+check("_wait_for가 취소를 RuntimeError로 통일(태스크째 취소 방지)",
+      "CancelledError" in _wsrc and "RuntimeError" in _wsrc)
+
+# ── (8) 폴링 태스크가 실제로 등록됐는가 ────────────────────────────
+_msrc = open("main.py", encoding="utf-8").read()
+check("🔴 task_condition_snapshot_poll이 gather에 등록됨(주석 해제)",
+      "\n                self.task_condition_snapshot_poll()," in _msrc)
+import main as _m14
+check("폴링 주기 60초(백업 경로라 20초는 과함)", _m14.POLL_INTERVAL_SEC == 60,
+      f"{_m14.POLL_INTERVAL_SEC}초")
 
 # ═════════════════════════════════════════════════════════
 print("\n" + "=" * 62)

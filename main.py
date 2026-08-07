@@ -33,7 +33,12 @@ SIGNAL_WATCHDOG_INTERVAL = 300
 SIGNAL_TIMEOUT = 1800
 STRATEGY_TICK_INTERVAL = 10
 SNAPSHOT_STAGGER_SEC = 0.5  # 스냅샷 종목 처리 간격
-POLL_INTERVAL_SEC = 20      # 조건검색 주기 폴링 간격(초)
+# 조건검색 주기 폴링 간격(초). (2026-08-07) 20 -> 60으로 완화하고 폴링을
+# 재활성화했다. 이건 **실시간 push를 놓쳤을 때의 백업**이지 주 수집 경로가
+# 아니다. 20초면 조건식 3개 x 3회/분 = 시간당 540건이 라이브 소켓에 실리는데,
+# 놓친 종목은 [F] 진입 숙성(30~60초) 때문에 어차피 그 안에 못 사므로
+# 60초로도 실질 손실이 없다.
+POLL_INTERVAL_SEC = 60
 
 
 def time_in(now: datetime, h: int, m: int) -> bool:
@@ -1528,7 +1533,13 @@ class TradingBot:
                 self.task_missed_opportunities(),
                 self.task_fid228_watchdog(),
                 self.task_remote_control_watchdog(),
-                # self.task_condition_snapshot_poll(),
+                # (2026-08-07 재활성화) 실시간 push가 유일한 수집 경로였고
+                # push를 놓치면 복구 수단이 아예 없었다. 장중에 못 켰던 이유는
+                # fetch_condition_snapshot이 소켓을 **직접** recv 해서 그 사이
+                # 체결틱/호가/조건편입을 최대 10초 통째로 버렸기 때문인데,
+                # kiwoom_ws._wait_for를 listen() 경유(future 디스패치)로 바꿔
+                # 유실 0으로 만들었다. 상세는 그쪽 주석 참고.
+                self.task_condition_snapshot_poll(),
             )
         except asyncio.CancelledError:
             pass

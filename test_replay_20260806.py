@@ -502,12 +502,20 @@ s16.on_price_update("SL", 9_600)               # -4.0%
 check("숙성 미달 + 워밍업 중이라도 손절은 정상 발동", "SL" not in s16.holdings,
       f"잔존 {list(s16.holdings)}")
 
-# VWAP OFF 상태에서 진입을 막지 않는가 (켜지 않은 기능이 조용히 막으면 최악)
+# VWAP 필터가 '모름'을 차단으로 바꾸지 않는가 (2026-08-07 ON 이후에도 불변)
+# 🔴 이게 핵심이다 — VWAP 미수신(0)이면 통과시켜야 한다. 안 그러면 세션 초반
+#    이나 데이터가 안 오는 종목에서 매수가 통째로 죽는데, 로그를 뒤지기 전엔
+#    안 보인다(08-05에 시가필터가 정확히 그 이유로 하루 종일 0건이었다).
 s17 = build(datetime(2026, 8, 6, 9, 30, 0))
 setup(s17, "VW", open_px=10_000)
-check("VWAP OFF면 미수신 상태에서도 통과",
+check("VWAP_ENTRY_ENABLED == True (08-07 장마감 후 ON)",
+      SM.VWAP_ENTRY_ENABLED is True)
+check("🔴 ON이어도 VWAP 미수신이면 통과(모름이 매수를 막지 않는다)",
       s17.vwap_entry_reject("VW", 10_000) is None)
-check("VWAP_ENTRY_ENABLED == False", SM.VWAP_ENTRY_ENABLED is False)
+# 09:05 이전도 판정하지 않는다(VWAP이 요동치는 구간)
+check("ON이어도 09:05 이전에는 판정하지 않는다",
+      s17.vwap_entry_reject("VW", 10_000,
+                            now_dt=datetime(2026, 8, 6, 9, 4, 59)) is None)
 
 # ═════════════════════════════════════════════════════════
 print("\n[10] 조건검색 거래소 — KRX 전환이 계층 정합을 이루는가")

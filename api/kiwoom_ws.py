@@ -123,6 +123,21 @@ class KiwoomWS:
         self._reg_lock = asyncio.Lock()
         self._last_reg_ts = 0.0
 
+        # ── 응답 대기 future 디스패치 (2026-08-07 신설) ────────────────
+        # [왜] _wait_for는 self.ws.recv()를 **직접** 돌면서 기다리는 응답이
+        # 아닌 메시지를 전부 버린다. setup 단계(listen() 시작 전)에는 그래도
+        # 되지만, **장중에 부르면 체결틱(0B)·호가·조건편입(02)이 최대 10초
+        # 통째로 유실**된다. 게다가 listen()이 동시에 recv() 중이면
+        # websockets가 "concurrent recv" RuntimeError를 던진다.
+        # 그래서 장중 스냅샷 폴링을 켤 수 없었다(main.task_condition_snapshot_poll
+        # 이 주석 처리돼 있던 이유).
+        #
+        # -> listen()이 도는 중에는 recv()를 직접 하지 않고, _handle_message가
+        #    응답을 받아 future로 넘겨준다. 그러면 그 사이 도착한 틱은
+        #    **정상적으로 디스패치된다**(유실 0).
+        self._listening = False
+        self._pending_resp: dict[tuple, asyncio.Future] = {}
+
     # ─────────────────────────────────────────
     # 1. 연결 & 로그인
     # ─────────────────────────────────────────
@@ -357,6 +372,11 @@ class KiwoomWS:
                         logger.info("⏭️ on_reconnect 콜백 스킵 (최초 연결 또는 단절 기록 없음)")
                     self._ever_connected = True
 
+                # ⚠️ 이 플래그는 **여기서만** 켠다 (2026-08-07).
+                # 위쪽 재연결 블록의 fetch_condition_list()도 _wait_for를 쓰는데,
+                # 그 시점엔 아직 recv 루프가 안 돌아서 future를 넘겨줄 주체가
+                # 없다 — 거기서 켜져 있으면 타임아웃까지 영구 대기한다.
+                self._listening = True
                 while not self._stop:
                     try:
                         raw = await asyncio.wait_for(self.ws.recv(), timeout=IDLE_TIMEOUT)
@@ -375,9 +395,17 @@ class KiwoomWS:
             except websockets.ConnectionClosed as e:
                 logger.warning(f"🔌 연결 끊김 (code={e.code}, reason={e.reason})")
             except asyncio.CancelledError:
+                self._abort_pending("수신 루프 취소")
+                self._listening = False
                 break
             except Exception as e:
                 logger.exception(f"❌ 수신 루프 예외: {e}")
+
+            # recv 루프를 벗어났다 = 이제 아무도 future를 넘겨줄 수 없다.
+            # 대기 중인 요청을 그대로 두면 타임아웃까지 매달려 있게 되므로
+            # 즉시 깨워서 호출부가 평소의 실패 경로(빈 리스트)로 가게 한다.
+            self._listening = False
+            self._abort_pending("WS 연결 끊김")
 
             self.connected = False
             if self._stop:
@@ -391,6 +419,23 @@ class KiwoomWS:
             logger.info(f"♻️ {backoff + jitter:.1f}초 후 재연결 시도...")
             await asyncio.sleep(backoff + jitter)
             backoff = min(backoff * 2, 60)
+
+    def _abort_pending(self, why: str):
+        """대기 중인 응답 future를 전부 깨운다 (2026-08-07).
+
+        recv 루프를 벗어나면 future를 넘겨줄 주체가 사라진다. 그대로 두면
+        호출부가 타임아웃(10초)까지 매달리는데, 그 사이 재연결이 끝나
+        엉뚱한 시점에 깨어날 수도 있다. 즉시 실패시키면 호출부는 기존의
+        '응답 없음' 경로(빈 리스트 반환)로 조용히 수렴한다.
+        """
+        if not self._pending_resp:
+            return
+        n = len(self._pending_resp)
+        for fut in list(self._pending_resp.values()):
+            if not fut.done():
+                fut.set_exception(RuntimeError(f"응답 대기 중단: {why}"))
+        self._pending_resp.clear()
+        logger.info("↩️ 대기 중이던 WS 응답 %d건 중단 (%s)", n, why)
 
     async def _fire_callback(self, cb, arg):
         """on_disconnect/on_reconnect 콜백 안전 호출 (async/sync 자동 판별)."""
@@ -415,6 +460,24 @@ class KiwoomWS:
         if trnm == "PING":
             await self.ws.send(raw)
             return
+
+        # ── 응답 대기 future로 넘길 메시지인가 (2026-08-07) ──────────────
+        # ⚠️ CNSRREQ는 **두 용도로 쓰인다**: (a) 우리가 보낸 요청의 응답
+        # (스냅샷/등록 ack) (b) 실시간 편입 push. (b)를 여기서 삼키면
+        # 조건검색 편입이 조용히 사라지므로 반드시 구분해야 한다.
+        # 판별자는 **`return_code` 키의 유무**다 — 실측(08-07):
+        #   응답:   {'trnm':'CNSRREQ','seq':'1','return_code':0,'data':None}
+        #   편입:   data 안의 item이 {'type':'02','item':'079650',...} (return_code 없음)
+        # 그리고 **대기 중인 future가 있을 때만** 가로챈다. 대기가 없으면
+        # 예전과 완전히 동일하게 _dispatch_signal로 흘려보낸다.
+        if self._pending_resp and "return_code" in msg:
+            key = (trnm, str(msg.get("seq")) if msg.get("seq") is not None else None)
+            fut = self._pending_resp.get(key)
+            if fut is None:
+                fut = self._pending_resp.get((trnm, None))
+            if fut is not None and not fut.done():
+                fut.set_result(msg)
+                return
 
         if trnm in ("REAL", "CNSRREQ"):
             await self._dispatch_signal(msg)
@@ -688,6 +751,32 @@ class KiwoomWS:
         버리지 않고 다시 대기 목록으로 넘겨(등록 ack 등 다른 용도로 온 것일 수
         있으니) 계속 기다린다. seq=None이면 기존처럼 trnm만 확인(CNSRLST 등
         seq 개념이 없는 응답용)."""
+        # ── listen()이 도는 중이면 소켓을 직접 읽지 않는다 (2026-08-07) ──
+        # 직접 읽으면 그 사이 도착한 체결틱/호가/조건편입이 통째로 버려지고,
+        # listen()과 동시에 recv()를 부르게 되어 RuntimeError까지 난다.
+        # 대신 future를 걸어두고 _handle_message가 넘겨주기를 기다린다.
+        if self._listening:
+            key = (trnm, str(seq) if seq is not None else None)
+            loop = asyncio.get_event_loop()
+            fut = loop.create_future()
+            # 같은 키로 이미 대기 중이면 그쪽을 취소하고 내가 받는다
+            # (중복 요청은 정상 상황이 아니지만 영구 대기를 만들지 않는다).
+            old = self._pending_resp.get(key)
+            if old and not old.done():
+                old.cancel()
+            self._pending_resp[key] = fut
+            try:
+                return await asyncio.wait_for(fut, timeout=timeout)
+            except asyncio.TimeoutError:
+                raise RuntimeError(f"{trnm} 응답 타임아웃 ({timeout}s, listen 경유)")
+            except asyncio.CancelledError:
+                # 중복 요청에 밀렸거나 연결이 끊겼다. 호출부가 RuntimeError만
+                # 잡도록 통일한다 — CancelledError로 새면 태스크째 취소된다.
+                raise RuntimeError(f"{trnm} 응답 대기 취소 (seq={seq})")
+            finally:
+                if self._pending_resp.get(key) is fut:
+                    self._pending_resp.pop(key, None)
+
         loop = asyncio.get_event_loop()
         end = loop.time() + timeout
         while loop.time() < end:
