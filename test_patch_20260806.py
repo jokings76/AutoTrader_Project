@@ -675,16 +675,30 @@ check("VWAP 진입 필터는 기본 OFF", SM.VWAP_ENTRY_ENABLED is False)
 check("이격 기준 +0.5%", SM.VWAP_ENTRY_MIN_GAP_PCT == 0.5)
 check("적용 시작 09:05 (그 전엔 VWAP이 요동쳐 판정 무의미)",
       SM.VWAP_ENTRY_FROM == SM.time(9, 5))   # SM.time = datetime.time
-check("단위 보정 기본 1.0 (실거래 확인 전까지 원 단위 가정)",
-      SM.VWAP_UNIT_SCALE == 1.0)
+# (2026-08-07 확정) FID 14는 **백만원 단위**다. 09:00:06 실거래 진단 로그:
+#   [460940] FID13=7,649주 / FID14=43 / 현재가=5,640원
+#   실제 거래대금 7,649x5,640 = 43.14 백만원 vs FID14=43 (오차 0.33%).
+#   비율(VWAP/현재가): 원 0.0000 / 천원 0.0010 / 백만원 0.9967 / 억원 99.67.
+check("단위 보정 1e6 (2026-08-07 실거래로 백만원 확정)",
+      SM.VWAP_UNIT_SCALE == 1_000_000.0, f"{SM.VWAP_UNIT_SCALE:,.0f}")
 
 s12 = build(now_dt=datetime(2026, 8, 7, 9, 30, 0))
 setup(s12, "VW1")
-# 0B raw의 누적 필드로 VWAP이 잡히는가 (13=누적량 14=누적대금)
+# 0B raw의 누적 필드로 VWAP이 잡히는가 (13=누적량[주] 14=누적대금[백만원])
+# 10 백만원 / 1,000주 = 10,000원
 s12.on_trade({"stock_code": "VW1", "price": 10_300, "volume": 10, "side": "buy",
-              "strength": 120.0, "raw": {"13": "1000", "14": "10000000"}})
-check("raw FID 13/14로 세션 VWAP 계산 (10,000,000/1,000 = 10,000)",
+              "strength": 120.0, "raw": {"13": "1000", "14": "10"}})
+check("raw FID 13/14로 세션 VWAP 계산 (10백만원/1,000주 = 10,000원)",
       abs(s12.session_vwap("VW1") - 10_000) < 0.01, f"{s12.session_vwap('VW1'):.1f}")
+
+# 🔴 실거래 값을 그대로 태워 회귀를 못박는다 (2026-08-07 09:00:06 실측).
+s12r = build(now_dt=datetime(2026, 8, 7, 9, 30, 0))
+setup(s12r, "VW2")
+s12r.on_trade({"stock_code": "VW2", "price": 5_640, "volume": 10, "side": "buy",
+               "strength": 120.0, "raw": {"13": "7649", "14": "43"}})
+_v = s12r.session_vwap("VW2")
+check("[실측 460940] VWAP이 현재가와 같은 자릿수 (비율 0.9~1.1)",
+      0.9 <= _v / 5_640 <= 1.1, f"VWAP={_v:,.1f} / 현재가=5,640 / 비율={_v/5_640:.4f}")
 check("VWAP 미수신 종목은 0.0", s12.session_vwap("NOPE") == 0.0)
 
 # OFF일 때는 어떤 가격이어도 통과해야 한다
