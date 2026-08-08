@@ -156,6 +156,14 @@ check("초반 슬롯 캡 < 공유 상한 (실효성)",
       (not SM.EARLY_SLOT_CAP_ENABLED) or SM.EARLY_SLOT_CAP < SM.MAX_HOLDINGS,
       f"{SM.EARLY_SLOT_CAP} vs {SM.MAX_HOLDINGS}")
 check("초반 슬롯 캡 >= 1", (not SM.EARLY_SLOT_CAP_ENABLED) or SM.EARLY_SLOT_CAP >= 1)
+# (2026-08-08) 게이트 검사가격 == 실제 체결가 원칙. 되돌림이 켜져 있는데
+# 깊은 검사가 꺼져 있으면 '계획만 열리고 체결 안 되는' 죽은 구간이 생긴다.
+check("되돌림 ON이면 VWAP 깊은검사도 ON (죽은 구간 방지)",
+      (not SM.ENTRY_PULLBACK_ENABLED) or (not SM.VWAP_ENTRY_ENABLED)
+      or SM.VWAP_ENTRY_CHECK_DEEPEST,
+      f"되돌림={SM.ENTRY_PULLBACK_ENABLED} VWAP={SM.VWAP_ENTRY_ENABLED} "
+      f"깊은검사={SM.VWAP_ENTRY_CHECK_DEEPEST}")
+check("우선순위 교체 일일 한도 > 0", SM.PHASE1A_PRIORITY_MAX_PER_DAY > 0)
 check("초반 캡 종료 == 발사 게이트 전환 시각 (구간이 어긋나지 않는다)",
       SM.EARLY_SLOT_CAP_UNTIL == SM.FIRE_GATE_ACCEL_FROM,
       f"{SM.EARLY_SLOT_CAP_UNTIL} / {SM.FIRE_GATE_ACCEL_FROM}")
@@ -595,6 +603,8 @@ if _doc:
     # 바뀌는 상수라 문서와 어긋나면 장중 판단이 불가능해진다.
     doc_has("초반캡", f"초반캡 {SM.EARLY_SLOT_CAP_ENABLED} "
                     f"{SM.EARLY_SLOT_CAP_UNTIL} {SM.EARLY_SLOT_CAP}")
+    doc_has("VWAP깊은검사", f"VWAP깊은검사 {SM.VWAP_ENTRY_CHECK_DEEPEST} "
+                          f"{SM.PHASE1A_PRIORITY_MAX_PER_DAY}")
     doc_has("발사분리", f"발사분리 {SM.FIRE_GATE_SPLIT_ENABLED} "
                      f"{SM.FIRE_GATE_ACCEL_FROM} {SM.FIRE_ACCEL_MIN} "
                      f"{SM.FIRE_ACCEL_SHORT_SEC} {SM.FIRE_ACCEL_LONG_SEC} "

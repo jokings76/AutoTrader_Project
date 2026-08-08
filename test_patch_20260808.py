@@ -572,7 +572,71 @@ finally:
 check("[롤백] 플래그 원복", SM.EARLY_SLOT_CAP_ENABLED is True)
 
 # ═════════════════════════════════════════════════════════
-print("\n[9] 핫패스 비용 — 발사 판정은 매 틱 돈다")
+print("\n[9] VWAP 사각지대 — 검사 가격 == 실제 지불 가격")
+# ═════════════════════════════════════════════════════════
+check("깊은 트랜치 검사 ON", SM.VWAP_ENTRY_CHECK_DEEPEST is True)
+_deep = max(d for d, _ in SM.ENTRY_PULLBACK_TRANCHES)
+check("가장 깊은 트랜치 = 되돌림 최대 깊이", abs(_deep - 0.007) < 1e-9, str(_deep))
+
+
+def _plan_case(gap_pct):
+    """트리거가가 세션VWAP보다 gap_pct% 위인 상황에서 계획이 열리는가."""
+    st = build(datetime(2026, 8, 10, 9, 6, 0))
+    setup(st, "VW")
+    st._session_vwap["VW"] = 10_000.0
+    trig = 10_000.0 * (1 + gap_pct / 100.0)
+    st._prev_closes["VW"] = trig * 0.95            # 등락률 게이트는 통과시킨다
+    st._open_entry_plan("VW", "VW", 1, {"score": 1.0, "score_threshold": 1.0},
+                        "1A", "주도주상위", trigger_price=trig, now=NOW)
+    return st, trig
+
+
+# 죽은 구간(트리거 +0.6%) — 예전엔 계획이 열려 슬롯만 120초 묶었다.
+s9a, _t9a = _plan_case(0.6)
+check("[사각지대] 트리거 +0.6%면 계획이 아예 안 열린다(슬롯 낭비 방지)",
+      "VW" not in s9a._entry_plans)
+check("[사각지대] 그 자리의 최저 체결가는 VWAP 게이트를 못 넘는다",
+      s9a.vwap_entry_reject("VW", _t9a * (1 - _deep)) is not None)
+
+# 충분히 위(트리거 +1.5%)면 계획이 열리고 **두 트랜치 모두** 체결 가능
+s9c, trig_c = _plan_case(1.5)
+check("[정상] 트리거 +1.5%면 계획이 열린다", "VW" in s9c._entry_plans)
+for _d, _f in SM.ENTRY_PULLBACK_TRANCHES:
+    check(f"[정상] -{_d*100:.1f}% 트랜치가도 VWAP 통과(반쪽 포지션 없음)",
+          s9c.vwap_entry_reject("VW", trig_c * (1 - _d)) is None,
+          f"{trig_c * (1 - _d):,.0f}원")
+
+_sv = SM.VWAP_ENTRY_CHECK_DEEPEST
+try:
+    SM.VWAP_ENTRY_CHECK_DEEPEST = False
+    s9d, _ = _plan_case(0.6)
+    check("[롤백] 끄면 트리거 +0.6%에서도 계획이 열린다(옛 죽은 구간 재현)",
+          "VW" in s9d._entry_plans)
+finally:
+    SM.VWAP_ENTRY_CHECK_DEEPEST = _sv
+check("[롤백] 플래그 원복", SM.VWAP_ENTRY_CHECK_DEEPEST is True)
+
+_se = SM.VWAP_ENTRY_ENABLED
+try:
+    SM.VWAP_ENTRY_ENABLED = False
+    s9e, _ = _plan_case(0.0)
+    check("[교차] VWAP OFF면 깊은 검사도 무해(계획 정상 생성)",
+          "VW" in s9e._entry_plans)
+finally:
+    SM.VWAP_ENTRY_ENABLED = _se
+
+# ═════════════════════════════════════════════════════════
+print("\n[10] 우선순위 교체 일일 한도 (초반 캡의 부작용 차단)")
+# ═════════════════════════════════════════════════════════
+check("한도 상수 존재", hasattr(SM, "PHASE1A_PRIORITY_MAX_PER_DAY"))
+check("한도 > 0 (0이면 교체가 통째로 꺼진다)",
+      SM.PHASE1A_PRIORITY_MAX_PER_DAY > 0, str(SM.PHASE1A_PRIORITY_MAX_PER_DAY))
+check("한도 <= 공유 슬롯 수(슬롯당 평균 1회)",
+      SM.PHASE1A_PRIORITY_MAX_PER_DAY <= SM.MAX_HOLDINGS)
+check("카운터 초기값 0", build()._priority_upgrades_today == 0)
+
+# ═════════════════════════════════════════════════════════
+print("\n[11] 핫패스 비용 — 발사 판정은 매 틱 돈다")
 # ═════════════════════════════════════════════════════════
 s8 = build(datetime(2026, 8, 10, 9, 6, 0))
 setup(s8, "NNN")

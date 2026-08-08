@@ -343,6 +343,16 @@ VWAP_ENTRY_FROM = time(9, 5)        # 이 시각 이전에는 판정하지 않�
 VWAP_FID_ACC_VALUE = "14"           # 누적거래대금 (백만원 단위, 실측 확정)
 VWAP_FID_ACC_VOLUME = "13"          # 누적거래량 (주)
 VWAP_UNIT_SCALE = 1_000_000.0       # 14의 단위 보정(원=1.0 / 백만원=1_000_000.0)
+# 🔴 계획 생성 시 VWAP을 **가장 깊은 트랜치가**로 검사 (2026-08-08 신설).
+# 되돌림 대기는 트리거가보다 -0.3%/-0.7% 낮은 가격에 체결되는데, 예전엔
+# 계획 생성은 트리거가로 통과시키고 `_execute_buy` 하드가드는 체결가로
+# 다시 재서 **계획만 열리고 체결은 안 되는 죽은 구간**이 있었다.
+#   트리거 이격 0.50~0.80% -> 슬롯만 120초 점유, 한 건도 체결 안 됨
+#   트리거 이격 0.80~1.21% -> 1차만 체결(반쪽 포지션)
+# 실측(틱 아카이브 5일 통합 리플레이): 되돌림 체결 실패 중 VWAP 사유 하루 1~2건.
+# 초반 슬롯 캡(4칸)으로 슬롯이 귀해져 낭비 비용이 커졌으므로 같이 정리했다.
+# False로 두면 08-07까지의 동작(죽은 구간 부활).
+VWAP_ENTRY_CHECK_DEEPEST = True
 
 # ── 발사: 대량체결 버스트 3경로(OR) ──────────────────────────────
 # 창을 5초로 잡은 이유(사용자 원안 "1초" -> 5초): 키움 체결 FID 20이
@@ -929,6 +939,20 @@ FIRE_ACCEL_MIN_TICKS = 20
 EARLY_SLOT_CAP_ENABLED = True
 EARLY_SLOT_CAP_UNTIL = time(9, 5)   # 이 시각 **이전**에만 적용 (보통 FIRE_GATE_ACCEL_FROM과 같게 둔다)
 EARLY_SLOT_CAP = 4                  # 그 구간의 동시 점유 상한(보유+주문중+되돌림대기)
+
+# 🔴 우선순위 교체 일일 한도 (2026-08-08 신설 — 초반 캡의 부작용 차단)
+# [왜 지금 필요해졌나] `_try_1a_priority_upgrade`는 `can_buy_*`가 False일 때만
+# 도는데, 그 조건이 예전엔 '슬롯 6칸 만석'이라 실측 4일에 **1회**밖에 안 났다
+# (08-06 09:01:32 GS건설 -> 금호타이어). 그런데 초반 캡을 넣으면 09:00~09:05에
+# **4칸만 차도** 그 경로가 열린다 — 하필 후보가 가장 많이 쏟아지는 5분이다.
+# 교체는 매도 1건 + 매수 1건이라 **건당 왕복수수료 0.23%**를 확정 지출하므로,
+# 한도가 없으면 "샀다 팔았다"를 반복해 수수료로 녹을 수 있다.
+# (08-03에 슬롯교체가 통제 없이 3종목을 팔아 -235,860원을 확정한 전례가 있다.)
+#
+# 6 = 공유 슬롯 수. '슬롯당 평균 1회까지'라는 뜻이고 **최적화된 값이 아니라
+# 안전 상한**이다. 실측 빈도(4일 1회)보다 훨씬 넉넉하므로 정상 동작은 안 막는다.
+# 0으로 두면 우선순위 교체가 완전히 꺼진다.
+PHASE1A_PRIORITY_MAX_PER_DAY = 6
 # ⚠️ LONG은 TradeFlowTracker(max_window_sec=120)와 **정확히 같아야 한다.**
 #    180/300으로 늘리면 버퍼가 조용히 잘려 **경고 없이 틀린 값**이 나온다.
 # ⚠️ 가속도의 수학적 상한은 LONG/SHORT = 4.0이다(short 구간이 long에 포함되므로).
@@ -1467,6 +1491,10 @@ class StrategyManager:
         self._daily_bars: dict[str, dict] = {}
         # stock_code -> 그날 카운트된 버스트 파동의 발생 시각들 (BURST_WAVE_MAX용).
         self._burst_waves: dict[str, list[float]] = {}
+        # 1A 우선순위 교체 일일 횟수 (2026-08-08, PHASE1A_PRIORITY_MAX_PER_DAY용).
+        # ⚠️ 파동 카운트와 같이 **메모리 전용**이라 장중 재시작하면 리셋된다.
+        #    08:59 자동기동만 쓰면 실무상 문제없다.
+        self._priority_upgrades_today = 0
         # stock_code -> 세션 VWAP(거래소 누적 기준). 0B의 FID 13/14로 매 틱 갱신.
         # 2026-08-07 신설, 현재 관측 전용(VWAP_ENTRY_ENABLED=False).
         self._session_vwap: dict[str, float] = {}
@@ -2932,6 +2960,14 @@ class StrategyManager:
         """
         if candidate_tier <= 0:
             return False
+        # (2026-08-08) 일일 한도 — 초반 캡 도입으로 이 경로가 09:00~09:05에도
+        # 열리게 됐다(예전엔 '슬롯 6칸 만석'이라 4일에 1회였다). 한도가 없으면
+        # 후보가 쏟아지는 5분 동안 매도+매수를 반복해 왕복수수료(0.23%/회)로
+        # 녹는다. 근거는 PHASE1A_PRIORITY_MAX_PER_DAY 주석 참고.
+        if self._priority_upgrades_today >= PHASE1A_PRIORITY_MAX_PER_DAY:
+            logger.debug("[%s] 우선순위 교체 보류 — 일일 한도 %d회 소진",
+                         candidate_code, PHASE1A_PRIORITY_MAX_PER_DAY)
+            return False
         # (2026-08-04) 자리를 비워도 살 수 없는 상태면 **아무것도 팔지 않는다.**
         # 호출부는 can_buy_*가 False라는 것만 보고 이 함수를 부르는데, 그
         # False가 슬롯이 아니라 지수 가드/MDD/HALT/WS격리 때문일 수 있다.
@@ -2979,10 +3015,14 @@ class StrategyManager:
             candidate_code, candidate_tier, best_code, best_tier,
             PHASE1A_PRIORITY_MARGIN,
         )
+        # 카운터는 **매도 직전에** 올린다 — 매도 후 예외가 나도 한도가 소진돼
+        # 재시도 폭주를 막는다(보수적 방향).
+        self._priority_upgrades_today += 1
         self._execute_sell(
             best_code, best_price,
             f"1A 우선순위 교체 (후보 {candidate_code} tier {candidate_tier:.2f} "
-            f">= 보유 tier {best_tier:.2f} x{PHASE1A_PRIORITY_MARGIN:.1f})",
+            f">= 보유 tier {best_tier:.2f} x{PHASE1A_PRIORITY_MARGIN:.1f}, "
+            f"{self._priority_upgrades_today}/{PHASE1A_PRIORITY_MAX_PER_DAY}회)",
         )
         return True
 
@@ -4344,9 +4384,29 @@ class StrategyManager:
             logger.info("[%s] %s 되돌림 대기 생략: %s", stock_code, stock_name, vi_block)
             return
 
-        # 세션 VWAP 필터 (2026-08-07, 기본 OFF) — 위 두 게이트와 같은 이유로
+        # 세션 VWAP 필터 (2026-08-07) — 위 두 게이트와 같은 이유로
         # **계획 생성 전에** 본다(살 수 없는 종목이 슬롯을 묶지 않게).
-        vwap_block = self.vwap_entry_reject(stock_code, trigger_price)
+        #
+        # 🔴 (2026-08-08) 검사 가격을 **가장 깊은 트랜치가**로 바꿨다.
+        # 예전엔 트리거가로 검사했는데 실제 체결은 -0.3%/-0.7% 낮은 가격이라,
+        # `_execute_buy`의 하드가드가 그 낮은 가격으로 다시 재서 **계획은 열려
+        # 슬롯을 120초 묶어놓고 정작 체결은 안 되는 죽은 구간**이 생겼다
+        # (트리거 이격 0.50~0.80%면 한 건도, 0.80~1.21%면 1차만 체결).
+        # 실측(아카이브 5일 리플레이): 되돌림 체결 실패 중 VWAP 사유가 하루 1~2건.
+        # 초반 슬롯 캡(4칸) 도입으로 슬롯이 더 귀해져 낭비 비용이 커졌다.
+        #
+        # 원칙: **'값싼 게이트는 계획 생성 전에'는 검사 가격과 체결 가격이 같을
+        # 때만 성립한다.** 우리가 실제로 지불할 최악의 가격으로 재야 한다.
+        # 이렇게 하면 체결가는 항상 검사가 이상이므로 `_execute_buy`의 재검사가
+        # 자동으로 통과한다(하드가드는 폴링·추가매수 경로를 위해 그대로 둔다).
+        # 롤백: VWAP_ENTRY_CHECK_DEEPEST = False -> 08-07까지의 동작(죽은 구간 부활).
+        vwap_px = trigger_price
+        if (VWAP_ENTRY_CHECK_DEEPEST and ENTRY_PULLBACK_ENABLED
+                and ENTRY_PULLBACK_TRANCHES):
+            vwap_px = trigger_price * (
+                1.0 - max(d for d, _ in ENTRY_PULLBACK_TRANCHES)
+            )
+        vwap_block = self.vwap_entry_reject(stock_code, vwap_px)
         if vwap_block:
             self._note_reject(stock_code, vwap_block)
             logger.info("[%s] %s 되돌림 대기 생략: %s", stock_code, stock_name, vwap_block)

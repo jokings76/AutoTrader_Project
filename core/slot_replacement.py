@@ -224,6 +224,18 @@ def try_slot_replacement(strat, send_telegram, replacement_count: int, now) -> i
     except Exception:
         pass  # 가드 판정 실패는 교체를 막을 이유가 아니다(기존 동작 유지)
 
+    # 🔴 개장 초반 슬롯 캡 중에도 교체하지 않는다 (2026-08-08).
+    # 위 가드와 **완전히 같은 이유**다 — 이 함수는 정체 종목을 팔아 자리만
+    # 비우고 실제 매수는 일반 진입 경로가 하는데, 캡에 걸려 있으면 그 매수가
+    # 막혀 **매도만 일어나고 자리는 그냥 빈다.**
+    # 도달 경로: 장중 재시작으로 DB에서 6종목이 복원된 상태로 09:00~09:05를
+    # 지나는 경우(정상 기동에선 캡 때문에 4를 넘지 않아 ①에서 이미 걸린다).
+    try:
+        if strat.early_slot_cap_reject():
+            return replacement_count
+    except Exception:
+        pass  # 캡 판정 실패는 교체를 막을 이유가 아니다(기존 동작 유지)
+
     found = find_stagnant_holding(strat, now)
     if not found:
         return replacement_count
