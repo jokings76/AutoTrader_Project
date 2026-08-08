@@ -24,7 +24,7 @@
 """
 import sys
 import time
-from datetime import datetime, time as dtime
+from datetime import datetime, timedelta, time as dtime
 
 import os as _os_testlog
 # 실거래 로그(autotrader.log) 오염 방지 — 반드시 core/main 임포트보다 먼저.
@@ -472,7 +472,107 @@ finally:
 check("[튜닝] 전환시각이 원복됐다", SM.FIRE_GATE_ACCEL_FROM == dtime(9, 5))
 
 # ═════════════════════════════════════════════════════════
-print("\n[8] 핫패스 비용 — 발사 판정은 매 틱 돈다")
+print("\n[8] 개장 초반 슬롯 캡 — 발사 면제의 짝")
+# ═════════════════════════════════════════════════════════
+check("초반 캡 ON", SM.EARLY_SLOT_CAP_ENABLED is True)
+check("캡 4", SM.EARLY_SLOT_CAP == 4, str(SM.EARLY_SLOT_CAP))
+check("적용 종료가 발사 전환 시각과 같다",
+      SM.EARLY_SLOT_CAP_UNTIL == SM.FIRE_GATE_ACCEL_FROM,
+      f"{SM.EARLY_SLOT_CAP_UNTIL} / {SM.FIRE_GATE_ACCEL_FROM}")
+# 🔴 캡이 공유 상한 이상이면 아무것도 제한하지 못한다(있으나 마나).
+check("캡 < 공유 상한 (실효성 있는 제한)",
+      SM.EARLY_SLOT_CAP < SM.MAX_HOLDINGS,
+      f"{SM.EARLY_SLOT_CAP} < {SM.MAX_HOLDINGS}")
+check("캡 >= 1 (0이면 초반에 아무것도 못 산다)", SM.EARLY_SLOT_CAP >= 1)
+
+
+def _fill(strat, n, kind="holding"):
+    """슬롯을 n칸 채운다(보유/되돌림대기 어느 쪽이든 occupied_slots가 센다).
+
+    ⚠️ 포지션 dict의 키는 실물과 맞춘다 — `buy_quantity`가 없으면
+    `_ensure_base_capital`이 KeyError로 죽는다(스텁이 실물과 다르면 검증
+    자체가 거짓말을 한다는 08-05 감사 교훈).
+    """
+    for i in range(n):
+        c = f"FILL{i}"
+        if kind == "holding":
+            strat.holdings[c] = {"sub_strategy": "1A", "buy_price": 10_000,
+                                 "buy_quantity": 1, "quantity": 1,
+                                 "buy_time": strat._now()}
+        else:
+            strat._entry_plans[c] = {"trigger_price": 10_000, "targets": [],
+                                     "deadline": 0, "sub_strategy": "1A",
+                                     "info": {}, "cond_name": "", "phase": 1,
+                                     "stock_name": c}
+
+
+s8a = build(datetime(2026, 8, 10, 9, 2, 0))
+_fill(s8a, SM.EARLY_SLOT_CAP - 1)
+check(f"[경계] 09:02 · {SM.EARLY_SLOT_CAP - 1}칸이면 통과",
+      s8a.can_buy_more({}, "1A") is True, f"occupied={s8a.occupied_slots()}")
+s8b = build(datetime(2026, 8, 10, 9, 2, 0))
+_fill(s8b, SM.EARLY_SLOT_CAP)
+check(f"[경계] 09:02 · {SM.EARLY_SLOT_CAP}칸이면 차단",
+      s8b.can_buy_more({}, "1A") is False, f"occupied={s8b.occupied_slots()}")
+check("차단 사유가 '개장초반 슬롯 캡'으로 분류된다",
+      SM.StrategyManager._reject_category(s8b.early_slot_cap_reject())
+      == "개장초반 슬롯 캡", str(s8b.early_slot_cap_reject()))
+check("'슬롯 부족'과 뭉개지지 않는다",
+      SM.StrategyManager._reject_category(s8b.early_slot_cap_reject()) != "슬롯 부족")
+
+# 되돌림 대기(계획)도 캡에 센다 — 계획이 슬롯을 120초 점유하기 때문
+s8c = build(datetime(2026, 8, 10, 9, 2, 0))
+_fill(s8c, SM.EARLY_SLOT_CAP, kind="plan")
+check("되돌림 대기 계획도 캡에 포함된다",
+      s8c.can_buy_more({}, "1A") is False, f"occupied={s8c.occupied_slots()}")
+
+# 09:05부터는 캡이 풀리고 원래 상한(6)으로 돌아간다
+s8d = build(datetime(2026, 8, 10, 9, 5, 0))
+_fill(s8d, SM.EARLY_SLOT_CAP)
+check("[경계] 09:05:00부터 캡 해제 — 공유 상한까지 쓴다",
+      s8d.early_slot_cap_reject() is None and s8d.can_buy_more({}, "1A") is True)
+s8e = build(datetime(2026, 8, 10, 9, 5, 0))
+_fill(s8e, SM.MAX_HOLDINGS)
+check("09:05 이후에도 공유 상한 자체는 그대로 유효",
+      s8e.can_buy_more(None, "1A") is False, f"occupied={s8e.occupied_slots()}")
+
+# 🔴 초반에는 확장 슬롯(7~8)이 열리면 안 된다 — 캡의 의미가 사라진다
+s8f = build(datetime(2026, 8, 10, 9, 2, 0))
+_fill(s8f, SM.MAX_HOLDINGS)
+s8f._soft_cap_full_since = s8f._now() - timedelta(seconds=9_999)
+check("초반엔 확장 슬롯도 열리지 않는다(캡이 확장보다 먼저)",
+      s8f.can_buy_more({"score": 99.0, "score_threshold": 1.0}, "1A") is False)
+
+# 눌림목(슬롯 0)과 무관하게 1A 경로에 걸린다 = 전략 공통
+s8g = build(datetime(2026, 8, 10, 9, 2, 0))
+_fill(s8g, SM.EARLY_SLOT_CAP)
+check("캡은 전략 무관(공통 창구 can_buy_more)",
+      s8g.can_buy_phase1a({}) is False and s8g.can_buy_pullback({}) is False)
+
+# 실제 진입 경로에서도 막히는가 — 계획이 열리지 않아야 한다
+s8h = build(datetime(2026, 8, 10, 9, 2, 0))
+_fill(s8h, SM.EARLY_SLOT_CAP)
+setup(s8h, "CAPPED")
+arm(s8h, "CAPPED", NOW - 10.0)
+s8h.on_trade({"stock_code": "CAPPED", "price": 10_000, "side": "buy",
+              "volume": 10, "strength": 130.0}, now=NOW)
+check("[통합] 캡에 걸리면 되돌림 계획 자체가 안 열린다",
+      "CAPPED" not in s8h._entry_plans and "CAPPED" not in s8h.holdings)
+
+# 롤백
+_savedc = SM.EARLY_SLOT_CAP_ENABLED
+try:
+    SM.EARLY_SLOT_CAP_ENABLED = False
+    s8i = build(datetime(2026, 8, 10, 9, 2, 0))
+    _fill(s8i, SM.EARLY_SLOT_CAP)
+    check("[롤백] 캡을 끄면 09:02에도 공유 상한까지 쓴다",
+          s8i.early_slot_cap_reject() is None and s8i.can_buy_more({}, "1A") is True)
+finally:
+    SM.EARLY_SLOT_CAP_ENABLED = _savedc
+check("[롤백] 플래그 원복", SM.EARLY_SLOT_CAP_ENABLED is True)
+
+# ═════════════════════════════════════════════════════════
+print("\n[9] 핫패스 비용 — 발사 판정은 매 틱 돈다")
 # ═════════════════════════════════════════════════════════
 s8 = build(datetime(2026, 8, 10, 9, 6, 0))
 setup(s8, "NNN")

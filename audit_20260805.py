@@ -150,6 +150,15 @@ check("파동 쿨다운 <= 진입 숙성 (순번이 숙성보다 늦게 세어�
       or SM.MIN_ENTRY_DELAY_SEC <= 0,
       f"쿨다운 {SM.BURST_WAVE_COOLDOWN_SEC} vs 숙성 {SM.MIN_ENTRY_DELAY_SEC}")
 check("파동 상한 >= 1 (0이면 아무것도 못 산다)", SM.BURST_WAVE_MAX >= 1)
+# (2026-08-08) 개장 초반 슬롯 캡 — 공유 상한 이상이면 있으나 마나이고,
+# 0이면 초반에 아무것도 못 산다. 발사 면제 구간과 시각이 어긋나도 안 된다.
+check("초반 슬롯 캡 < 공유 상한 (실효성)",
+      (not SM.EARLY_SLOT_CAP_ENABLED) or SM.EARLY_SLOT_CAP < SM.MAX_HOLDINGS,
+      f"{SM.EARLY_SLOT_CAP} vs {SM.MAX_HOLDINGS}")
+check("초반 슬롯 캡 >= 1", (not SM.EARLY_SLOT_CAP_ENABLED) or SM.EARLY_SLOT_CAP >= 1)
+check("초반 캡 종료 == 발사 게이트 전환 시각 (구간이 어긋나지 않는다)",
+      SM.EARLY_SLOT_CAP_UNTIL == SM.FIRE_GATE_ACCEL_FROM,
+      f"{SM.EARLY_SLOT_CAP_UNTIL} / {SM.FIRE_GATE_ACCEL_FROM}")
 check("MAX_HOLDINGS <= HARD", SM.MAX_HOLDINGS <= SM.MAX_HOLDINGS_HARD)
 check("무장 시간 < 무장 TTL", SM.TICK_STRENGTH_SUSTAIN_SEC < SM.TICK_ARM_TTL_SEC)
 check("시간계수 전부 <= 1.0", all(v <= 1.0 for _, v in SM.TICK_BURST_TIME_MULT))
@@ -584,6 +593,8 @@ if _doc:
     doc_has("버스트방향", f"버스트방향 {SM.BURST_REQUIRE_BUY_SIDE}")
     # (2026-08-08 신규) 발사 게이트 시간대 분리 — 매수를 만드는 조건이 통째로
     # 바뀌는 상수라 문서와 어긋나면 장중 판단이 불가능해진다.
+    doc_has("초반캡", f"초반캡 {SM.EARLY_SLOT_CAP_ENABLED} "
+                    f"{SM.EARLY_SLOT_CAP_UNTIL} {SM.EARLY_SLOT_CAP}")
     doc_has("발사분리", f"발사분리 {SM.FIRE_GATE_SPLIT_ENABLED} "
                      f"{SM.FIRE_GATE_ACCEL_FROM} {SM.FIRE_ACCEL_MIN} "
                      f"{SM.FIRE_ACCEL_SHORT_SEC} {SM.FIRE_ACCEL_LONG_SEC} "
