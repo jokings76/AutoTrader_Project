@@ -844,6 +844,31 @@ DAILY_PULLBACK_MIN_BARS = 2         # 눌림 구간 최소 봉 수(D+1,D+2)
 BURST_WAVE_MAX = 3
 BURST_WAVE_COOLDOWN_SEC = 60.0   # 이 간격 안의 연속 발화는 같은 파동으로 본다
 
+# ── 파동은 '폭발 횟수'지 '게이트 통과 횟수'가 아니다 (2026-08-09 결함수정) ──
+# 08-08에 09:00~09:05 발사 면제를 넣으면서 그 구간의 `_fire_gate`가 **무조건
+# True**가 됐다. 그런데 파동 카운트가 발사 성립마다 돌기 때문에, 거래대금이
+# 하나도 안 터져도 쿨다운 주기(60초)마다 파동이 1개씩 쌓였다.
+#
+#   [실측 — 직접 재현] 틱 버퍼가 완전히 빈 종목(거래대금 0원)을 무장만
+#   유지한 채 5분 흘리면 파동이 **6개**가 된다. 09:03부터 그 종목은
+#   상한(3)을 넘어 **하루 종일 매수 불가**다(카운터는 리셋되지 않는다).
+#
+#   [실측 — 틱 아카이브 5일(08-03/04/05/06/07) 158 종목·일]
+#     · 09:05 시점에 이미 **80/158 종목이 파동 5개 소진**
+#     · 09:15까지 **106/158(67%)**가 상한 초과 = 하루 종일 매수 불가
+#     · 탈락 사유 5일 합계에서 '개장초반 슬롯 캡' 11,271건 / '파동 상한' 5,502건
+#
+# 특히 나쁜 것은 **두 신규 기능이 서로를 무력화한다**는 점이다. 초반 슬롯
+# 캡(4칸)에 막혀 대기하는 종목이 그 사이 카운터를 태우므로, 정작 우위가
+# 측정된 09:05 이후 가속 구간(+0.688%, 플러스일 4/5)에 들어갈 종목이 남지 않는다.
+#
+# -> True면 면제 구간에서 `check_burst`로 **진짜 폭발이었는지만** 확인해 센다
+#    (발사 판정에는 쓰지 않는다 — 그건 여전히 면제다). 즉 새 규칙이 아니라
+#    **08-08 이전 카운터 의미의 복원**이다. 폭발이 실제로 반복되는 종목은
+#    예전과 똑같이 4번째에서 막힌다(테스트 대조군으로 못박음).
+# 롤백: False -> 08-08 사양(게이트 통과마다 카운트, 위 결함 부활).
+BURST_WAVE_COUNT_REQUIRES_BURST = True
+
 # ── 발사 게이트 시간대 분리 (2026-08-08 신규, 사용자 지정) ─────────────
 # 09:00~09:05는 **버스트를 끄고**, 09:05부터는 버스트 대신 **거래대금 가속도**를
 # 발사 조건으로 쓴다. 무장(FID228)·숙성·등락률·VWAP·파동 상한·되돌림 대기는
@@ -1774,6 +1799,15 @@ class StrategyManager:
             waves.append(now)
         return len(waves)
 
+    def _burst_wave_count(self, stock_code: str) -> int:
+        """지금까지 센 파동 수 — **읽기 전용**(카운트를 올리지 않는다).
+
+        (2026-08-09) 발사 면제 구간에서 '폭발이 아니었다'로 판정됐을 때
+        쓴다. 그때도 상한 판정은 해야 하는데(이미 진짜 폭발로 상한을 넘긴
+        종목은 계속 막혀야 한다) 카운트를 올려서는 안 된다.
+        """
+        return len(self._burst_waves.get(stock_code, ()))
+
     def _burst_wave_reject(self, stock_code: str, wave_no: int) -> Optional[str]:
         """파동 순번 상한 판정. None이면 통과, 문자열이면 탈락 사유.
 
@@ -2301,6 +2335,15 @@ class StrategyManager:
             self._risk_tripped = False
             self._base_capital = None
             self._buy_count_today.clear()  # 재매수 상한도 하루 단위 (2026-07-30)
+            # (2026-08-09) '하루 단위' 카운터를 여기 전부 모은다. 예전엔
+            # _buy_count_today만 있어서, 이름은 `_today`인데 실제로는 프로세스
+            # 수명(08:59 기동 ~ 15:33 종료) 단위인 것들이 섞여 있었다.
+            # 정상 운용에선 프로세스가 하루를 안 넘겨 차이가 안 나지만,
+            # 봇을 하루 이상 띄워두면 이 둘만 영원히 소진된 채로 남는다
+            # (매수를 덜 하는 보수적 방향이라 사고는 아니었다).
+            self._priority_upgrades_today = 0   # 우선순위 교체 일일 한도
+            self._rescue_count_today = 0        # 손절대신 추가매수 일일 한도
+            self._burst_waves.clear()           # 파동 순번도 '그날' 기준이다
 
     def risk_can_trade(self) -> bool:
         """일손실 -3% 차단기. 트립되면 신규 매수 전면 금지(청산은 계속 작동)."""
@@ -4151,7 +4194,33 @@ class StrategyManager:
         # 카운트는 발화할 때마다 하고(쿨다운 60초로 같은 파동은 접는다),
         # 상한을 넘으면 진입만 막는다 — 카운트 자체는 계속 돌아야
         # 나중 파동의 순번이 정확해진다.
-        wave_no = self._note_burst_wave(stock_code, now=now)
+        #
+        # 🔴 (2026-08-09) **발사 면제 구간에서는 실제 폭발이 있을 때만 센다.**
+        # 파동은 '거래대금 폭발 횟수'를 세는 지표이지 '게이트를 몇 번 지났나'가
+        # 아니다. 그런데 08-08에 09:00~09:05 발사 면제를 넣으면서 그 구간의
+        # _fire_gate가 **무조건 True**가 되어, 폭발이 하나도 없어도 쿨다운
+        # 주기(60초)마다 파동이 1개씩 쌓였다. 실측(틱 아카이브 5일):
+        #   · 거래대금 0원으로 5분을 흘리면 파동 6개 — 09:03부터 매수 불가
+        #   · 09:05 시점에 80/158 종목이 이미 파동 5개를 소진
+        #   · 09:15까지 158종목 중 106개(67%)가 상한 초과 = 하루 종일 매수 불가
+        # 특히 초반 슬롯 캡(4칸)에 막혀 대기하는 종목이 그 사이 카운터를
+        # 태우므로, **정작 우위가 측정된 09:05 이후 가속 구간에 들어갈 종목이
+        # 남지 않는다** — 두 신규 기능이 서로를 무력화하고 있었다.
+        # -> 면제 구간에서는 check_burst로 '진짜 폭발이었는가'만 확인해 센다.
+        #    발사 판정에는 쓰지 않는다(그건 여전히 면제다). 즉 이 변경은 새
+        #    규칙이 아니라 **08-08 이전 카운터 의미의 복원**이다.
+        if (BURST_WAVE_COUNT_REQUIRES_BURST
+                and detail.get("fire_gate") == "early_open"):
+            try:
+                _burst_ok, _ = self.check_burst(stock_code, now=now, now_dt=now_dt)
+            except Exception:
+                # 카운트 실패가 매수를 막을 이유는 없다 — 세지 않고 넘어간다
+                # (보수적 방향은 '덜 세는' 쪽이다. 더 세면 종목이 죽는다).
+                _burst_ok = False
+            wave_no = (self._note_burst_wave(stock_code, now=now) if _burst_ok
+                       else self._burst_wave_count(stock_code))
+        else:
+            wave_no = self._note_burst_wave(stock_code, now=now)
         info["burst_wave"] = wave_no
         wave_reject = self._burst_wave_reject(stock_code, wave_no)
         if wave_reject:
@@ -5285,7 +5354,10 @@ class StrategyManager:
 
         # 등락률(상·하한) + 진입 숙성 — 주문 직전 하드가드.
         # `_open_entry_plan`에서 이미 보지만 여기도 두는 이유는 `_execute_buy`
-        # 호출부가 3곳이기 때문이다(폴링 / 되돌림 체결 / 손절대신 추가매수).
+        # 호출부가 **4곳**이기 때문이다 — 폴링(_evaluate_1a_pullback_entry) /
+        # 되돌림 트랜치(_try_fill_entry_plan) / 손절대신 추가매수(_do_rescue_add) /
+        # 즉시매수 폴백(_maybe_tick_entry, ENTRY_PULLBACK_ENABLED=False일 때만).
+        # (2026-08-09: 오래 "3곳"으로 적혀 있었다. audit_deep [2]가 이제 수를 센다.)
         chg_reject = (self._entry_change_reject(stock_code, sub_strategy, current_price)
                       or self._entry_delay_reject(stock_code))
         if chg_reject:
@@ -6459,6 +6531,37 @@ class StrategyManager:
             return
         if stock_code in self.sell_blocked:
             return
+
+        # ── 기록가 위생검사 (2026-08-09) ──────────────────────────────
+        # 🔴 **절대 매도를 막지 않는다.** 값을 고칠 뿐이다 — 여기서 return하면
+        # 보유분이 무방비가 되는데, 그건 잘못된 기록보다 훨씬 나쁘다.
+        #
+        # 왜 필요한가: 08-05에 on_price_update에 가격 위생검사를 넣으면서
+        # "**모든 매도가 이 함수를 지난다**"고 적었는데 **사실이 아니다.**
+        # `_execute_sell`을 직접 부르는 경로가 따로 있다 —
+        #   · check_timeouts(분봉 종가)  · try_slot_replacement(분봉 종가)
+        #   · _try_1a_priority_upgrade   · main.task_force_close_watcher(15:10)
+        # 이 경로들은 가격 조건 없이 청산하므로 **잘못된 매도가 나가지는
+        # 않지만**, current_price가 오염되면 기록 손익이 통째로 틀어진다.
+        # 그 값은 `_daily_realized`로 흘러 **MDD 일손실 차단(-3%)을 구동**하므로,
+        # 한 건의 쓰레기 값이 그날 매수를 전면 차단할 수 있다.
+        # (주문 자체는 항상 시장가라 current_price를 쓰지 않는다 — 확인함.)
+        _bp = float(pos.get("buy_price") or 0)
+        try:
+            current_price = float(current_price)
+        except (TypeError, ValueError):
+            current_price = 0.0
+        if _bp > 0 and not (_bp * 0.2 <= current_price <= _bp * 5):
+            _fallback = self._fresh_tick_price(stock_code) or 0
+            if not (_bp * 0.2 <= float(_fallback or 0) <= _bp * 5):
+                _fallback = _bp      # 최후 폴백: 손익 0으로 기록(과대 손실 방지)
+            logger.warning(
+                "[%s] 매도 기록가 이상 %s (매수가 %s) -> %s로 대체. "
+                "매도는 그대로 진행한다(시장가).",
+                stock_code, f"{current_price:,.0f}", f"{_bp:,.0f}",
+                f"{float(_fallback):,.0f}",
+            )
+            current_price = float(_fallback)
 
         remaining = int(pos.get("qty", pos.get("buy_quantity")) or 0)
         if remaining <= 0:

@@ -567,6 +567,8 @@ if _doc:
                    f"{SM.MAX_HOLDINGS} {SM.MAX_HOLDINGS_HARD}")
     doc_has("진입숙성", f"진입숙성 {SM.MIN_ENTRY_DELAY_SEC}")
     doc_has("파동상한", f"파동상한 {SM.BURST_WAVE_MAX}")
+    # 2026-08-09 결함수정 — 면제 구간에서 파동이 '시간'으로 소진되던 것을 막는다.
+    doc_has("파동카운트", f"파동카운트 {SM.BURST_WAVE_COUNT_REQUIRES_BURST}")
     doc_has("무장", f"무장 {SM.TICK_STRENGTH_MIN} {SM.TICK_STRENGTH_SUSTAIN_SEC}")
     # 2026-08-07 신설. 현재 OFF지만 켜는 순간 매수 게이트가 되므로 문서와 묶어둔다.
     doc_has("VWAP진입", f"VWAP진입 {SM.VWAP_ENTRY_ENABLED} "

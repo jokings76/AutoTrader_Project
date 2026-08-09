@@ -346,13 +346,31 @@ check("09:02 — entry_reason에 면제 표기가 남는다",
 # ═════════════════════════════════════════════════════════
 print("\n[5] 바뀐 발사 경로에서도 나머지 게이트가 그대로 사는가")
 # ═════════════════════════════════════════════════════════
-# [H] 파동 상한 — 면제 구간이라 발사는 항상 참이지만 4번째는 막혀야 한다.
+# [H] 파동 상한 — 면제 구간에서도 **진짜 폭발**은 4번째에서 막혀야 한다.
+#
+# 🔴 (2026-08-09 사양 정정) 이 블록은 원래 거래대금이 **0원인** 종목으로
+# 1,2,3번째 통과 -> 4번째 차단을 확인했다. 그건 결함을 사양으로 굳힌
+# 것이었다 — 면제 구간의 _fire_gate가 무조건 True라 폭발이 하나도 없어도
+# 60초마다 파동이 쌓였고, 실측상 09:15까지 158종목 중 106개(67%)가 상한을
+# 넘겨 **하루 종일 매수 불가**가 됐다. 파동은 '폭발 횟수'를 세는 지표이지
+# '게이트 통과 횟수'가 아니다(BURST_WAVE_COUNT_REQUIRES_BURST 주석 참고).
+# -> 브레이크가 살아있음은 **진짜 폭발을 반복하는 종목**으로 확인한다.
+
+
+def _boom(strat, code, t):
+    """실제 대량체결(4천만원 문턱 초과 x 2건)을 만들어 check_burst를 성립시킨다."""
+    for k in range(3):
+        strat.phase1b.trade_flow.add_tick(code, 10_000, "buy", 6_000,
+                                          now=t - 2 + k * 0.5)
+
+
 s5 = build(datetime(2026, 8, 10, 9, 2, 0))
 setup(s5, "GGG")
 arm(s5, "GGG", NOW - 10.0)
 waves = []
 for i in range(SM.BURST_WAVE_MAX + 1):
     t = NOW + i * (SM.BURST_WAVE_COOLDOWN_SEC + 1)
+    _boom(s5, "GGG", t)
     o, d = s5.evaluate_tick_entry(
         "GGG", "1A", 10_000, open_price=10_000, cond_name="주도주상위",
         now=t, now_dt=datetime(2026, 8, 10, 9, 2, 0),
@@ -363,6 +381,63 @@ check(f"[H] 면제 구간에서도 1~{SM.BURST_WAVE_MAX}번째 파동은 통과"
       str([w[1] for w in waves]))
 check(f"[H] {SM.BURST_WAVE_MAX + 1}번째 파동은 차단",
       waves[-1][0] is False and "버스트 파동" in waves[-1][2], waves[-1][2][:60])
+
+# 🔴 결함 회귀방지 — 거래대금이 0원이면 파동은 **한 개도** 쌓이지 않는다.
+# (수정 전엔 여기서 1,2,3,4로 쌓여 4번째부터 하루 종일 매수 불가였다)
+s5q = build(datetime(2026, 8, 10, 9, 2, 0))
+setup(s5q, "QUIET")
+arm(s5q, "QUIET", NOW - 10.0)
+quiet = []
+for i in range(SM.BURST_WAVE_MAX + 2):
+    t = NOW + i * (SM.BURST_WAVE_COOLDOWN_SEC + 1)
+    o, d = s5q.evaluate_tick_entry(
+        "QUIET", "1A", 10_000, open_price=10_000, cond_name="주도주상위",
+        now=t, now_dt=datetime(2026, 8, 10, 9, 2, 0),
+    )
+    quiet.append((o, d.get("burst_wave")))
+check("🔴 [회귀] 폭발이 없으면 면제 구간에서 파동이 쌓이지 않는다",
+      all(w[1] == 0 for w in quiet), str([w[1] for w in quiet]))
+check("🔴 [회귀] 그래서 5분을 흘려도 매수 자격을 잃지 않는다",
+      all(w[0] for w in quiet), str([w[0] for w in quiet]))
+check("🔴 [회귀] 읽기전용 카운터가 값을 올리지 않는다",
+      s5q._burst_wave_count("QUIET") == 0
+      and s5q._burst_wave_count("QUIET") == 0)
+
+# 09:05 이후(가속 경로)는 예전과 동일하게 발사마다 센다 — 면제가 아니므로
+# '무조건 참'이 아니고, 가속 성립 자체가 거래대금 집중 이벤트다.
+s5a = build(datetime(2026, 8, 10, 9, 6, 0))
+setup(s5a, "ACC")
+arm(s5a, "ACC", NOW - 10.0)
+_tfa = s5a.phase1b.trade_flow
+feed_uniform(_tfa, "ACC", 40_000_000, NOW - 30.0, span=90.0)   # 앞 90초
+feed_uniform(_tfa, "ACC", 90_000_000, NOW, span=29.0)          # 최근 30초 집중
+_o, _d = s5a.evaluate_tick_entry(
+    "ACC", "1A", 10_000, open_price=10_000, cond_name="주도주상위",
+    now=NOW, now_dt=datetime(2026, 8, 10, 9, 6, 0))
+check("[H] 09:05 이후 가속 발사는 그대로 파동 1을 센다",
+      _o is True and _d.get("burst_wave") == 1,
+      f"발사={_o} 파동={_d.get('burst_wave')}")
+
+# 롤백 — False로 두면 08-08 사양(게이트 통과마다 카운트)이 그대로 돌아온다
+_saved_wc = SM.BURST_WAVE_COUNT_REQUIRES_BURST
+try:
+    SM.BURST_WAVE_COUNT_REQUIRES_BURST = False
+    s5r = build(datetime(2026, 8, 10, 9, 2, 0))
+    setup(s5r, "RB")
+    arm(s5r, "RB", NOW - 10.0)
+    rb = []
+    for i in range(SM.BURST_WAVE_MAX + 1):
+        t = NOW + i * (SM.BURST_WAVE_COOLDOWN_SEC + 1)
+        o, d = s5r.evaluate_tick_entry(
+            "RB", "1A", 10_000, open_price=10_000, cond_name="주도주상위",
+            now=t, now_dt=datetime(2026, 8, 10, 9, 2, 0))
+        rb.append((o, d.get("burst_wave")))
+    check("[롤백] False면 폭발 없이도 파동이 쌓인다(08-08 사양)",
+          [w[1] for w in rb] == [1, 2, 3, 4] and rb[-1][0] is False,
+          str([w[1] for w in rb]))
+finally:
+    SM.BURST_WAVE_COUNT_REQUIRES_BURST = _saved_wc
+check("[롤백 후] 정상 복원", SM.BURST_WAVE_COUNT_REQUIRES_BURST is True)
 
 # 지수 HALT는 발사보다 먼저 걸린다
 s5b = build(datetime(2026, 8, 10, 9, 2, 0))

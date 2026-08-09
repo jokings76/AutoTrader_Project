@@ -178,10 +178,37 @@ check("폴링 경로에 check_burst 직접 호출이 없다",
       "check_burst" not in src_poll)
 check("틱 경로에도 check_burst 직접 호출이 없다",
       "check_burst" not in src_tick)
-# 발사는 evaluate_tick_entry 한 곳에서만 판정한다
+# 발사는 evaluate_tick_entry 한 곳에서만 판정한다.
+# ⚠️ (2026-08-09) 여기는 원래 `"self.check_burst" not in src_eval`라는
+# **소스 문자열 단언**이었다. 파동 카운트 결함을 고치면서 카운트 목적으로
+# check_burst를 부르게 되자 **멀쩡한 코드가 실패**로 잡혔다 — 이 코드베이스가
+# 반복해서 경고해 온 바로 그 함정이다(08-06 아침 오탐 3건, 같은 날 오후 1건).
+# -> **동작으로** 검증한다: 발사 판정 자체가 _fire_gate에서 나오는지를
+#    스파이로 확인하고, 면제 구간에서 거래대금이 0원이어도 발사되는지(=
+#    check_burst가 발사를 결정하지 않는지)를 실제 호출로 본다.
 src_eval = inspect.getsource(SM.StrategyManager.evaluate_tick_entry)
-check("evaluate_tick_entry가 _fire_gate 단일 창구를 쓴다",
-      "_fire_gate" in src_eval and "self.check_burst" not in src_eval)
+check("evaluate_tick_entry가 _fire_gate를 거친다", "_fire_gate" in src_eval)
+
+_fg_calls = {"n": 0}
+s1z = build(datetime(2026, 8, 10, 9, 2, 0))
+setup(s1z, "ZZZ")
+arm(s1z, "ZZZ", NOW - 10.0)
+_orig_fg = s1z._fire_gate
+def _spy_fg(*a, **kw):
+    _fg_calls["n"] += 1
+    return _orig_fg(*a, **kw)
+s1z._fire_gate = _spy_fg
+okz, dz = s1z.evaluate_tick_entry("ZZZ", "1A", 10_000, open_price=10_000,
+                                  cond_name="주도주상위", now=NOW,
+                                  now_dt=datetime(2026, 8, 10, 9, 2, 0))
+check("발사 판정이 _fire_gate에서 나온다(스파이 호출 확인)", _fg_calls["n"] == 1,
+      f"호출 {_fg_calls['n']}회")
+# 틱 버퍼가 완전히 빈 종목 = check_burst는 반드시 False. 그런데도 발사돼야
+# '면제가 진짜 면제'다 — 즉 발사를 결정하는 것은 check_burst가 아니다.
+_cb_ok, _ = s1z.check_burst("ZZZ", now=NOW,
+                            now_dt=datetime(2026, 8, 10, 9, 2, 0))
+check("면제 구간: check_burst가 False여도 발사된다(발사≠check_burst)",
+      _cb_ok is False and okz is True, f"check_burst={_cb_ok} 발사={okz}")
 
 # 실제 호출로 두 경로가 같은 결론을 내는지 확인 (09:06, 가속 미달)
 _fired = {"n": 0}
@@ -343,6 +370,37 @@ s4c._try_1a_priority_upgrade("CAND", 99.0)
 check("전면차단(WS격리) 중엔 우선순위 교체가 매도하지 않는다",
       len([o for o in s4c.order_manager.orders if o["side"] == "sell"]) == sold_before)
 
+# 🔴 (2026-08-09 추가) 초반 캡 중 우선순위 교체는 **막지 않는다** — 대신
+# 반쪽이 되지 않아야 한다. `try_slot_replacement`와 다른 이유:
+#   · slot_replacement는 팔기만 하고 매수는 일반 진입 경로에 맡긴다 -> 캡에
+#     걸려 있으면 매수가 안 와서 반쪽이 된다(그래서 위에서 막았다).
+#   · priority_upgrade는 호출부가 매도 직후 can_buy를 **다시 확인해 바로 산다**.
+#     `_execute_sell`이 holdings를 동기적으로 지우므로 점유가 4->3이 되어
+#     캡이 풀린다. 즉 여기서 캡을 막으면 오히려 교체 기능이 통째로 죽는다.
+# 캡 도입으로 이 경로가 09:00~09:05에도 열렸으므로(예전엔 6칸 만석이라 4일
+# 1회) 실제로 완결되는지 못박아 둔다.
+s4d = build(datetime(2026, 8, 10, 9, 2, 0))
+for i in range(SM.EARLY_SLOT_CAP):
+    _pos(s4d, f"C{i}")
+    s4d.holdings[f"C{i}"]["buy_time"] = s4d._now() - timedelta(minutes=30)
+    s4d.holdings[f"C{i}"]["entry_score"] = 1.0
+    s4d.phase1b.start_watching(f"C{i}")
+    s4d.phase1b.trade_flow.add_tick(f"C{i}", 10_000, "buy", 10, now=NOW - 1)
+_info = {"score": 10.0, "score_threshold": 3.0}
+check("[전제] 캡이 실제로 매수를 막고 있다",
+      s4d.early_slot_cap_reject() is not None
+      and s4d.can_buy_more(_info, "1A") is False)
+_s_before = len([o for o in s4d.order_manager.orders if o["side"] == "sell"])
+_upgraded = s4d._try_1a_priority_upgrade("CAND", 99.0)
+_s_after = len([o for o in s4d.order_manager.orders if o["side"] == "sell"])
+check("초반 캡 중 우선순위 교체가 정확히 1건만 매도한다",
+      _upgraded is True and _s_after - _s_before == 1,
+      f"매도 {_s_after - _s_before}건")
+check("🔴 매도 직후 자리가 비어 매수가 열린다(반쪽 동작 아님)",
+      s4d.occupied_slots() == SM.EARLY_SLOT_CAP - 1
+      and s4d.can_buy_more(_info, "1A") is True,
+      f"점유 {s4d.occupied_slots()}")
+
 # ══════════════════════════════════════════════════════════
 section("[5] 우선순위 교체 폭주 한도 (초반 캡의 부작용)")
 # ══════════════════════════════════════════════════════════
@@ -495,6 +553,42 @@ for v in bad_inputs:
 sells8 = [o for o in s8.order_manager.orders if o["side"] == "sell"]
 check("이상 가격 9종에 예외 0건", err == 0, f"예외 {err}건")
 check("이상 가격으로 매도가 나가지 않는다", not sells8, f"매도 {len(sells8)}건")
+
+# ── (2026-08-09 추가) `_execute_sell` 직접 호출 경로의 기록가 위생 ────────
+# 08-05에 "**모든 매도가 on_price_update를 지난다**"고 적었지만 사실이 아니다 —
+# check_timeouts / try_slot_replacement / _try_1a_priority_upgrade /
+# main.task_force_close_watcher는 `_execute_sell`을 **직접** 부른다.
+# 그 경로들은 가격 조건 없이 청산하므로 잘못된 매도가 나가지는 않지만,
+# current_price가 오염되면 기록 손익이 틀어지고 그 값이 `_daily_realized`로
+# 흘러 **MDD 일손실 차단(-3%)을 잘못 트립**시켜 그날 매수를 전면 차단할 수 있다.
+# 요구사항은 두 가지이고 **순서가 중요하다**:
+#   ① 매도는 무슨 값이 와도 반드시 나간다(막으면 보유분이 무방비가 된다)
+#   ② 기록 손익은 오염되지 않는다
+for v in bad_inputs:
+    s8s = build(datetime(2026, 8, 10, 10, 0, 0))
+    _pos(s8s, "SELLBAD")
+    _bp = s8s.holdings["SELLBAD"]["buy_price"]
+    try:
+        s8s._execute_sell("SELLBAD", v, "직접호출 강제청산")
+        _exc = False
+    except Exception:
+        _exc = True
+    _sold = [o for o in s8s.order_manager.orders if o["side"] == "sell"]
+    check(f"[{v!r}] 이상 기록가에도 매도는 반드시 나간다",
+          (not _exc) and len(_sold) == 1 and "SELLBAD" not in s8s.holdings,
+          f"예외={_exc} 매도={len(_sold)} 보유잔존={len(s8s.holdings)}")
+    # 기록가는 직접 못 보므로 '손익이 비상식적이지 않은가'로 확인한다.
+    # 정화가 동작하면 최악이라도 buy_price(손익 0)로 수렴한다.
+    check(f"[{v!r}] 기록 손익이 오염되지 않는다(|일실현| <= 매수금액)",
+          abs(s8s._daily_realized) <= _bp * 10 * 1.5,
+          f"일실현 {s8s._daily_realized:,.0f}")
+
+# 대조군 — 정상 가격이면 정화가 개입하지 않고 손익이 그대로 기록된다
+s8n = build(datetime(2026, 8, 10, 10, 0, 0))
+_pos(s8n, "SELLOK")
+s8n._execute_sell("SELLOK", 10_500, "직접호출 정상청산")
+check("[대조군] 정상 가격은 정화하지 않는다(이익이 기록된다)",
+      s8n._daily_realized > 0, f"일실현 {s8n._daily_realized:,.0f}")
 
 # 발사 게이트도 같은 내성 — 틱/데이터가 망가져도 매수를 만들지 않는다
 s8b = build(datetime(2026, 8, 10, 9, 6, 0))
