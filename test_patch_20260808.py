@@ -704,8 +704,11 @@ finally:
 print("\n[10] 우선순위 교체 일일 한도 (초반 캡의 부작용 차단)")
 # ═════════════════════════════════════════════════════════
 check("한도 상수 존재", hasattr(SM, "PHASE1A_PRIORITY_MAX_PER_DAY"))
-check("한도 > 0 (0이면 교체가 통째로 꺼진다)",
-      SM.PHASE1A_PRIORITY_MAX_PER_DAY > 0, str(SM.PHASE1A_PRIORITY_MAX_PER_DAY))
+# (2026-08-10) 원래 `> 0`이었다. 0은 상수 주석이 명시한 **정상 상태**('완전 OFF')이고
+# 오늘 실제로 0으로 껐다 — 09:01:41~09:03:36에 6회를 전부 소진하고 그중 3회를
+# 유령 포지션에 낭비했다. 음수만 막는다.
+check("한도 >= 0 (0 = 교체 완전 OFF, 정상 상태)",
+      SM.PHASE1A_PRIORITY_MAX_PER_DAY >= 0, str(SM.PHASE1A_PRIORITY_MAX_PER_DAY))
 check("한도 <= 공유 슬롯 수(슬롯당 평균 1회)",
       SM.PHASE1A_PRIORITY_MAX_PER_DAY <= SM.MAX_HOLDINGS)
 check("카운터 초기값 0", build()._priority_upgrades_today == 0)

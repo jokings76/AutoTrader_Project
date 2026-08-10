@@ -1055,9 +1055,21 @@ sC._execute_sell = lambda c, p, r: _soldC.append((c, r))
 sC.candidate_tier = lambda c: (0.1 if c.startswith("FL") else 99.0)
 check("[대조군] 차단 사유 없음", sC._entry_block_reason() is None,
       str(sC._entry_block_reason()))
+# (2026-08-10) 교체 상수를 0(OFF)으로 내렸으므로 이 블록에서만 잠시 되살린다.
+# 여기서 보려는 건 '한도'가 아니라 **차단 사유가 없으면 교체가 도는가**(과잉차단
+# 아님)이므로, 정책 OFF 때문에 이 배선 검증을 잃으면 안 된다.
+_sv_prio = SM.PHASE1A_PRIORITY_MAX_PER_DAY
+SM.PHASE1A_PRIORITY_MAX_PER_DAY = 6
+try:
+    _upC = sC._try_1a_priority_upgrade("NEWC2", 99.0)
+finally:
+    SM.PHASE1A_PRIORITY_MAX_PER_DAY = _sv_prio
 check("[대조군] 정상 상태에서는 우선순위 교체가 동작(과잉차단 아님)",
-      sC._try_1a_priority_upgrade("NEWC2", 99.0) is True and bool(_soldC),
-      str(_soldC))
+      _upC is True and bool(_soldC), str(_soldC))
+check("[정책] 한도 0이면 같은 상황에서도 교체가 안 돈다(현재 사양)",
+      sC._try_1a_priority_upgrade("NEWC3", 99.0) is False
+      if SM.PHASE1A_PRIORITY_MAX_PER_DAY == 0 else True,
+      f"한도={SM.PHASE1A_PRIORITY_MAX_PER_DAY}")
 
 # can_buy_more 리팩터링 후에도 판정이 동일한지 (경계 포함)
 sM, cM = build(datetime(2026, 8, 3, 10, 59, 0))

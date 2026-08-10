@@ -391,7 +391,15 @@ check("[전제] 캡이 실제로 매수를 막고 있다",
       s4d.early_slot_cap_reject() is not None
       and s4d.can_buy_more(_info, "1A") is False)
 _s_before = len([o for o in s4d.order_manager.orders if o["side"] == "sell"])
-_upgraded = s4d._try_1a_priority_upgrade("CAND", 99.0)
+# (2026-08-10) 교체 상수를 0(OFF)으로 내렸으므로 이 블록에서만 잠시 되살린다.
+# 여기서 검증하는 건 '한도'가 아니라 **초반 캡 중에도 반쪽 동작이 아닌가**라는
+# 배선이다. 되살리는 날 이 검증이 없으면 그대로 사고가 난다.
+_sv_prio = SM.PHASE1A_PRIORITY_MAX_PER_DAY
+SM.PHASE1A_PRIORITY_MAX_PER_DAY = 6
+try:
+    _upgraded = s4d._try_1a_priority_upgrade("CAND", 99.0)
+finally:
+    SM.PHASE1A_PRIORITY_MAX_PER_DAY = _sv_prio
 _s_after = len([o for o in s4d.order_manager.orders if o["side"] == "sell"])
 check("초반 캡 중 우선순위 교체가 정확히 1건만 매도한다",
       _upgraded is True and _s_after - _s_before == 1,

@@ -1006,7 +1006,15 @@ for i in range(20):
 for i in range(10):
     s.phase1b.trade_flow.add_tick("HOT", 10_000, "buy", _BURST_VOL, now=time.time() - i * 3)
 before = len(s.holdings)
-swapped = s._try_1a_priority_upgrade("HOT", s.candidate_tier("HOT"))
+# (2026-08-10) 우선순위 교체는 장중 폭주(115초에 6회 소진)로 상수를 **0(OFF)**로
+# 내렸다. 정책 때문에 **배선 회귀 테스트를 잃으면 안 되므로** 이 블록에서만
+# 한도를 잠시 되살린다 — [E] 눌림목 슬롯 0 때와 같은 처리다.
+_sv_prio = SM.PHASE1A_PRIORITY_MAX_PER_DAY
+SM.PHASE1A_PRIORITY_MAX_PER_DAY = 6
+try:
+    swapped = s._try_1a_priority_upgrade("HOT", s.candidate_tier("HOT"))
+finally:
+    SM.PHASE1A_PRIORITY_MAX_PER_DAY = _sv_prio
 check("만석 + 정체 보유 -> 더 강한 후보로 교체 성립", swapped and len(s.holdings) == before - 1,
       f"swapped={swapped}, 보유 {before}->{len(s.holdings)}")
 

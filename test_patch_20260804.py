@@ -328,22 +328,27 @@ if "X1" in s4.holdings:
               10_200 < rec["sell_price"] < 10_600, f'{rec["sell_price"]:,.0f}')
 
 # ═════════════════════════════════════════════════════════
-print("\n[9] 손실반등도 50% 분할 (2026-08-05 변경)")
+print("\n[9] 반등소진 매도 — 본전 이상에서만 + 50% 분할 (2026-08-10 사양 변경)")
 # ═════════════════════════════════════════════════════════
+# 🔴 (2026-08-10 사용자 지정) 이 규칙은 원래 **손실 구간 전용**이었다.
+# 그런데 실거래가 두 번 반대로 나왔다:
+#   · 08-05: 6건 중 5건이 이후 상승, 4건은 익절캡까지 (실현 -6,967 vs 홀딩 +28,690)
+#            -> 그때는 '전량 -> 50% 분할'로 절반만 완화했다.
+#   · 08-10: 09:50까지 **8건 전부 손실**, 합계 -50,636원 = 그날 손실의 82%
+#            (-0.25% ~ -1.55%, 평균 -0.81%). 완화로는 부족했다.
+# -> 이제 **순손익 LOSS_REBOUND_MIN_NET(0.0) 이상에서만** 발동한다.
+#    손실 구간은 -3% 손절이 담당한다.
+# 시나리오: 10,000원 매수 -> 9,000원까지 밀렸다가 10,100원으로 회복(순 +0.77%).
 s5 = build()
 p5 = put_pos(s5, code="Y1", upgraded=False)
 p5["lowest_price"] = 9_000
 p5["buy_time"] = s5._now() - timedelta(minutes=10)
 for i in range(12):
-    s5.phase1b.trade_flow.add_tick("Y1", 9_150, "sell", 50, now=T - i * 0.2)
-    s5.phase1b.trade_flow.add_tick("Y1", 9_150, "buy", 1, now=T - i * 0.2)
+    s5.phase1b.trade_flow.add_tick("Y1", 10_100, "sell", 50, now=T - i * 0.2)
+    s5.phase1b.trade_flow.add_tick("Y1", 10_100, "buy", 1, now=T - i * 0.2)
 s5._volume_ratio = lambda c: 0.3
 s5._update_dynamic_caps()
-# (2026-08-05) 전량 -> 50% 분할로 변경. 08-05 실거래에서 손실반등 매도 6건 중
-# 5건이 이후 상승하고 4건은 익절캡까지 갔다(실현 -6,967원 vs 홀딩 +28,690원).
-# 판정 기준의 문제였다 — 급락 직후 반등 초기엔 거래량·강도가 직전 급락 구간보다
-# 낮은 게 당연한데 그걸 '가짜 반등'의 근거로 써서 조건이 거의 항상 참이 됐다.
-check("손실반등도 50%만 매도하고 잔량 보유", "Y1" in s5.holdings,
+check("본전 위 반등소진도 50%만 매도하고 잔량 보유", "Y1" in s5.holdings,
       f"holdings={list(s5.holdings)}")
 check("잔량이 절반", s5.holdings.get("Y1", {}).get("qty") == 50,
       str(s5.holdings.get("Y1", {}).get("qty")))
@@ -356,6 +361,44 @@ _sold = [o for o in s5.order_manager.orders if o.get("side") == "sell"]
 check("실제로 50주만 매도 주문됨",
       len(_sold) == 1 and _sold[0]["qty"] == 50, str(_sold))
 check("완전청산이 아니므로 DB 기록은 아직 없음", not _Repo.sells)
+
+# 🔴 회귀방지 — **손실 구간에서는 발동하지 않는다**(오늘 문제의 본체).
+# 같은 설정에서 현재가만 9,150원(순 -8.7%)으로 두면 아무 일도 없어야 한다.
+s5b = build()
+p5b = put_pos(s5b, code="Y2", upgraded=False)
+p5b["lowest_price"] = 9_000
+p5b["buy_time"] = s5b._now() - timedelta(minutes=10)
+for i in range(12):
+    s5b.phase1b.trade_flow.add_tick("Y2", 9_150, "sell", 50, now=T - i * 0.2)
+    s5b.phase1b.trade_flow.add_tick("Y2", 9_150, "buy", 1, now=T - i * 0.2)
+s5b._volume_ratio = lambda c: 0.3
+s5b._update_dynamic_caps()
+_sold_b = [o for o in s5b.order_manager.orders if o.get("side") == "sell"]
+check("🔴 [회귀] 손실 구간에서는 반등소진 매도가 나가지 않는다",
+      not _sold_b and s5b.holdings.get("Y2", {}).get("qty") == 100,
+      f"매도 {len(_sold_b)}건 / 잔량 {s5b.holdings.get('Y2', {}).get('qty')}")
+check("🔴 [회귀] 손실 구간은 -3% 손절이 그대로 담당한다(최후 방어선 불변)",
+      SM.STOP_LOSS_RATE == -0.03, str(SM.STOP_LOSS_RATE))
+
+# 롤백 — False로 두면 08-05~08-10 사양(손실 구간 전용)이 그대로 돌아온다
+_saved_lr = SM.LOSS_REBOUND_REQUIRE_BREAKEVEN
+try:
+    SM.LOSS_REBOUND_REQUIRE_BREAKEVEN = False
+    s5c = build()
+    p5c = put_pos(s5c, code="Y3", upgraded=False)
+    p5c["lowest_price"] = 9_000
+    p5c["buy_time"] = s5c._now() - timedelta(minutes=10)
+    for i in range(12):
+        s5c.phase1b.trade_flow.add_tick("Y3", 9_150, "sell", 50, now=T - i * 0.2)
+        s5c.phase1b.trade_flow.add_tick("Y3", 9_150, "buy", 1, now=T - i * 0.2)
+    s5c._volume_ratio = lambda c: 0.3
+    s5c._update_dynamic_caps()
+    _sold_c = [o for o in s5c.order_manager.orders if o.get("side") == "sell"]
+    check("[롤백] False면 손실 구간에서 다시 발동(구 사양)",
+          len(_sold_c) == 1 and _sold_c[0]["qty"] == 50, str(_sold_c))
+finally:
+    SM.LOSS_REBOUND_REQUIRE_BREAKEVEN = _saved_lr
+check("[롤백 후] 정상 복원", SM.LOSS_REBOUND_REQUIRE_BREAKEVEN is True)
 
 # ═════════════════════════════════════════════════════════
 print("\n[10] 손절은 분할과 무관하게 전량 — 최후 방어선 불변")

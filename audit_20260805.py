@@ -163,7 +163,13 @@ check("되돌림 ON이면 VWAP 깊은검사도 ON (죽은 구간 방지)",
       or SM.VWAP_ENTRY_CHECK_DEEPEST,
       f"되돌림={SM.ENTRY_PULLBACK_ENABLED} VWAP={SM.VWAP_ENTRY_ENABLED} "
       f"깊은검사={SM.VWAP_ENTRY_CHECK_DEEPEST}")
-check("우선순위 교체 일일 한도 > 0", SM.PHASE1A_PRIORITY_MAX_PER_DAY > 0)
+# (2026-08-10) 원래 `> 0`이었다. 그런데 0은 상수 주석이 명시한 **정상 상태**
+# ('0으로 두면 우선순위 교체가 완전히 꺼진다')이고, 오늘 실제로 0으로 껐다
+# (115초에 6회 소진 + 3회를 유령에 낭비). 음수만 막는다.
+check("우선순위 교체 일일 한도 >= 0 (0 = 기능 OFF, 정상)",
+      SM.PHASE1A_PRIORITY_MAX_PER_DAY >= 0,
+      f"{SM.PHASE1A_PRIORITY_MAX_PER_DAY}"
+      + (" — 교체 OFF" if SM.PHASE1A_PRIORITY_MAX_PER_DAY == 0 else ""))
 check("초반 캡 종료 == 발사 게이트 전환 시각 (구간이 어긋나지 않는다)",
       SM.EARLY_SLOT_CAP_UNTIL == SM.FIRE_GATE_ACCEL_FROM,
       f"{SM.EARLY_SLOT_CAP_UNTIL} / {SM.FIRE_GATE_ACCEL_FROM}")
