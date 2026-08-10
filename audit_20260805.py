@@ -495,8 +495,10 @@ w = scenario("가드 + VI 근접 (이익)", 10_960, buy=10_000, open_px=10_000, 
 check("가드가 VI보다 우선", "지수 가드" in w, w[:50])
 w = scenario("VI 근접만 (이익, 캡 미달)", 11_840, buy=11_500, open_px=10_800)
 check("VI가 캡보다 먼저 확정", "VI 상단" in w, w[:60])
-w = scenario("일반 익절캡 도달", 10_450, buy=10_000)
-check("VI 조건 없으면 익절캡", "익절" in w and "VI" not in w, w[:50])
+# (2026-08-10) 캡 상향(4.0 -> 6.0)에 맞춰 가격을 상수에서 역산한다.
+_capx = int(10_000 * (1 + SM.TAKE_PROFIT_CAP + SM.ROUND_TRIP_COST) + 50)
+w = scenario("일반 익절캡 도달", _capx, buy=10_000)
+check("VI 조건 없으면 익절캡", "익절" in w and "VI" not in w, f"{_capx} -> {w[:44]}")
 w = scenario("워밍업 중 손절", 9_700, buy=10_000, warm=True)
 check("워밍업 중에도 손절 작동", "손절" in w, w[:50])
 w = scenario("워밍업 중 소폭 이익", 10_150, buy=10_000, warm=True)
@@ -667,7 +669,9 @@ def one(label, expect, **kw):
 
 
 one("손절만 성립", "손절", price=9_700)
-one("익절캡만 성립", "익절", price=10_450)
+# (2026-08-10) 캡 상향(4.0 -> 6.0)에 맞춰 상수에서 역산한다.
+one("익절캡만 성립", "익절",
+    price=int(10_000 * (1 + SM.TAKE_PROFIT_CAP + SM.ROUND_TRIP_COST) + 50))
 one("아무것도 성립 안 함", None, price=10_100)
 one("워밍업 중 + 손절", "손절", price=9_700, warm=True)
 one("워밍업 중 + 익절 구간", None, price=10_450, warm=True)

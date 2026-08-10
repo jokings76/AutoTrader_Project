@@ -135,13 +135,15 @@ print("2026-08-03 익절 로직 수술 검증")
 print("=" * 62)
 
 print("\n[1] 캡 상향 — 조기확정이 만들던 '수수료 내고 본전'에서 탈출")
-check("1A 기본캡 4.0% (구 2.5%)", abs(SM.TAKE_PROFIT_CAP - 0.040) < 1e-9,
+# (2026-08-10) 캡 전면 상향 — 4.0/2.5/2.5/6.0 -> 6.0/6.0/6.0/8.0.
+# 근거는 phase_settings.EXIT_POLICY / TAKE_PROFIT_CAP_PULLBACK 주석 참고.
+check("1A 기본캡 6.0% (08-10 상향, 구 4.0%)", abs(SM.TAKE_PROFIT_CAP - 0.060) < 1e-9,
       f"{SM.TAKE_PROFIT_CAP}")
-check("눌림 캡 2.5% (구 1.5%)", abs(SM.TAKE_PROFIT_CAP_PULLBACK - 0.025) < 1e-9,
+check("눌림 캡 6.0% (구 2.5%)", abs(SM.TAKE_PROFIT_CAP_PULLBACK - 0.060) < 1e-9,
       f"{SM.TAKE_PROFIT_CAP_PULLBACK}")
-check("개장초반 캡 2.5% (구 1.5%)", abs(SM.TAKE_PROFIT_CAP_EARLY - 0.025) < 1e-9,
+check("개장초반 캡 6.0% (구 2.5%)", abs(SM.TAKE_PROFIT_CAP_EARLY - 0.060) < 1e-9,
       f"{SM.TAKE_PROFIT_CAP_EARLY}")
-check("상향 목표캡 6.0% (구 2.5%)", abs(SM.TP_CAP_UPGRADED_MAX - 0.060) < 1e-9,
+check("상향 목표캡 8.0% (구 6.0%)", abs(SM.TP_CAP_UPGRADED_MAX - 0.080) < 1e-9,
       f"{SM.TP_CAP_UPGRADED_MAX}")
 # 결함 ①의 뿌리: 기본캡과 상향캡이 같은 값이면 안 된다.
 check("기본캡 != 상향캡 (같으면 결함 ① 재발)",
@@ -155,7 +157,13 @@ print("\n[2] 본전스톱 — 현재 ON (2026-08-04 재활성화)")
 # 이 섹션은 (a) 기본값이 ON인지 (b) **껐을 때도 로직이 여전히 정상인지**를
 # 둘 다 확인한다. 로직이 썩으면 되살릴 때 조용히 깨지기 때문이다.
 check("본전스톱 기본값 ON", SM.BREAKEVEN_STOP_ENABLED is True)
-check("무장 지점 상수는 보존(순 +1.0%)", abs(SM.BREAKEVEN_TRIGGER - 0.010) < 1e-9)
+# (2026-08-10) 0.010 -> 0.025. 허용 되돌림이 0.8%p뿐이라 상승 초입의 정상
+# 흔들림에 털렸다(08-10 6건 평균 +0.46% 실현, 그 뒤 평균 +6.9% 더 감).
+check("무장 지점 순 +2.5% (08-10 상향, 구 +1.0%)",
+      abs(SM.BREAKEVEN_TRIGGER - 0.025) < 1e-9, f"{SM.BREAKEVEN_TRIGGER}")
+check("무장 지점 > 바닥 (그 사이가 허용 되돌림 폭)",
+      SM.BREAKEVEN_TRIGGER > SM.BREAKEVEN_FLOOR,
+      f"{SM.BREAKEVEN_TRIGGER} > {SM.BREAKEVEN_FLOOR}")
 # (2026-08-05) 0.0 -> 0.002. 바닥을 정확히 0%로 두면 매도가 시장가라
 # 체결이 판정가보다 아래에서 이뤄져 결국 마이너스로 나간다(포톤 -0.04% 실측).
 check("바닥은 순 +0.2% (슬리피지만큼 위)", abs(SM.BREAKEVEN_FLOOR - 0.002) < 1e-9)
@@ -465,28 +473,45 @@ def netpx(p):
     return int(10_000 * (1 + p / 100 + SM.ROUND_TRIP_COST))
 
 
-# 슬롯 여유 -> 시간정리 안 함 (구버전은 여기서 팔았다)
-sF = full_strat(11, 10, 1)
-sF.on_price_update("H0", netpx(-1.0))
-check("슬롯 여유(1/6)면 45분 보유해도 시간정리 안 함", "H0" in sF.holdings)
-sF.check_timeouts()
-check("check_timeouts 경로도 슬롯 여유면 안 팜(두 번째 경로)", "H0" in sF.holdings)
+# 🔴 (2026-08-10) 정체정리·시간정리는 STAGNANT_EXIT_ENABLED=False로 **껐다**
+# (08-10 실측: 8건 -20,560원 vs 종가보유 +25,715원).
+# 그래도 '슬롯 여유면 안 판다'는 배선은 되살릴 때 반드시 살아 있어야 하므로,
+# 이 블록에서만 잠시 켜서 검증한다([E] 눌림목 슬롯 0 때와 같은 처리).
+_sv_stag = SM.STAGNANT_EXIT_ENABLED
+SM.STAGNANT_EXIT_ENABLED = True
+try:
+    # 슬롯 여유 -> 시간정리 안 함 (구버전은 여기서 팔았다)
+    sF = full_strat(11, 10, 1)
+    sF.on_price_update("H0", netpx(-1.0))
+    check("슬롯 여유(1/6)면 45분 보유해도 시간정리 안 함", "H0" in sF.holdings)
+    sF.check_timeouts()
+    check("check_timeouts 경로도 슬롯 여유면 안 팜(두 번째 경로)", "H0" in sF.holdings)
 
-# 슬롯 만석 -> 기존대로 시간정리
-sFull = full_strat(11, 10, SM.MAX_HOLDINGS)
-sFull.on_price_update("H0", netpx(-1.0))
-check("슬롯 만석이면 시간정리 발동(기존 동작 유지)", "H0" not in sFull.holdings)
-check("사유에 '슬롯 만석' 표기",
-      any("슬롯 만석" in (r.get("exit_reason") or "") for r in _Repo.sells),
-      str([r.get("exit_reason") for r in _Repo.sells])[:60])
+    # 슬롯 만석 -> 기존대로 시간정리
+    sFull = full_strat(11, 10, SM.MAX_HOLDINGS)
+    sFull.on_price_update("H0", netpx(-1.0))
+    check("슬롯 만석이면 시간정리 발동(기존 동작 유지)", "H0" not in sFull.holdings)
+    check("사유에 '슬롯 만석' 표기",
+          any("슬롯 만석" in (r.get("exit_reason") or "") for r in _Repo.sells),
+          str([r.get("exit_reason") for r in _Repo.sells])[:60])
 
-# 정체정리도 동일 규칙
-sD = full_strat(11, 10, 1, held_min=SM.DEAD_POSITION_MIN + 1)
-sD.on_price_update("H0", netpx(0.1))     # ±0.5% 밴드 안
-check("슬롯 여유면 정체정리도 안 함", "H0" in sD.holdings)
-sD2 = full_strat(11, 10, SM.MAX_HOLDINGS, held_min=SM.DEAD_POSITION_MIN + 1)
-sD2.on_price_update("H0", netpx(0.1))
-check("슬롯 만석이면 정체정리 발동", "H0" not in sD2.holdings)
+    # 정체정리도 동일 규칙
+    sD = full_strat(11, 10, 1, held_min=SM.DEAD_POSITION_MIN + 1)
+    sD.on_price_update("H0", netpx(0.1))     # ±0.5% 밴드 안
+    check("슬롯 여유면 정체정리도 안 함", "H0" in sD.holdings)
+    sD2 = full_strat(11, 10, SM.MAX_HOLDINGS, held_min=SM.DEAD_POSITION_MIN + 1)
+    sD2.on_price_update("H0", netpx(0.1))
+    check("슬롯 만석이면 정체정리 발동", "H0" not in sD2.holdings)
+finally:
+    SM.STAGNANT_EXIT_ENABLED = _sv_stag
+check("[정책] 지금은 정체·시간정리가 꺼져 있다(08-10)",
+      SM.STAGNANT_EXIT_ENABLED is False)
+_sOff = full_strat(11, 10, SM.MAX_HOLDINGS)
+_sOff.on_price_update("H0", netpx(-1.0))
+check("🔴 [회귀] 꺼져 있으면 슬롯 만석·45분이어도 시간정리가 안 나간다",
+      "H0" in _sOff.holdings)
+_sOff.check_timeouts()
+check("🔴 [회귀] 폴링 경로(check_timeouts)도 같이 멈춘다", "H0" in _sOff.holdings)
 
 print("\n[16] 지수 가드 -5% — 시간정리와의 충돌 해소 확인")
 # 가드 사양("본전 이하는 손절선이나 14:50까지")이 30분 컷에 잘리면 무의미해진다.
@@ -518,10 +543,16 @@ sG4 = full_strat(14, 50, SM.MAX_HOLDINGS, kospi=-5.2, kosdaq=-1.0)
 sG4.on_price_update("H0", netpx(-1.0))
 check("14:50 강제청산", "H0" not in sG4.holdings)
 
-# 임계 미달이면 일반장과 동일
-sG5 = full_strat(11, 10, SM.MAX_HOLDINGS, kospi=-4.0, kosdaq=-1.0)
-sG5.on_price_update("H0", netpx(-1.0))
-check("-4.0%(임계 미달)는 일반장과 동일하게 시간정리", "H0" not in sG5.holdings)
+# 임계 미달이면 일반장과 동일 — 정체·시간정리가 꺼졌으므로(08-10) 이 블록에서만 켠다.
+# 여기서 보려는 건 '가드 임계 미달이면 일반장 규칙을 그대로 탄다'는 배선이다.
+_sv2 = SM.STAGNANT_EXIT_ENABLED
+SM.STAGNANT_EXIT_ENABLED = True
+try:
+    sG5 = full_strat(11, 10, SM.MAX_HOLDINGS, kospi=-4.0, kosdaq=-1.0)
+    sG5.on_price_update("H0", netpx(-1.0))
+    check("-4.0%(임계 미달)는 일반장과 동일하게 시간정리", "H0" not in sG5.holdings)
+finally:
+    SM.STAGNANT_EXIT_ENABLED = _sv2
 
 # 슬롯교체도 가드 중엔 멈춰야 한다(매도만 하고 재매수는 막히는 반쪽 동작 방지)
 import core.slot_replacement as _SR

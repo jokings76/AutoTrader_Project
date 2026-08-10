@@ -320,7 +320,9 @@ check("손절은 시장가", sells and sells[0]["style"] == "market")
 
 s3b = build(datetime(2026, 8, 10, 9, 2, 0))
 _pos(s3b, "TP")
-s3b.on_price_update("TP", 10_600)        # +6% (개장초반 캡 2.5%)
+# (2026-08-10) 개장초반 캡 2.5 -> 6.0. 상수에서 역산해 확실히 넘긴다.
+_tpx = int(10_000 * (1 + SM.TAKE_PROFIT_CAP_EARLY + SM.ROUND_TRIP_COST) + 50)
+s3b.on_price_update("TP", _tpx)
 check("초반 구간에서도 익절 캡은 정상 집행",
       len([o for o in s3b.order_manager.orders if o["side"] == "sell"]) >= 1)
 

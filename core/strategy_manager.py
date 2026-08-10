@@ -1068,8 +1068,22 @@ HOLDING_TIMEOUT = timedelta(minutes=EXIT_POLICY["default"]["holding_timeout_min"
 # (2026-08-03) 1.5% -> 2.5%. 08-03 실거래에서 익절 계열 청산 평균이 수수료
 # (0.23%)를 겨우 넘는 수준이라 캡이 사실상 '수수료 내고 본전'을 만들고 있었다.
 # 1A 기본캡(4.0%)보다는 여전히 타이트하게 둬서 전략 간 성격 차이는 유지한다.
-TAKE_PROFIT_CAP_PULLBACK = 0.025
-TAKE_PROFIT_CAP_EARLY = 0.025
+# 🔴 (2026-08-10 사용자 지정) 익절캡 전면 상향 — **0.025 -> 0.060**.
+# [근거 1] 08-10 실거래 41건: 매도 후 그 종목이 **당일 고가까지 평균 +5.45%,
+#   종가까지 +1.70%** 더 갔다. 반사실 — 전부 종가보유 시 -44,016 -> +338,087원,
+#   '익절캡 6% + 미달분 종가청산'이면 **+486,480원**.
+# [근거 2] 틱 아카이브 4일 문턱x캡 격자(손절·캡을 틱 경로에 실제로 태움):
+#   같은 문턱 2.5에서 캡 2.5 **-0.064%** / 캡 4.0 +0.086% / 캡 무제한 **+0.175%**.
+#   **캡을 푸는 쪽이 문턱을 올리는 쪽보다 효과가 크다**(문턱 3.5도 캡 2.5면 -0.083%).
+# [천장은 VI가 맡는다] 08-10에 **종가보유를 이긴 규칙은 VI 상단 확정매도뿐**이다
+#   (2건 +50,162원, 종가보유 대비 +53,720 우위. 일승은 판 자리가 당일 고가에서
+#   +0.1%였다). 캡을 열어 러너를 살리고, 확정은 VI 상단(시가x1.10)이 받는다.
+# ⚠️ 08-05의 "캡 도달 종목 77%가 본전까지 되돌아온다"와 충돌할 수 있다.
+#    그래서 **본전스톱과 세트로** 바꿨다(무장 문턱 1.0 -> 2.5%).
+#    캡만 올리고 본전스톱을 그대로 두면 그 실측이 재현될 수 있다.
+# 롤백: 둘 다 0.025.
+TAKE_PROFIT_CAP_PULLBACK = 0.060
+TAKE_PROFIT_CAP_EARLY = 0.060
 EARLY_WINDOW_END = time(9, 10)  # GROUP_A_START~이 시각 사이 매수분은 이 캡
 
 # ── 정적VI 상단 근접 확정매도 (2026-08-05 사용자 지정) ─────────────
@@ -1157,7 +1171,9 @@ TP_UPGRADE_STRENGTH_RATIO = 1.2     # 기준강도 대비 이 배수 이상이�
 TP_DECLINE_STRENGTH_RATIO = 0.8     # 기준강도 대비 이 배수 미만이면 "강도 하락"
 TP_DECLINE_VOLUME_RATIO = 1.0       # volume_ratio 이 값 미만이면 "거래량 하락"
 TP_VOL_CHECK_SEC = 30               # 거래량 확인(REST) 종목당 최소 간격
-TP_CAP_UPGRADED_MAX = 0.060         # 상향 시 목표 캡 (2026-08-03, 2.5% -> 6.0%)
+# (2026-08-10) 기본캡을 6.0%로 올리면서 **상향캡도 같이 올린다** — 안 올리면
+# 둘이 같아져 '강도상승/주도테마면 더 열어준다'는 동적 상향이 통째로 무의미해진다.
+TP_CAP_UPGRADED_MAX = 0.080         # 상향 시 목표 캡 (08-03 6.0% -> 08-10 8.0%)
 
 # ── 본전스톱 (2026-08-03 신규, '익절 조기확정'을 대체) ─────────────
 # 기존: 순 +1.0% 도달 시 체결강도가 안 올랐으면 **그 자리서 매도**(조기확정).
@@ -1190,7 +1206,16 @@ TP_CAP_UPGRADED_MAX = 0.060         # 상향 시 목표 캡 (2026-08-03, 2.5% ->
 # 밀리는 포지션이 급증(같은 09:00~09:40 창 기준 순손익 +165,345원 -> -427,200원,
 # 손절 0건 -> 5건). 사용자 지정으로 재활성화.
 BREAKEVEN_STOP_ENABLED = True
-BREAKEVEN_TRIGGER = 0.010           # 순 +1.0% 도달 시 무장
+# 🔴 (2026-08-10 사용자 지정) 무장 문턱 **0.010 -> 0.025**.
+# 08-10 실측: 본전스톱 6건이 평균 **+0.46%**에 나갔는데 그 자리에서 그 종목들이
+# 평균 **+6.9%** 더 올라갔다(코칩 +12.9% / 피델릭스 +8.2% / 자이에스앤디 +7.9%).
+# 기회손실 **+67,504원** — 오늘 청산 사유 중 두 번째로 컸다.
+# 원인은 폭이다: +1.0%에 무장하고 +0.2%에 나가면 허용 되돌림이 **0.8%p**뿐이라
+# 상승 초입의 정상 흔들림에 그대로 털린다. 2.5%로 올리면 허용폭이 2.3%p가 된다.
+# ⚠️ 대가: +1.0~2.5% 구간에서 되밀리는 포지션은 이제 **-3% 손절까지** 간다.
+#    그 구간의 하방은 ⑤ ATR 손절이 대신 받는다(같이 적용했다).
+# 롤백: 0.010.
+BREAKEVEN_TRIGGER = 0.025           # 순 +2.5% 도달 시 무장
 # 2026-08-05: 0.000 -> 0.002. 바닥을 정확히 '순 0%'로 두면 매도가 시장가라
 # 체결이 판정가보다 한 틱 아래에서 이뤄져 **결국 마이너스로 나간다**
 # (08-05 포톤 실측: 본전스톱 발동가는 0%였는데 실현 순손익 -0.04%).
@@ -1408,6 +1433,52 @@ LOSS_REBOUND_MIN_NET = 0.0       # '본전'의 기준 순수익률(0.0 = 수수�
 # 기회비용으로 보고 비운다. 30분 컷(HOLDING_TIMEOUT)은 최후 방어로 유지.
 DEAD_POSITION_MIN = 15           # 이 시간 경과 후 판정
 DEAD_POSITION_BAND = 0.005       # 순손익이 ±이 범위 안이면 '정체'로 간주
+
+# 🔴 (2026-08-10 사용자 지정) **정체정리 15분 / 시간정리 30분을 끈다.**
+# 존재 이유는 '슬롯 기회비용'이었다 — 아무 방향도 못 잡은 자리를 비워 더 나은
+# 후보를 받는 것. 그런데 08-10 실측이 전제를 부쉈다:
+#   · 정체정리 5건 +2,255원 / 시간정리 3건 **-22,815원** = 8건 합계 -20,560원
+#   · 같은 8건을 종가까지 들고 있었으면 **+25,715원** (차이 +46,275원)
+#   · '정체'로 판정된 종목들이 실제로는 정체가 아니었다 —
+#     코칩은 시간정리 -1.32%에 잘렸는데 그 뒤 **+12.7%**까지 갔다.
+# 즉 15~30분은 이 시장에서 '방향이 안 났다'고 단정하기엔 너무 짧다
+# (41건 평균 보유가 25분인데, 보유 15~30분 구간만 유일하게 플러스였다).
+# ⚠️ 대가: 진짜 죽은 자리가 슬롯을 오래 문다. 다만 15:10 강제청산·손절·
+#    본전스톱·익절캡이 그대로 살아 있어 무한정 물리지는 않는다.
+# 롤백: True -> 08-01~08-10 사양(정체정리·시간정리 부활).
+STAGNANT_EXIT_ENABLED = False
+
+# ── 손절을 **장중** 변동성에 비례시킨다 (2026-08-10 사용자 지정) ──────────
+# 고정 -3%는 종목의 실제 흔들림 폭과 무관하다.
+#   · 08-06 실측 MAE가 **-4.35%** — -3%는 그 안쪽이라 정상 흔들림에 잘린다.
+#   · 08-10 손절 4건은 전부 -3.04% 근처에서 잘리고 그 뒤 평균 **+9.2%** 더 갔다.
+#
+# 🔴 **일봉 ATR로 시도했다가 폐기했다.** 시간 척도가 안 맞는다 —
+#    우리는 평균 25분 보유인데 일봉 ATR은 며칠짜리 변동성이다. 실측으로
+#    반증됐다: 금강철강은 일봉 ATR이 **6.9%로 표본 중 최저**라 손절이 오히려
+#    **더 타이트**해지는데, 정작 그날 -3.04%에 잘리고 **+24.3%** 간 종목이다.
+#    (참고로 이 시장의 일봉 ATR 중앙값은 12.3%로 손절폭 척도로 쓰기엔 너무 크다.)
+# -> **최근 STOP_LOSS_VOL_WINDOW_SEC의 고저폭**을 쓴다. 보유 지평과 같은 척도다.
+#
+# [보정 근거] 틱 아카이브 4일 146 종목·일의 09:05 시점 120초 고저폭:
+#   최소 0.48 / 25% 1.47 / **중앙 2.04** / 75% 2.84 / 최대 12.87 %
+#   -> 배수 1.5면 중앙이 -3.06%로 **현행과 같고**, 146종목 중 73개가 상·하한
+#      사이에서 실제 차등을 받는다(전부 클램프에 붙으면 고정값과 다를 게 없다).
+# [검증] 문턱 2.5 / 캡 4.0에서 순 +0.086% -> **+0.153%**, 승률 45 -> 47%,
+#   **4일 전부 개선**. 손절 발동 빈도는 9/75 -> 10/75로 사실상 불변
+#   (= 손절을 게을리 하는 게 아니라 '자리를 옮기는' 변경이다).
+#
+# ⚠️ 값은 **매수 시점에 한 번 계산해 포지션에 박는다**(pos["stop_rate"]).
+#    매 틱 다시 재면 손절선이 살아 움직여 판정이 흔들리고, on_price_update가
+#    핫패스라 비용도 든다. 재시작으로 복원된 포지션은 값이 없으므로 고정값.
+# ⚠️ 틱이 MIN_TICKS 미만이면 고정 STOP_LOSS_RATE — '모름'이 손절을 넓히면 안 된다.
+# 롤백: STOP_LOSS_VOL_ENABLED = False -> 전 종목 고정 -3%.
+STOP_LOSS_VOL_ENABLED = True
+STOP_LOSS_VOL_WINDOW_SEC = 120.0   # 고저폭을 재는 창(TradeFlowTracker 버퍼와 동일)
+STOP_LOSS_VOL_MIN_TICKS = 20       # 이보다 적으면 판단 불가 -> 고정값
+STOP_LOSS_VOL_MULT = 1.5           # 손절폭 = 고저폭% x 이 배수
+STOP_LOSS_VOL_MIN = -0.025         # 가장 타이트해도 -2.5%
+STOP_LOSS_VOL_MAX = -0.055         # 가장 넓어도 -5.5%
 
 # 익절 후 재매수 상한 (2026-07-30 사용자 지정) — 손절 종목은 이미 당일 전면
 # 차단이므로 사실상 익절 종목에만 적용된다. 최초 1회 + 재매수 2회 = 총 3회.
@@ -2013,6 +2084,62 @@ class StrategyManager:
             bars = []
         # 실패해도 asof를 찍어 **하루 안에 재시도로 REST를 낭비하지 않는다**.
         self._daily_bars[stock_code] = {"asof": today, "bars": bars}
+
+    def compute_stop_rate(self, stock_code: str, now: float = None) -> float:
+        """**매수 시점에 한 번** 계산하는 이 포지션의 손절선(음수 비율).
+
+        (2026-08-10 신설) 근거·보정값은 STOP_LOSS_VOL_ENABLED 주석 참고.
+        최근 창의 체결가 고저폭(=그 종목이 지금 실제로 흔들리는 폭)에 비례시킨다.
+
+        ⚠️ 틱 버퍼만 읽는다(REST 0콜). 틱이 부족하면 **고정 STOP_LOSS_RATE** —
+        '모름'이 손절을 넓히면 최후 방어선이 무너진다.
+        ⚠️ 어떤 실패도 밖으로 던지지 않는다(손절 계산이 매수를 깨면 안 된다).
+        """
+        if not STOP_LOSS_VOL_ENABLED:
+            return STOP_LOSS_RATE
+        try:
+            tf = self.phase1b.trade_flow if (self.phase1b and self.phase1b.trade_flow) else None
+            d = tf.ticks.get(stock_code) if tf else None
+            if not d:
+                return STOP_LOSS_RATE
+            # ⚠️ 기준 시각은 **버퍼의 마지막 틱**이다. `time.time()`을 쓰면
+            # 라이브에선 맞지만 리플레이·백테스트에서 창이 통째로 비어
+            # 조용히 고정값으로 퇴화한다 — 실제로 그렇게 만들었다가
+            # A/B 결과가 완전히 동일해서 발견했다(변경이 무효였다).
+            if now is None:
+                now = d[-1][0]
+            cutoff = now - STOP_LOSS_VOL_WINDOW_SEC
+            px = [p for ts, p, _s, _v in d if ts >= cutoff and p > 0]
+            if len(px) < STOP_LOSS_VOL_MIN_TICKS:
+                return STOP_LOSS_RATE
+            last = px[-1]
+            if last <= 0:
+                return STOP_LOSS_RATE
+            rng_pct = (max(px) - min(px)) / last
+            if rng_pct <= 0:
+                return STOP_LOSS_RATE
+            rate = -(rng_pct * STOP_LOSS_VOL_MULT)
+            # 전부 음수라 min/max 방향에 주의 — MAX(-0.055)가 더 작은 값이다.
+            return max(STOP_LOSS_VOL_MAX, min(STOP_LOSS_VOL_MIN, rate))
+        except Exception:
+            logger.exception("[%s] 변동성 손절 계산 실패 — 고정값 사용", stock_code)
+            return STOP_LOSS_RATE
+
+    def stop_loss_rate_for(self, stock_code: str) -> float:
+        """청산 판정이 쓰는 손절선. 포지션에 박힌 값을 **읽기만** 한다(O(1)).
+
+        매수 시점에 `compute_stop_rate`가 계산해 pos["stop_rate"]에 넣는다.
+        재시작으로 DB에서 복원된 포지션엔 값이 없으므로 고정값으로 수렴한다.
+        """
+        pos = self.holdings.get(stock_code) or {}
+        r = pos.get("stop_rate")
+        try:
+            r = float(r) if r is not None else None
+        except (TypeError, ValueError):
+            r = None
+        if r is None or not (-0.5 < r < 0):
+            return STOP_LOSS_RATE
+        return r
 
     def daily_pullback_state(self, stock_code: str) -> Optional[dict]:
         """오늘이 '일봉 눌림 후 재상승 후보일'인가 (2026-08-07 신설, 관측 전용).
@@ -5756,6 +5883,10 @@ class StrategyManager:
                 "opening_price": info.get("opening_price", 0.0),
                 "position_weight": (opt_info or {}).get("final_weight", 1.0),
                 "warmup_until": self._now() + BUY_WARMUP,
+                # (2026-08-10) 손절선을 **매수 시점에 한 번** 박는다. 매 틱 다시
+                # 재면 손절선이 살아 움직여 판정이 흔들리고 핫패스 비용도 든다.
+                # 틱이 부족하면 compute_stop_rate가 고정 STOP_LOSS_RATE를 준다.
+                "stop_rate": self.compute_stop_rate(stock_code),
                 # entry_score도 _watch_scores와 같은 '컷라인 대비 비율' 스케일로
                 # 통일 (2026-08-01) — 슬롯교체가 이 값과 후보 점수를 직접
                 # 비교하는데, 한쪽만 원점수면 전략 간 비교가 무의미해진다.
@@ -5939,7 +6070,10 @@ class StrategyManager:
         # '체결강도·거래량처럼 매수 직후 흔들리는 지표로 성급히 판단하지
         # 않는 것'이지, **가격 기반 하드 손절까지 멈추는 것이 아니다.**
         # 급락은 매수 직후일수록 위험한데 정확히 그 구간이 무방비였다.
-        if gross_rate <= STOP_LOSS_RATE:
+        # (2026-08-10) 손절선을 종목 변동성에 비례시킨다. 캐시만 읽고(REST 0콜),
+        # 계산이 안 되면 고정 STOP_LOSS_RATE로 수렴한다.
+        stop_rate = self.stop_loss_rate_for(stock_code)
+        if gross_rate <= stop_rate:
             # ── 손절 대신 추가매수 (2026-08-05) ────────────────────────
             # 원가는 추가매수로 평단이 바뀌어도 유지된다 — 최종 방어선(-6%)의
             # 기준이기 때문이다. buy_price는 add_to_position이 평단으로 덮는다.
@@ -5968,7 +6102,8 @@ class StrategyManager:
                     return
                 self._execute_sell(
                     stock_code, current_price,
-                    f"손절 가격{gross_rate*100:.2f}% (순 {net_rate*100:.2f}%)",
+                    f"손절 가격{gross_rate*100:.2f}% (순 {net_rate*100:.2f}%, "
+                    f"손절선 {stop_rate*100:.2f}%)",
                 )
                 return
 
@@ -6151,7 +6286,8 @@ class StrategyManager:
         # 없다 -> 이때도 발동하지 않는다. 이게 없으면 "본전 이하는 손절선이나
         # 14:50까지 가져간다"는 가드 사양이 30분 컷에 먼저 잘려 무의미해진다
         # (시뮬레이션으로 확인: 보유 31분 종목이 '시간정리 30분'으로 매도됐다).
-        if exit_reason is None and not self._is_index_guard_active():
+        if (exit_reason is None and STAGNANT_EXIT_ENABLED
+                and not self._is_index_guard_active()):
             slots_full = self.occupied_slots() >= MAX_HOLDINGS
             if slots_full:
                 held = self._now() - pos["buy_time"]
@@ -6949,6 +7085,11 @@ class StrategyManager:
         지수 가드 발동 중 제외도 같은 이유로 동일하게 적용한다.
         """
         now = self._now()
+        # (2026-08-10) 정체·시간정리를 껐으면 이 폴링 경로도 같이 멈춰야 한다 —
+        # 한쪽만 끄면 틱이 안 들어오는 종목만 30분에 잘려 규칙이 반쪽이 된다
+        # (같은 규칙이 두 곳에 있다는 걸 놓치는 이 코드베이스의 반복 사고).
+        if not STAGNANT_EXIT_ENABLED:
+            return
         # 슬롯이 남으면 자리를 비울 이유가 없고, 가드 중이면 비워도 쓸 곳이 없다.
         if self.occupied_slots() < MAX_HOLDINGS or self._is_index_guard_active():
             return

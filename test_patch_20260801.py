@@ -1073,27 +1073,42 @@ def dead_pos(st, code, held_min, net_pct, fill=True):
     st.on_price_update(code, cur)
     return code in st.holdings
 
+# 🔴 (2026-08-10) 정체·시간정리는 STAGNANT_EXIT_ENABLED=False로 껐다
+# (08-10 실측 8건 -20,560원 vs 종가보유 +25,715원). 되살릴 때를 위해
+# 배선 검증은 이 블록에서만 켜서 유지한다.
+_sv_stag = SM.STAGNANT_EXIT_ENABLED
+SM.STAGNANT_EXIT_ENABLED = True
+try:
+    s = build_strat()
+    check("[슬롯 만석] 15분 경과 & ±0.5% 이내 -> 정체 정리로 청산",
+          not dead_pos(s, "D1", 16, 0.1))
+    check("청산 사유가 '정체 정리'로 DB에 기록",
+          any("정체 정리" in str(r.get("exit_reason", "")) for r in _Repo.sells),
+          str([r.get("exit_reason") for r in _Repo.sells]))
+    s = build_strat()
+    check("15분 경과했지만 +1.2% -> 유지(익절 캡이 담당)", dead_pos(s, "D2", 16, 1.2))
+    s = build_strat()
+    check("15분 경과했지만 -1.5% -> 유지(손절이 담당)", dead_pos(s, "D3", 16, -1.5))
+    s = build_strat()
+    check("10분밖에 안 됐으면 정체여도 유지", dead_pos(s, "D4", 10, 0.1))
+    s = build_strat()
+    check("[슬롯 만석] 30분 초과는 기존 시간정리로 청산", not dead_pos(s, "D5", 31, 1.0))
+    # 슬롯이 남으면 둘 다 발동하지 않는다 (2026-08-03 신규 규칙)
+    s = build_strat()
+    check("[슬롯 여유] 15분 정체여도 청산 안 함",
+          dead_pos(s, "D6", 16, 0.1, fill=False))
+    s = build_strat()
+    check("[슬롯 여유] 30분 초과여도 청산 안 함",
+          dead_pos(s, "D7", 31, 1.0, fill=False))
+finally:
+    SM.STAGNANT_EXIT_ENABLED = _sv_stag
+# 현재 정책 — 꺼져 있으면 만석·정체여도 안 판다
 s = build_strat()
-check("[슬롯 만석] 15분 경과 & ±0.5% 이내 -> 정체 정리로 청산",
-      not dead_pos(s, "D1", 16, 0.1))
-check("청산 사유가 '정체 정리'로 DB에 기록",
-      any("정체 정리" in str(r.get("exit_reason", "")) for r in _Repo.sells),
-      str([r.get("exit_reason") for r in _Repo.sells]))
+check("🔴 [회귀/08-10] 꺼져 있으면 만석·15분 정체여도 유지",
+      dead_pos(s, "D8", 16, 0.1))
 s = build_strat()
-check("15분 경과했지만 +1.2% -> 유지(익절 캡이 담당)", dead_pos(s, "D2", 16, 1.2))
-s = build_strat()
-check("15분 경과했지만 -1.5% -> 유지(손절이 담당)", dead_pos(s, "D3", 16, -1.5))
-s = build_strat()
-check("10분밖에 안 됐으면 정체여도 유지", dead_pos(s, "D4", 10, 0.1))
-s = build_strat()
-check("[슬롯 만석] 30분 초과는 기존 시간정리로 청산", not dead_pos(s, "D5", 31, 1.0))
-# 슬롯이 남으면 둘 다 발동하지 않는다 (2026-08-03 신규 규칙)
-s = build_strat()
-check("[슬롯 여유] 15분 정체여도 청산 안 함",
-      dead_pos(s, "D6", 16, 0.1, fill=False))
-s = build_strat()
-check("[슬롯 여유] 30분 초과여도 청산 안 함",
-      dead_pos(s, "D7", 31, 1.0, fill=False))
+check("🔴 [회귀/08-10] 꺼져 있으면 만석·31분이어도 유지",
+      dead_pos(s, "D9", 31, 1.0))
 
 # ═════════════════════════════════════════════════════════
 print("\n[24] 제안 A — 신호 세기 계층화 (단일 대량체결 우대)")

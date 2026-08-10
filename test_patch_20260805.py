@@ -663,15 +663,18 @@ def vi_reason(open_price, buy, price):
     vi_run(open_price, buy, price)
     return " | ".join((x.get("exit_reason") or "") for x in _Repo.sells)
 
-_why = vi_reason(10_000, 10_000, 10_500)     # VI까지 4.76% — 멀다
+# (2026-08-10) 캡 4.0 -> 6.0 상향으로 10,500(+5%)은 더 이상 캡에 안 닿는다.
+# 가격을 **상수에서 역산**해 캡을 확실히 넘긴다(앞으로 캡을 또 바꿔도 따라온다).
+_cap_px = int(10_000 * (1 + SM.TAKE_PROFIT_CAP + SM.ROUND_TRIP_COST) + 50)
+_why = vi_reason(10_000, 10_000, _cap_px)    # VI(11,000)까지는 아직 멀다
 check("멀면 VI 사유로 안 나간다(익절캡이 담당)",
-      "VI 상단" not in _why and "익절" in _why, _why[:70])
+      "VI 상단" not in _why and "익절" in _why, f"{_cap_px} -> {_why[:60]}")
 _why = vi_reason(10_000, 10_000, 11_050)     # 이미 VI선 초과
 check("VI선 초과면 VI 사유로 안 나간다",
       "VI 상단" not in _why, _why[:70])
 # 캡이 아직 멀고 VI만 가까운 조합 — 이때가 이 기능의 존재 이유다
 _why = vi_reason(10_800, 11_500, 11_840)     # 매수 11,500 / VI 11,880 / +2.96%
-check("캡(4%) 미달인데 VI만 가까우면 VI가 판다",
+check(f"캡({SM.TAKE_PROFIT_CAP*100:.0f}%) 미달인데 VI만 가까우면 VI가 판다",
       "VI 상단" in _why, _why[:80])
 
 # 워밍업 중에도 작동 (가격 기반이라 안전)
