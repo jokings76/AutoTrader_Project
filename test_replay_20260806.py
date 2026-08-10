@@ -56,7 +56,11 @@ class _Repo:
     @classmethod
     def insert_buy(cls, **kw): cls.rows.append(kw); return len(cls.rows)
     @classmethod
-    def update_sell(cls, **kw): cls.sells.append(kw); return True
+    # ⚠️ 실물은 `update_sell(trade_id, ...)`로 **trade_id가 위치 인자**다. 키워드 전용으로
+    # 두면 실물이 정상인데 스텁이 TypeError를 내고, 호출부의 except가 그걸 삼켜
+    # **감사가 조용히 거짓말한다**(2026-08-10에 실제로 밟은 함정).
+    def update_sell(cls, trade_id=None, **kw):
+        cls.sells.append({"trade_id": trade_id, **kw}); return True
     @classmethod
     def update(cls, row_id, data): cls.updates.append({"id": row_id, **data}); return True
     @classmethod
