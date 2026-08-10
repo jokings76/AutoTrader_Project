@@ -1829,6 +1829,71 @@ class StrategyManager:
             waves.append(now)
         return len(waves)
 
+    # 매도 실패 사유가 '수량 부족'인지 (2026-08-10). 키움 에러코드 800033.
+    # 이 사유는 **재시도해도 결과가 같다** — 계좌에 없는 수량을 파는 것이므로.
+    _QTY_SHORTAGE_MARKERS = ("800033", "매도가능수량")
+
+    @classmethod
+    def _is_qty_shortage(cls, err: str) -> bool:
+        s = str(err or "")
+        return any(m in s for m in cls._QTY_SHORTAGE_MARKERS)
+
+    def _server_qty(self, stock_code: str) -> Optional[int]:
+        """서버 잔고의 실제 보유수량. 조회 실패면 None(판단 보류).
+
+        (2026-08-10) 매도 실패 경로에서만 부른다 — 핫패스가 아니고, 여기서
+        REST 1콜을 아끼려다 유령 포지션을 하루 종일 들고 있는 게 훨씬 비싸다.
+        """
+        try:
+            pos = self.order_manager.sync_positions_from_server() or {}
+        except Exception:
+            logger.exception("[%s] 매도 실패 후 잔고 조회 실패 — 판단 보류", stock_code)
+            return None
+        info = pos.get(stock_code)
+        return int((info or {}).get("qty", 0) or 0)
+
+    def _release_ghost_position(self, stock_code: str, why: str) -> None:
+        """계좌에 실물이 없는 포지션을 정리한다 (2026-08-10 신설).
+
+        🔴 **DB까지 닫는 것이 이 함수의 존재 이유다.** 예전엔 매도 3회 실패 시
+        `holdings.pop()`으로 **메모리에서만** 뺐다. 그러면:
+          · 15초 주기 잔고 대조(`_reconcile_manual_sells`)는 메모리를 보므로
+            이미 없어서 아무 일도 하지 않는다 -> **DB 행이 'holding'으로 방치**
+          · 재시작 시 `_restore_from_db()`가 그걸 되살려 **유령이 부활**한다
+          · 그동안 미청산 조회·통계가 오염된다
+        08-10에 씨피시스템(413630)이 정확히 이 경로로 하루를 버텼다.
+        """
+        pos = self.holdings.pop(stock_code, None) or {}
+        self.pending.discard(stock_code)
+        self._pending_strategy.pop(stock_code, None)
+        self._entry_plans.pop(stock_code, None)
+        name = pos.get("stock_name", stock_code)
+
+        trade_id = pos.get("trade_id")
+        if trade_id:
+            try:
+                # 실제 체결이 없었으므로 손익 0으로 닫는다(매수가 = 매도가).
+                TradeRepository.update_sell(
+                    trade_id,
+                    sell_price=pos.get("buy_price", 0),
+                    sell_quantity=pos.get("buy_quantity", 0),
+                    exit_reason=f"미체결 포지션 정리 ({why})",
+                )
+            except Exception:
+                logger.exception("[%s] 유령 포지션 DB 정리 실패", stock_code)
+
+        logger.warning(
+            "[%s] %s 🧹 미체결 포지션 정리 — %s (슬롯 반환, DB 종료)",
+            stock_code, name, why,
+        )
+        SystemEventRepository.log(
+            "GHOST_POSITION", f"{stock_code} 미체결 포지션 정리: {why}", "WARNING"
+        )
+        _notify(
+            f"🧹 미체결 포지션 정리\n{name} ({stock_code})\n"
+            f"사유: {why}\n계좌에 실물이 없어 슬롯을 반환했습니다."
+        )
+
     def _burst_wave_count(self, stock_code: str) -> int:
         """지금까지 센 파동 수 — **읽기 전용**(카운트를 올리지 않는다).
 
@@ -6631,16 +6696,52 @@ class StrategyManager:
             # 청산 자체를 놓치는 일이 없게 한다 — 매수 경로와 같은 안전망.
             result = self.order_manager.sell(stock_code, quantity, order_style="market")
             if not result or not result.get("success"):
-                logger.warning(
-                    "[%s] 시장가 매도 실패(%s) -> 지정가로 1회 폴백",
-                    stock_code, (result or {}).get("error", "unknown"),
-                )
-                result = self.order_manager.sell(
-                    stock_code, quantity, price=0, order_style="limit"
-                )
+                _e = (result or {}).get("error", "unknown")
+                # '수량 부족'이면 지정가로 바꿔도 결과가 같다 — 폴백을 건너뛴다
+                # (없는 수량을 파는 것이라 주문 방식의 문제가 아니다).
+                if self._is_qty_shortage(_e):
+                    logger.warning(
+                        "[%s] 매도 실패(%s) — 수량 부족이라 지정가 폴백 생략",
+                        stock_code, _e,
+                    )
+                else:
+                    logger.warning(
+                        "[%s] 시장가 매도 실패(%s) -> 지정가로 1회 폴백",
+                        stock_code, _e,
+                    )
+                    result = self.order_manager.sell(
+                        stock_code, quantity, price=0, order_style="limit"
+                    )
 
             if not result or not result.get("success"):
                 err = (result or {}).get("error", "unknown")
+
+                # ── '수량 부족'은 재시도해도 같다 (2026-08-10 신설) ──────────
+                # 계좌에 없는 수량을 파는 것이므로 3회를 태울 이유가 없다.
+                # 08-10에 지정가 매수가 미체결인 채 보유로 기록돼(유령), 이
+                # 경로가 3회 실패하며 우선순위 교체 일일한도까지 태웠다.
+                # -> 서버 잔고와 **즉시 대조**해 결론을 낸다.
+                if self._is_qty_shortage(err):
+                    real = self._server_qty(stock_code)
+                    if real == 0:
+                        self._release_ghost_position(
+                            stock_code, f"매도 시 수량 부족 확인 (서버 0주) — {err}"
+                        )
+                        return
+                    if real is not None and 0 < real < remaining:
+                        # 부분 체결이었다 — 수량만 보정하고 다음 판정에 맡긴다.
+                        # 여기서 바로 재주문하지 않는 이유: 이 경로는 이미
+                        # 실패 처리 중이고, 다음 틱이 정상 수량으로 다시 판정한다.
+                        pos["qty"] = real
+                        logger.warning(
+                            "[%s] 매도 수량 부족 — 서버 실보유 %d주로 보정"
+                            "(봇 기억 %d주). 다음 판정에서 재시도.",
+                            stock_code, real, remaining,
+                        )
+                        return
+                    # real is None(조회 실패) 또는 real >= remaining이면
+                    # 원인이 다른 것이므로 아래 기존 실패 카운트 경로로 내려간다.
+
                 cnt = self.sell_fail_count.get(stock_code, 0) + 1
                 self.sell_fail_count[stock_code] = cnt
 
@@ -6656,7 +6757,14 @@ class StrategyManager:
                 if cnt >= MAX_SELL_FAIL:
                     self.sell_blocked.add(stock_code)
                     stock_name = pos.get("stock_name", stock_code)
-                    self.holdings.pop(stock_code, None)
+                    # 🔴 (2026-08-10) 예전엔 `self.holdings.pop()`만 했다.
+                    # 그러면 **DB 행이 'holding'으로 남아** 15초 주기 잔고
+                    # 대조(메모리를 본다)를 우회하고, 재시작 시 되살아난다.
+                    # 08-10 씨피시스템이 정확히 이 경로로 하루를 버텼다.
+                    # -> DB까지 닫는다.
+                    self._release_ghost_position(
+                        stock_code, f"매도 {cnt}회 실패 — {err}"
+                    )
                     logger.warning(
                         "[%s] %s 매도 %d회 실패 -> 차단", stock_code, stock_name, cnt
                     )

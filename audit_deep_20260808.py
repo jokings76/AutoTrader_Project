@@ -61,7 +61,16 @@ class _Repo:
     @classmethod
     def insert_buy(cls, **kw): cls.rows.append(kw); return len(cls.rows)
     @classmethod
-    def update_sell(cls, **kw): cls.sells.append(kw); return True
+    # ⚠️ 실물은 `update_sell(trade_id, sell_price, sell_quantity, exit_reason=...)`로
+    # **trade_id가 위치 인자**다. 키워드 전용으로 두면 실물이 정상인데 스텁이
+    # TypeError를 내고, 호출부의 except가 그걸 삼켜 **감사가 조용히 거짓말한다**
+    # (2026-08-10에 실제로 이 함정을 밟았다).
+    def update_sell(cls, trade_id=None, sell_price=0, sell_quantity=0,
+                    exit_reason=None, **kw):
+        cls.sells.append({"trade_id": trade_id, "sell_price": sell_price,
+                          "sell_quantity": sell_quantity,
+                          "exit_reason": exit_reason, **kw})
+        return True
     @classmethod
     def update(cls, rid, data): cls.updates.append({"id": rid, **data}); return True
     @classmethod
@@ -545,6 +554,114 @@ s7.on_trade({"stock_code": "LATE", "price": 10_000, "side": "buy",
 check("14:51엔 매수도 계획 생성도 없다",
       "LATE" not in s7.holdings and "LATE" not in s7._entry_plans
       and not [o for o in s7.order_manager.orders if o["side"] == "buy"])
+
+# ══════════════════════════════════════════════════════════
+section("[7-b] 유령 포지션 — 미체결분을 팔려 할 때 (2026-08-10 실사고)")
+# ══════════════════════════════════════════════════════════
+# 08-10 실사고: 지정가 매수가 미체결인데 보유로 기록됐고(씨피시스템 349주),
+# 그걸 팔려다 3회 실패하며 우선순위 교체 일일한도까지 태웠다. 더 나쁜 건
+# 실패 처리가 `holdings.pop()`으로 **메모리에서만** 뺐다는 것 — DB 행이
+# 'holding'으로 남아 15초 주기 잔고 대조(메모리를 본다)를 우회했고,
+# 재시작 시 되살아났다.
+
+
+class _GhostOM(_OrderMgr):
+    """매도가 항상 '수량 부족'으로 실패하는 주문기(계좌에 실물이 없음)."""
+    def __init__(self, server=None):
+        super().__init__()
+        self.server = server or {}
+
+    def sell(self, code, qty, price=0, order_style="market"):
+        self.orders.append({"side": "sell", "code": code, "qty": qty,
+                            "style": order_style})
+        return {"success": False,
+                "error": "[2000](800033:매도가능수량이 부족합니다. 0주 매도가능)"}
+
+    def sync_positions_from_server(self):
+        return dict(self.server)
+
+
+def _ghost(server=None):
+    s = build(datetime(2026, 8, 10, 9, 2, 0))
+    s.order_manager = _GhostOM(server)
+    _Repo.sells = []
+    _pos(s, "GH")
+    s.holdings["GH"]["trade_id"] = 77
+    s.holdings["GH"]["buy_time"] = s._now() - timedelta(minutes=1)
+    return s
+
+
+# ① 서버 0주 = 유령 -> 1회만 시도하고 정리, DB까지 닫는다
+g1 = _ghost({})
+g1._execute_sell("GH", 10_500, "우선순위 교체")
+_tries = len([o for o in g1.order_manager.orders if o["side"] == "sell"])
+check("유령 매도는 1회만 시도한다(지정가 폴백 생략)", _tries == 1, f"{_tries}회")
+check("유령은 holdings에서 제거된다", "GH" not in g1.holdings)
+check("🔴 유령은 **DB까지 닫힌다**(재시작 시 부활 방지)",
+      len(_Repo.sells) == 1 and "미체결" in str(_Repo.sells[0].get("exit_reason")),
+      str(_Repo.sells[:1])[:80])
+check("유령은 매도 실패 카운트를 태우지 않는다",
+      g1.sell_fail_count.get("GH", 0) == 0)
+check("유령 정리 후 슬롯이 반환된다", g1.occupied_slots() == 0,
+      str(g1.occupied_slots()))
+
+# ② 부분 체결이면 유령이 아니다 — 수량만 보정하고 포지션은 유지
+g2 = _ghost({"GH": {"qty": 4}})
+g2._execute_sell("GH", 10_500, "손절")
+check("[대조군] 부분체결은 수량만 보정하고 포지션 유지",
+      "GH" in g2.holdings and g2.holdings["GH"].get("qty") == 4,
+      str(g2.holdings.get("GH", {}).get("qty")))
+check("[대조군] 부분체결은 DB를 닫지 않는다", not _Repo.sells)
+
+
+# ③ 잔고 조회가 실패하면 '판단 보류' — 기존 3회 재시도 경로로 내려간다
+class _NoSyncOM(_GhostOM):
+    def sync_positions_from_server(self):
+        raise RuntimeError("네트워크")
+
+
+g3 = build(datetime(2026, 8, 10, 9, 2, 0))
+g3.order_manager = _NoSyncOM()
+_Repo.sells = []
+_pos(g3, "GH")
+g3.holdings["GH"]["trade_id"] = 78
+g3.holdings["GH"]["buy_time"] = g3._now() - timedelta(minutes=1)
+for _ in range(SM.MAX_SELL_FAIL):
+    g3._execute_sell("GH", 10_500, "손절")
+check("[안전] 잔고 조회 실패는 판단 보류 -> 기존 재시도 경로",
+      g3.sell_fail_count.get("GH", 0) == SM.MAX_SELL_FAIL,
+      str(g3.sell_fail_count.get("GH", 0)))
+check("🔴 3회 실패 차단 시에도 **DB가 닫힌다**(예전엔 메모리만 뺐다)",
+      "GH" in g3.sell_blocked and "GH" not in g3.holdings
+      and len(_Repo.sells) == 1, str(_Repo.sells[:1])[:70])
+
+
+# ④ 다른 사유의 매도 실패는 지정가 폴백이 살아있어야 한다
+class _OtherErrOM(_GhostOM):
+    def sell(self, code, qty, price=0, order_style="market"):
+        self.orders.append({"side": "sell", "code": code, "qty": qty,
+                            "style": order_style})
+        return {"success": False, "error": "[9999] 서버 점검중"}
+
+
+g4 = build(datetime(2026, 8, 10, 9, 2, 0))
+g4.order_manager = _OtherErrOM()
+_Repo.sells = []
+_pos(g4, "GH")
+g4.holdings["GH"]["trade_id"] = 79
+g4._execute_sell("GH", 10_500, "손절")
+_styles = [o["style"] for o in g4.order_manager.orders if o["side"] == "sell"]
+check("[대조군] 수량부족이 아닌 실패는 지정가 폴백 유지",
+      _styles == ["market", "limit"], str(_styles))
+
+# ⑤ 판정 함수 자체
+check("수량부족 판정 — 800033 인식", SM.StrategyManager._is_qty_shortage("[2000](800033:...)"))
+check("수량부족 판정 — 문구 인식", SM.StrategyManager._is_qty_shortage("매도가능수량이 부족합니다"))
+check("수량부족 판정 — 무관한 에러는 False",
+      not SM.StrategyManager._is_qty_shortage("[9999] 서버 점검중"))
+check("수량부족 판정 — None/빈값 안전",
+      not SM.StrategyManager._is_qty_shortage(None)
+      and not SM.StrategyManager._is_qty_shortage(""))
 
 # ══════════════════════════════════════════════════════════
 section("[8] 이상 입력 내성 — 쓰레기가 들어와도 매수/매도가 새지 않는가")
