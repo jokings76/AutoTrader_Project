@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AutoTrader 대시보드</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --line:#2a2f3a;
+    --fg:#e6e9ef; --dim:#98a1b3; --faint:#6b7488;
+    --up:#ff5a5a; --down:#4c8dff; --ok:#39c07a; --warn:#e8b13a; --bad:#ff5a5a; --na:#6b7488;
+    --accent:#7aa2ff;
+  }
+  @media (prefers-color-scheme: light){
+    :root{
+      --bg:#f6f7f9; --panel:#ffffff; --panel2:#f0f2f6; --line:#dfe3ea;
+      --fg:#1b1f27; --dim:#5b6474; --faint:#8b93a4;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font-family:"Pretendard","Malgun Gothic","Segoe UI",system-ui,sans-serif;
+    font-size:14px;line-height:1.5}
+  .num{font-variant-numeric:tabular-nums;
+    font-family:"Cascadia Mono",Consolas,"D2Coding",monospace}
+
+  header{position:sticky;top:0;z-index:10;background:var(--panel);
+    border-bottom:1px solid var(--line);padding:10px 16px;
+    display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+  header h1{font-size:15px;margin:0;font-weight:650;letter-spacing:-.2px}
+  header .ro{font-size:11px;color:var(--faint);border:1px solid var(--line);
+    border-radius:4px;padding:1px 6px}
+  header .sp{flex:1}
+  input[type=date],button,select{background:var(--panel2);color:var(--fg);
+    border:1px solid var(--line);border-radius:6px;padding:5px 9px;font:inherit}
+  button{cursor:pointer}
+  button:hover{border-color:var(--accent)}
+
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+  .dot.live{background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 25%,transparent)}
+  .dot.idle{background:var(--faint)}
+
+  main{padding:16px;max-width:1500px;margin:0 auto;
+    display:grid;gap:14px;grid-template-columns:repeat(12,1fr)}
+  section{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:14px 16px;grid-column:span 12;min-width:0}
+  section.half{grid-column:span 6}
+  @media (max-width:1000px){section.half{grid-column:span 12}}
+  h2{font-size:13px;margin:0 0 10px;color:var(--dim);font-weight:600;
+    display:flex;align-items:center;gap:8px;letter-spacing:.2px}
+  h2 .badge{font-size:11px;padding:1px 7px;border-radius:20px;
+    background:var(--panel2);color:var(--dim);border:1px solid var(--line)}
+
+  .cards{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+  .card{background:var(--panel2);border-radius:8px;padding:12px 14px}
+  .card .k{font-size:11px;color:var(--dim)}
+  .card .v{font-size:23px;font-weight:650;margin-top:3px;letter-spacing:-.5px}
+  .card .s{font-size:11px;color:var(--faint);margin-top:2px}
+  .up{color:var(--up)} .down{color:var(--down)}
+
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:6px 9px;border-bottom:1px solid var(--line);
+    vertical-align:top}
+  th{color:var(--dim);font-weight:600;font-size:11px;white-space:nowrap;
+    position:sticky;top:0;background:var(--panel)}
+  td.r,th.r{text-align:right}
+  tbody tr:hover{background:var(--panel2)}
+  .scroll{max-height:400px;overflow:auto;margin:0 -16px;padding:0 16px}
+  .wrap{overflow-x:auto}
+  .mut{color:var(--faint);font-size:11.5px}
+  .clip{max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  /* 체크리스트 */
+  .ck{display:grid;gap:8px}
+  .ck-row{display:grid;grid-template-columns:34px 1fr 1.1fr auto;gap:12px;
+    align-items:start;padding:10px 12px;border-radius:8px;background:var(--panel2);
+    border-left:3px solid var(--na)}
+  .ck-row.ok{border-left-color:var(--ok)}
+  .ck-row.warn{border-left-color:var(--warn)}
+  .ck-row.bad{border-left-color:var(--bad);background:color-mix(in srgb,var(--bad) 9%,var(--panel2))}
+  .ck-row.na{border-left-color:var(--na);opacity:.75}
+  .ck-no{font-weight:700;color:var(--faint);text-align:center;font-size:15px}
+  .ck-t{font-weight:600}
+  .ck-e{font-size:11.5px;color:var(--faint);margin-top:2px}
+  .ck-d{font-size:11.5px;color:var(--dim);margin-top:5px;line-height:1.45}
+  .ck-a{font-size:13px}
+  .ck-src{font-size:10.5px;color:var(--faint);margin-top:3px}
+  .pill{font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:20px;
+    white-space:nowrap;align-self:center}
+  .pill.ok{background:color-mix(in srgb,var(--ok) 18%,transparent);color:var(--ok)}
+  .pill.warn{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}
+  .pill.bad{background:color-mix(in srgb,var(--bad) 20%,transparent);color:var(--bad)}
+  .pill.na{background:var(--panel);color:var(--na)}
+
+  pre.log{margin:0;background:var(--panel2);border-radius:8px;padding:10px 12px;
+    max-height:340px;overflow:auto;font-size:11.5px;line-height:1.5;
+    white-space:pre-wrap;word-break:break-all;
+    font-family:"Cascadia Mono",Consolas,"D2Coding",monospace}
+  .err{background:color-mix(in srgb,var(--bad) 10%,transparent);
+    border:1px solid color-mix(in srgb,var(--bad) 35%,transparent);
+    color:var(--bad);border-radius:8px;padding:9px 12px;font-size:12px}
+  .empty{color:var(--faint);font-size:12.5px;padding:10px 2px}
+  footer{padding:8px 16px 26px;color:var(--faint);font-size:11px;text-align:center}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>AutoTrader</h1>
+  <span class="ro">읽기 전용 · Phase 0</span>
+  <span id="bot" class="mut"><span class="dot idle"></span>확인 중</span>
+  <span id="src" class="mut"></span>
+  <span class="sp"></span>
+  <select id="jump" title="저장된 매매일지"><option value="">저장된 일지…</option></select>
+  <input type="date" id="date">
+  <select id="every">
+    <option value="10000" selected>10초마다</option>
+    <option value="30000">30초마다</option>
+    <option value="60000">1분마다</option>
+    <option value="0">수동</option>
+  </select>
+  <button id="refresh">새로고침</button>
+  <span id="stamp" class="mut"></span>
+</header>
+
+<main>
+  <section id="s-cards"><h2>오늘 요약</h2><div id="cards" class="cards"></div></section>
+
+  <section id="s-ck">
+    <h2>🔬 장중 관찰 체크리스트 <span class="badge" id="ck-badge"></span></h2>
+    <div id="ck" class="ck"></div>
+  </section>
+
+  <section class="half"><h2>보유 현황</h2><div id="hold" class="wrap"></div></section>
+  <section class="half"><h2>청산 사유 분포</h2><div id="exits" class="wrap"></div></section>
+
+  <section><h2>오늘 매매</h2><div id="trades" class="scroll wrap"></div></section>
+
+  <section class="half"><h2>조건식별 편입 / 매수</h2><div id="cond" class="wrap"></div></section>
+  <section class="half"><h2>미매수 사유</h2><div id="nb" class="wrap"></div></section>
+
+  <section><h2>시스템 이벤트 <span class="badge">KST 변환됨</span></h2>
+    <div id="events" class="scroll wrap"></div></section>
+
+  <section>
+    <h2>로그 <span class="badge" id="log-badge"></span>
+      <input id="grep" placeholder="필터 (읽어온 꼬리 안에서만)" style="margin-left:auto;width:260px">
+    </h2>
+    <pre class="log" id="log"></pre>
+  </section>
+</main>
+
+<footer>주문·설정변경 기능이 없는 관측 전용 화면입니다 · DB 커넥션은 readonly 세션</footer>
+
+<script>
+const $ = s => document.querySelector(s);
+const dateEl = $('#date'), everyEl = $('#every'), grepEl = $('#grep');
+dateEl.value = new Date().toLocaleDateString('sv-SE');   // YYYY-MM-DD (로컬)
+
+const won = n => (n==null?'—':(n<0?'-':'')+Math.abs(Math.round(n)).toLocaleString('ko-KR')+'원');
+const pct = n => n==null?'—':(n>0?'+':'')+Number(n).toFixed(2)+'%';
+const cls = n => n==null?'':(n>0?'up':(n<0?'down':''));
+const esc = s => String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const hhmm = s => s ? String(s).slice(11,19) : '—';
+
+function panel(el, res, render){
+  if(!res){ el.innerHTML = '<div class="empty">—</div>'; return; }
+  if(res.ok === false){
+    el.innerHTML = `<div class="err">조회 실패 — ${esc(res.error)}</div>`; return;
+  }
+  const d = res.ok === true ? res.data : res;
+  try{ el.innerHTML = render(d) || '<div class="empty">데이터 없음</div>'; }
+  catch(e){ el.innerHTML = `<div class="err">표시 실패 — ${esc(e.message)}</div>`; }
+}
+const table = (cols, rows, cell) =>
+  !rows || !rows.length ? '' :
+  `<table><thead><tr>${cols.map(c=>`<th class="${c[1]||''}">${c[0]}</th>`).join('')}</tr></thead>
+   <tbody>${rows.map(r=>`<tr>${cell(r)}</tr>`).join('')}</tbody></table>`;
+
+async function load(){
+  const d = dateEl.value;
+  const stamp = $('#stamp'); stamp.textContent = '불러오는 중…';
+  try{
+    const [ov, tr, dg, lg] = await Promise.all([
+      fetch(`/api/overview?date=${d}`).then(r=>r.json()),
+      fetch(`/api/trades?date=${d}`).then(r=>r.json()),
+      fetch(`/api/diagnostics?date=${d}`).then(r=>r.json()),
+      fetch(`/api/logs?lines=150&date=${d}${grepEl.value?`&grep=${encodeURIComponent(grepEl.value)}`:''}`).then(r=>r.json()),
+    ]);
+    renderSource(ov);
+    renderBot(ov.bot);
+    renderCards(ov.summary);
+    renderChecklist(ov.checklist, ov.checklist_summary);
+    panel($('#hold'), ov.holdings, renderHold);
+    panel($('#exits'), tr.exit_breakdown, renderExits);
+    panel($('#trades'), tr.trades, renderTrades);
+    panel($('#cond'), dg.watchlist, w => renderCond(w.by_condition));
+    panel($('#nb'),   dg.watchlist, w => renderNB(w.not_bought_reasons));
+    panel($('#events'), dg.events, renderEvents);
+    panel($('#log'), lg, renderLog);
+    stamp.textContent = '갱신 ' + new Date().toLocaleTimeString('ko-KR');
+  }catch(e){ stamp.textContent = '서버 응답 없음'; }
+}
+
+function renderSource(ov){
+  const el = $('#src');
+  if(ov.source === 'snapshot'){
+    el.innerHTML = `<span class="badge" style="border-color:var(--accent);color:var(--accent)">
+      📔 저장된 일지</span> <span class="mut">${esc((ov.saved_at||'').replace('T',' '))} 저장</span>`;
+  } else if(ov.has_snapshot){
+    el.innerHTML = `<span class="badge">실시간</span> <span class="mut">일지 있음</span>`;
+  } else {
+    el.innerHTML = `<span class="badge">실시간</span>`;
+  }
+}
+
+async function loadJournal(){
+  try{
+    const r = await (await fetch('/api/journal')).json();
+    if(!r.ok) return;
+    const sel = $('#jump');
+    sel.innerHTML = '<option value="">저장된 일지…</option>' +
+      r.data.map(d=>`<option value="${d}">${d}</option>`).join('');
+  }catch(e){}
+}
+
+function renderBot(res){
+  const el = $('#bot');
+  if(!res || res.ok === false){ el.innerHTML = '<span class="dot idle"></span>상태 불명'; return; }
+  const b = res.data;
+  el.innerHTML = b.alive
+    ? `<span class="dot live"></span>가동 중 <span class="mut">(로그 ${b.age_sec}초 전)</span>`
+    : `<span class="dot idle"></span>정지 <span class="mut">(마지막 로그 ${b.last_log_at? b.last_log_at.replace('T',' ').slice(0,19):'없음'})</span>`;
+}
+
+function renderCards(res){
+  const el = $('#cards');
+  if(!res || res.ok === false){ el.innerHTML = `<div class="err">${esc(res?.error||'조회 실패')}</div>`; return; }
+  const s = res.data;
+  const card = (k,v,sub,c='') => `<div class="card"><div class="k">${k}</div>
+      <div class="v ${c}">${v}</div><div class="s">${sub||'&nbsp;'}</div></div>`;
+  el.innerHTML =
+    card('실현손익', won(s.pnl), `청산 ${s.closed||0}건`, cls(s.pnl)) +
+    card('승률', s.win_rate==null?'—':s.win_rate+'%',
+         `${s.wins||0}승 ${s.losses||0}패` + (s.flat?` · 무손익 ${s.flat}`:'')) +
+    card('평균 손익률', pct(s.avg_rate), '가격 기준', cls(s.avg_rate)) +
+    card('평균 보유', s.avg_hold_min==null?'—':s.avg_hold_min+'분',
+         '08-10: 25분 · 매도 후 고가까지 +5.45%') +
+    card('매수', (s.buys||0)+'건', '오늘 신규 진입');
+}
+
+function renderChecklist(res, sum){
+  const el = $('#ck'), badge = $('#ck-badge');
+  if(!res || res.ok === false){
+    el.innerHTML = `<div class="err">${esc(res?.error||'조회 실패')}</div>`; badge.textContent=''; return;
+  }
+  const items = res.data;
+  badge.textContent = sum ? `정상 ${sum.ok} · 주의 ${sum.warn} · 이상 ${sum.bad} · 판정불가 ${sum.na}` : '';
+  const label = {ok:'정상', warn:'주의', bad:'이상', na:'판정 불가'};
+  el.innerHTML = items.map(i=>`
+    <div class="ck-row ${i.status}">
+      <div class="ck-no">${i.rank}</div>
+      <div>
+        <div class="ck-t">${esc(i.title)}</div>
+        <div class="ck-e">기대: ${esc(i.expected)}</div>
+        <div class="ck-d">${esc(i.detail)}</div>
+      </div>
+      <div>
+        <div class="ck-a num">${esc(i.actual)}</div>
+        <div class="ck-src">← ${esc(i.source)}</div>
+      </div>
+      <span class="pill ${i.status}">${label[i.status]}</span>
+    </div>`).join('');
+}
+
+const renderHold = h => table(
+  [['종목'],['전략'],['상태'],['수량','r'],['매수가','r'],['금액','r'],['매수시각']], h,
+  r=>`<td>${esc(r.stock_name)} <span class="mut">${r.stock_code}</span></td>
+      <td>${esc(r.sub_strategy||'—')}</td>
+      <td>${r.status==='manual'?'<span class="mut">수동관리(봇 밖)</span>':esc(r.status)}</td>
+      <td class="r num">${(r.buy_quantity||0).toLocaleString()}</td>
+      <td class="r num">${(r.buy_price||0).toLocaleString()}</td>
+      <td class="r num">${won(r.buy_amount)}</td>
+      <td class="num mut">${hhmm(r.buy_time)}</td>`);
+
+const renderExits = e => table(
+  [['사유'],['건수','r'],['평균','r'],['손익','r']], e,
+  r=>`<td>${esc(r.reason)}</td><td class="r num">${r.n}</td>
+      <td class="r num ${cls(r.avg_rate)}">${pct(r.avg_rate)}</td>
+      <td class="r num ${cls(r.pnl)}">${won(r.pnl)}</td>`);
+
+const renderTrades = t => table(
+  [['매수'],['종목'],['수량','r'],['매수가','r'],['매도가','r'],['보유','r'],['손익률','r'],['손익','r'],['청산 사유']], t,
+  r=>`<td class="num mut">${hhmm(r.buy_time)}</td>
+      <td>${esc(r.stock_name)} <span class="mut">${esc(r.sub_strategy||'')}</span></td>
+      <td class="r num">${(r.buy_quantity||0).toLocaleString()}</td>
+      <td class="r num">${(r.buy_price||0).toLocaleString()}</td>
+      <td class="r num">${r.sell_price?r.sell_price.toLocaleString():'—'}</td>
+      <td class="r num mut">${r.hold_min==null?'—':r.hold_min+'분'}</td>
+      <td class="r num ${cls(r.profit_rate)}">${pct(r.profit_rate)}</td>
+      <td class="r num ${cls(r.profit_amount)}">${won(r.profit_amount)}</td>
+      <td class="clip mut" title="${esc(r.exit_reason||'')}">${esc(r.exit_reason||'보유 중')}</td>`);
+
+const renderCond = c => table(
+  [['조건식'],['편입','r'],['매수','r'],['전환율','r']], c,
+  r=>`<td>${esc(r.cond_name)}</td><td class="r num">${r.n}</td>
+      <td class="r num">${r.bought}</td>
+      <td class="r num mut">${r.n?Math.round(100*r.bought/r.n)+'%':'—'}</td>`);
+
+const renderNB = n => table(
+  [['사유'],['건수','r']], n,
+  r=>`<td>${esc(r.reason)}</td><td class="r num">${r.n}</td>`);
+
+const renderEvents = e => table(
+  [['시각'],['종류'],['내용']], e,
+  r=>`<td class="num mut">${hhmm(r.timestamp)}</td>
+      <td class="mut">${esc(r.event_type)}</td>
+      <td>${esc(r.event_message)}</td>`);
+
+function renderLog(d){
+  $('#log-badge').textContent = d.size_mb!=null
+    ? `${d.size_mb}MB${d.truncated?' · 꼬리만':''}`
+    : (d.lines&&d.lines.length ? `그날 ${d.lines.length}줄` : '');
+  if(d.error) return `<span style="color:var(--bad)">${esc(d.error)}</span>`;
+  if(d.note)  return `<span class="mut">${esc(d.note)}</span>`;
+  return esc((d.lines||[]).join('\n')) || '(해당 줄 없음)';
+}
+
+let timer=null;
+function schedule(){
+  clearInterval(timer);
+  const ms = +everyEl.value;
+  if(ms) timer = setInterval(()=>{ if(!document.hidden) load(); }, ms);
+}
+$('#refresh').onclick = load;
+dateEl.onchange = load;
+everyEl.onchange = schedule;
+$('#jump').onchange = e => { if(e.target.value){ dateEl.value = e.target.value; load(); } };
+let gt; grepEl.oninput = ()=>{ clearTimeout(gt); gt=setTimeout(load,400); };
+document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) load(); });
+load(); loadJournal(); schedule();
+</script>
+</body>
+</html>

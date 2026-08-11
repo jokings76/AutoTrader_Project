@@ -1,0 +1,1053 @@
+{
+ "schema": 1,
+ "date": "2026-07-28",
+ "saved_at": "2026-08-11T17:12:16",
+ "summary": {
+  "closed": 21,
+  "wins": 6,
+  "losses": 12,
+  "pnl": -477551,
+  "avg_rate": -1.49,
+  "avg_hold_min": -44.96,
+  "buys": 21,
+  "flat": 3,
+  "win_rate": 33.3
+ },
+ "checklist": [
+  {
+   "rank": 0,
+   "title": "새 조건식(돌파전/돌파후) 부착",
+   "expected": "cond_name에 '돌파전' 등장 · '돌파자동매매용' 소멸",
+   "actual": "돌파전 편입 아직 없음 ((미상))",
+   "status": "warn",
+   "detail": "옛 이름이 보이면 HTS 조건식이 봇 구독에 안 붙은 것이다. ⚠️ 편입 시 등락률은 로그에 안 남아 8% 초과 여부는 직접 셀 수 없다 — 이름 확인이 가장 직접적인 대체 검사다.",
+   "source": "watch_list_log.cond_name"
+  },
+  {
+   "rank": 1,
+   "title": "-3% 도달률",
+   "expected": "옛 조건식 기준선 38%보다 낮아야 함",
+   "actual": "그날 로그 없음(로테이션으로 소실) — 스냅샷이 있으면 그쪽을 볼 것",
+   "status": "na",
+   "detail": "이게 낮아져야 '돌파전이 고점 매수를 줄였다'가 증명된다. 그대로면 조건식 개편의 효과가 없는 것.",
+   "source": "로그 '💧 물타기' ÷ trades 매수 건수"
+  },
+  {
+   "rank": 2,
+   "title": "[물타기] 발동 건수",
+   "expected": "발동 후 회복하는가 (하루 5건 미만)",
+   "actual": "그날 로그 없음(로테이션으로 소실) — 스냅샷이 있으면 그쪽을 볼 것",
+   "status": "na",
+   "detail": "로그가 1차 소스다 — 물타기는 기존 행에 합쳐져 DB로는 셀 수 없다.",
+   "source": "로그 '💧 물타기'"
+  },
+  {
+   "rank": 3,
+   "title": "손절선 범위",
+   "expected": "-4.5% ~ -5.5%",
+   "actual": "손절 없음",
+   "status": "na",
+   "detail": "손절이 나오면 종목별로 갈리는지 볼 것.",
+   "source": "trades.exit_reason 정규식"
+  },
+  {
+   "rank": 4,
+   "title": "돌파후 단독 매수",
+   "expected": "0건 (확인 전용)",
+   "actual": "0건",
+   "status": "ok",
+   "detail": "1건이라도 있으면 `_confirm_only_reject` 배선을 확인할 것. 🔴 resolve_strategy가 미분류를 '1A'로 폴백하므로 source_flags에서 빼는 것만으론 안 막힌다.",
+   "source": "trades.entry_reason"
+  },
+  {
+   "rank": 5,
+   "title": "수동매도 vs 미체결 구분",
+   "expected": "사용자가 HTS에서 판 건은 '수동 매도'로",
+   "actual": "수동매도 3 / 미체결 0",
+   "status": "ok",
+   "detail": "전부 '미체결'로 찍히면 `seen_on_server` 표식이 안 붙는 것 (08-11에 6건이 전부 오기록됐다).",
+   "source": "trades.exit_reason"
+  },
+  {
+   "rank": 6,
+   "title": "수동 추가매수 감지",
+   "expected": "직접 추가매수하면 평단·수량이 합산된다",
+   "actual": "그날 로그 없음(로테이션으로 소실) — 스냅샷이 있으면 그쪽을 볼 것",
+   "status": "na",
+   "detail": "직접 추가매수하셨는데 안 뜨면 15초 잔고 대조가 2회 연속 관측을 못 채운 것. 안 하셨으면 0건이 정상이다.",
+   "source": "로그 '수동 추가매수 감지'"
+  },
+  {
+   "rank": 7,
+   "title": "익절캡 발동 수익률",
+   "expected": "순 +6% 부근",
+   "actual": "4건 · 평균 순 +2.54% (가격 +2.77%)",
+   "status": "bad",
+   "detail": "순 +4% 부근이면 캡 상수가 안 먹은 것(08-10 상향 전 값).",
+   "source": "trades.profit_rate − 수수료"
+  },
+  {
+   "rank": 8,
+   "title": "꺼진 규칙이 안 도는가",
+   "expected": "전부 0건",
+   "actual": "정체 정리 1, 시간정리 1, 우선순위 교체 0",
+   "status": "bad",
+   "detail": "1건이라도 있으면 `STAGNANT_EXIT_ENABLED` / `PHASE1A_PRIORITY_MAX_PER_DAY` 상수를 확인할 것.",
+   "source": "trades.exit_reason"
+  },
+  {
+   "rank": 9,
+   "title": "09:00~09:05 매수",
+   "expected": "동시 점유 최대 4",
+   "actual": "0건",
+   "status": "ok",
+   "detail": "⚠️ 캡은 **동시 점유**를 막지 거래 횟수를 막지 않는다 — 빨리 팔려서 자리가 나면 다시 산다. 4건 초과가 곧 위반은 아니다. 08-06처럼 개장 18분에 19건 수준이면 그때 캡을 의심할 것.",
+   "source": "trades.buy_time"
+  },
+  {
+   "rank": 10,
+   "title": "눌림목 매수",
+   "expected": "0건 (슬롯 0 = 매매 중단)",
+   "actual": "0건",
+   "status": "ok",
+   "detail": "1건이라도 있으면 `PULLBACK_MAX_SLOTS`를 확인할 것.",
+   "source": "trades.sub_strategy"
+  }
+ ],
+ "checklist_summary": {
+  "ok": 4,
+  "warn": 1,
+  "bad": 2,
+  "na": 4
+ },
+ "trades": [
+  {
+   "id": 1,
+   "stock_code": "203650",
+   "stock_name": "드림시큐리티",
+   "sub_strategy": "1A",
+   "status": "closed",
+   "buy_price": 1918,
+   "buy_quantity": 642,
+   "sell_price": 1722,
+   "buy_time": "2026-07-28T09:11:32",
+   "sell_time": "2026-07-28T09:35:06.857139",
+   "profit_rate": -10.22,
+   "profit_amount": -125832,
+   "entry_reason": "[복구] DB 스키마 버그로 유실된 실보유 포지션 수동 재등록 (2026-07-28)",
+   "exit_reason": "손절 가격-10.22% (순 -10.45%)",
+   "hold_min": 23.6
+  },
+  {
+   "id": 3,
+   "stock_code": "044340",
+   "stock_name": "화진",
+   "sub_strategy": "1A",
+   "status": "closed",
+   "buy_price": 5966,
+   "buy_quantity": 763,
+   "sell_price": 6130,
+   "buy_time": "2026-07-28T09:18:44",
+   "sell_time": "2026-07-28T09:39:14.343817",
+   "profit_rate": 2.75,
+   "profit_amount": 125132,
+   "entry_reason": "[복구] DB 스키마 버그로 유실된 실보유 포지션 수동 재등록 (2026-07-28)",
+   "exit_reason": "익절 캡 순+2.52% (가격 +2.75%)",
+   "hold_min": 20.5
+  },
+  {
+   "id": 4,
+   "stock_code": "413630",
+   "stock_name": "씨피시스템",
+   "sub_strategy": "1A",
+   "status": "closed",
+   "buy_price": 4580,
+   "buy_quantity": 392,
+   "sell_price": 4410,
+   "buy_time": "2026-07-28T09:18:47",
+   "sell_time": "2026-07-28T09:38:35.402921",
+   "profit_rate": -3.71,
+   "profit_amount": -66640,
+   "entry_reason": "[복구] DB 스키마 버그로 유실된 실보유 포지션 수동 재등록 (2026-07-28)",
+   "exit_reason": "손절 가격-3.71% (순 -3.94%)",
+   "hold_min": 19.8
+  },
+  {
+   "id": 5,
+   "stock_code": "356680",
+   "stock_name": "심텍",
+   "sub_strategy": "1A",
+   "status": "closed",
+   "buy_price": 11633,
+   "buy_quantity": 167,
+   "sell_price": 11210,
+   "buy_time": "2026-07-28T09:24:51",
+   "sell_time": "2026-07-28T09:34:58.760432",
+   "profit_rate": -3.64,
+   "profit_amount": -70641,
+   "entry_reason": "[복구] DB 스키마 버그로 유실된 실보유 포지션 수동 재등록 (2026-07-28)",
+   "exit_reason": "손절 가격-3.64% (순 -3.87%)",
+   "hold_min": 10.1
+  },
+  {
+   "id": 2,
+   "stock_code": "004310",
+   "stock_name": "화성밸브",
+   "sub_strategy": "1A",
+   "status": "closed",
+   "buy_price": 6220,
+   "buy_quantity": 440,
+   "sell_price": 6030,
+   "buy_time": "2026-07-28T09:25:03",
+   "sell_time": "2026-07-28T09:39:11.466702",
+   "profit_rate": -3.05,
+   "profit_amount": -83600,
+   "entry_reason": "[복구] DB 스키마 버그로 유실된 실보유 포지션 수동 재등록 (2026-07-28)",
+   "exit_reason": "손절 가격-3.05% (순 -3.28%)",
+   "hold_min": 14.1
+  },
+  {
+   "id": 6,
+   "stock_code": "460930",
+   "stock_name": "현대힘스",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 16400,
+   "buy_quantity": 188,
+   "sell_price": 15900,
+   "buy_time": "2026-07-28T09:36:06.554611",
+   "sell_time": "2026-07-28T09:40:14.919432",
+   "profit_rate": -3.05,
+   "profit_amount": -94000,
+   "entry_reason": "[기타] 1B 체결강도 FSM (현재가 16,400) | 비중x1.54",
+   "exit_reason": "손절 가격-3.05% (순 -3.28%)",
+   "hold_min": 4.1
+  },
+  {
+   "id": 7,
+   "stock_code": "039980",
+   "stock_name": "폴라리스AI",
+   "sub_strategy": "1L",
+   "status": "closed",
+   "buy_price": 5250,
+   "buy_quantity": 592,
+   "sell_price": 5200,
+   "buy_time": "2026-07-28T09:40:36.462059",
+   "sell_time": "2026-07-28T10:10:43.935494",
+   "profit_rate": -0.95,
+   "profit_amount": -29600,
+   "entry_reason": "[초기스냅샷] 주도주 우선 진입 | 테마: 재난/안전(지진/화재 등) | 체결강도 100이상 2분지속 (현재가 5,250) | 비중x1.56",
+   "exit_reason": "시간정리 30분 (순 -1.18%)",
+   "hold_min": 30.1
+  },
+  {
+   "id": 8,
+   "stock_code": "439960",
+   "stock_name": "코스모로보틱스",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 15670,
+   "buy_quantity": 114,
+   "sell_price": 15190,
+   "buy_time": "2026-07-28T09:44:05.236483",
+   "sell_time": "2026-07-28T09:46:28.213753",
+   "profit_rate": -3.06,
+   "profit_amount": -54720,
+   "entry_reason": "[기타] 1B 체결강도 FSM (현재가 15,670) | 비중x0.90",
+   "exit_reason": "손절 가격-3.06% (순 -3.29%)",
+   "hold_min": 2.4
+  },
+  {
+   "id": 9,
+   "stock_code": "477850",
+   "stock_name": "마키나락스",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 28150,
+   "buy_quantity": 96,
+   "sell_price": 27300,
+   "buy_time": "2026-07-28T09:44:13.456290",
+   "sell_time": "2026-07-28T09:47:15.935919",
+   "profit_rate": -3.02,
+   "profit_amount": -81600,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 28,150) | 비중x1.35",
+   "exit_reason": "손절 가격-3.02% (순 -3.25%)",
+   "hold_min": 3.0
+  },
+  {
+   "id": 10,
+   "stock_code": "044340",
+   "stock_name": "044340",
+   "sub_strategy": "1L",
+   "status": "closed",
+   "buy_price": 6260,
+   "buy_quantity": 379,
+   "sell_price": 6040,
+   "buy_time": "2026-07-28T09:47:22.007237",
+   "sell_time": "2026-07-28T09:54:32.093434",
+   "profit_rate": -3.51,
+   "profit_amount": -83380,
+   "entry_reason": "[알수없음] 주도주 우선 진입 | 테마: 여름 | 체결강도 100이상 2분지속 (현재가 6,260) | 비중x1.19",
+   "exit_reason": "손절 가격-3.51% (순 -3.74%)",
+   "hold_min": 7.2
+  },
+  {
+   "id": 11,
+   "stock_code": "356680",
+   "stock_name": "엑스게이트",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 10830,
+   "buy_quantity": 287,
+   "sell_price": 11130,
+   "buy_time": "2026-07-28T09:47:41.880565",
+   "sell_time": "2026-07-28T10:01:39.928113",
+   "profit_rate": 2.77,
+   "profit_amount": 86100,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 10,830) | 비중x1.56",
+   "exit_reason": "익절 캡 순+2.54% (가격 +2.77%)",
+   "hold_min": 14.0
+  },
+  {
+   "id": 12,
+   "stock_code": "218150",
+   "stock_name": "미래생명자원",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 2195,
+   "buy_quantity": 617,
+   "sell_price": 2125,
+   "buy_time": "2026-07-28T09:55:40.850637",
+   "sell_time": "2026-07-28T10:01:30.855877",
+   "profit_rate": -3.19,
+   "profit_amount": -43190,
+   "entry_reason": "[기타] 1B 체결강도 FSM (현재가 2,195) | 비중x0.68",
+   "exit_reason": "손절 가격-3.19% (순 -3.42%)",
+   "hold_min": 5.8
+  },
+  {
+   "id": 13,
+   "stock_code": "002140",
+   "stock_name": "고려산업",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 2300,
+   "buy_quantity": 606,
+   "sell_price": 2230,
+   "buy_time": "2026-07-28T09:55:43.827954",
+   "sell_time": "2026-07-28T10:01:21.540696",
+   "profit_rate": -3.04,
+   "profit_amount": -42420,
+   "entry_reason": "[기타] 1B 체결강도 FSM (현재가 2,300) | 비중x0.70",
+   "exit_reason": "손절 가격-3.04% (순 -3.27%)",
+   "hold_min": 5.6
+  },
+  {
+   "id": 14,
+   "stock_code": "439960",
+   "stock_name": "코스모로보틱스",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 14900,
+   "buy_quantity": 200,
+   "sell_price": 15310,
+   "buy_time": "2026-07-28T10:01:24.543274",
+   "sell_time": "2026-07-28T10:21:27.525605",
+   "profit_rate": 2.75,
+   "profit_amount": 82000,
+   "entry_reason": "[기타] 1B 체결강도 FSM (현재가 14,900) | 비중x1.49",
+   "exit_reason": "익절 캡 순+2.52% (가격 +2.75%)",
+   "hold_min": 20.0
+  },
+  {
+   "id": 15,
+   "stock_code": "413630",
+   "stock_name": "씨피시스템",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 4645,
+   "buy_quantity": 487,
+   "sell_price": 4775,
+   "buy_time": "2026-07-28T10:01:36.158712",
+   "sell_time": "2026-07-28T10:10:48.856302",
+   "profit_rate": 2.8,
+   "profit_amount": 63310,
+   "entry_reason": "[기타] 1B 체결강도 FSM (현재가 4,645) | 비중x1.13",
+   "exit_reason": "익절 캡 순+2.57% (가격 +2.80%)",
+   "hold_min": 9.2
+  },
+  {
+   "id": 16,
+   "stock_code": "049720",
+   "stock_name": "고려신용정보",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 9840,
+   "buy_quantity": 246,
+   "sell_price": 9860,
+   "buy_time": "2026-07-28T10:01:44.725537",
+   "sell_time": "2026-07-28T10:12:02.735392",
+   "profit_rate": 0.2,
+   "profit_amount": 4920,
+   "entry_reason": "[기타] 1B 체결강도 FSM (현재가 9,840) | 비중x1.21",
+   "exit_reason": "슬롯 교체: 체결강도 하락(1->0) + 거래량 정체(x0.44) | 보유 10분 -> 대체후보 현대힘스(460930) 점수 4.8",
+   "hold_min": 10.3
+  },
+  {
+   "id": 17,
+   "stock_code": "054540",
+   "stock_name": "삼영엠텍",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 7120,
+   "buy_quantity": 490,
+   "sell_price": 7120,
+   "buy_time": "2026-07-28T10:10:51.736870",
+   "sell_time": "2026-07-28T03:45:25.963159",
+   "profit_rate": 0.0,
+   "profit_amount": 0,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 7,120) | 비중x1.75",
+   "exit_reason": "수동 매도 감지 (사후 정리, 실제 체결가 미상)",
+   "hold_min": -385.4
+  },
+  {
+   "id": 18,
+   "stock_code": "460930",
+   "stock_name": "현대힘스",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 15470,
+   "buy_quantity": 258,
+   "sell_price": 15470,
+   "buy_time": "2026-07-28T10:12:08.720985",
+   "sell_time": "2026-07-28T03:45:25.963159",
+   "profit_rate": 0.0,
+   "profit_amount": 0,
+   "entry_reason": "[기타] 1B 체결강도 FSM (현재가 15,470) | 비중x2.00",
+   "exit_reason": "수동 매도 감지 (사후 정리, 실제 체결가 미상)",
+   "hold_min": -386.7
+  },
+  {
+   "id": 19,
+   "stock_code": "413630",
+   "stock_name": "씨피시스템",
+   "sub_strategy": "1L",
+   "status": "closed",
+   "buy_price": 4845,
+   "buy_quantity": 598,
+   "sell_price": 4890,
+   "buy_time": "2026-07-28T10:15:04.951009",
+   "sell_time": "2026-07-28T10:32:22.370545",
+   "profit_rate": 0.93,
+   "profit_amount": 26910,
+   "entry_reason": "[기타] 주도주 우선 진입 | 테마: 반도체 장비 | 체결강도 100이상 2분지속 (현재가 4,845) | 비중x1.45",
+   "exit_reason": "트레일링 고점-1% (-1.01%, 순 +0.70%)",
+   "hold_min": 17.3
+  },
+  {
+   "id": 20,
+   "stock_code": "108860",
+   "stock_name": "셀바스AI",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 8900,
+   "buy_quantity": 449,
+   "sell_price": 8900,
+   "buy_time": "2026-07-28T10:21:30.743908",
+   "sell_time": "2026-07-28T03:45:25.963159",
+   "profit_rate": 0.0,
+   "profit_amount": 0,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 8,900) | 비중x2.00",
+   "exit_reason": "수동 매도 감지 (사후 정리, 실제 체결가 미상)",
+   "hold_min": -396.1
+  },
+  {
+   "id": 21,
+   "stock_code": "413630",
+   "stock_name": "413630",
+   "sub_strategy": "1L",
+   "status": "closed",
+   "buy_price": 4935,
+   "buy_quantity": 602,
+   "sell_price": 4785,
+   "buy_time": "2026-07-28T10:37:21.142140",
+   "sell_time": "2026-07-28T10:44:05.402427",
+   "profit_rate": -3.04,
+   "profit_amount": -90300,
+   "entry_reason": "[알수없음] 주도주 우선 진입 | 테마: 반도체 장비 | 체결강도 100이상 2분지속 (현재가 4,935) | 비중x1.49",
+   "exit_reason": "손절 가격-3.04% (순 -3.27%)",
+   "hold_min": 6.7
+  }
+ ],
+ "exit_breakdown": [
+  {
+   "reason": "수동 매도 감지",
+   "n": 3,
+   "pnl": 0,
+   "avg_rate": 0.0
+  },
+  {
+   "reason": "손절 가격-3.05%",
+   "n": 2,
+   "pnl": -177600,
+   "avg_rate": -3.05
+  },
+  {
+   "reason": "손절 가격-3.04%",
+   "n": 2,
+   "pnl": -132720,
+   "avg_rate": -3.04
+  },
+  {
+   "reason": "익절 캡 순+2.52%",
+   "n": 2,
+   "pnl": 207132,
+   "avg_rate": 2.75
+  },
+  {
+   "reason": "손절 가격-10.22%",
+   "n": 1,
+   "pnl": -125832,
+   "avg_rate": -10.22
+  },
+  {
+   "reason": "손절 가격-3.51%",
+   "n": 1,
+   "pnl": -83380,
+   "avg_rate": -3.51
+  },
+  {
+   "reason": "손절 가격-3.02%",
+   "n": 1,
+   "pnl": -81600,
+   "avg_rate": -3.02
+  },
+  {
+   "reason": "손절 가격-3.64%",
+   "n": 1,
+   "pnl": -70641,
+   "avg_rate": -3.64
+  },
+  {
+   "reason": "손절 가격-3.71%",
+   "n": 1,
+   "pnl": -66640,
+   "avg_rate": -3.71
+  },
+  {
+   "reason": "손절 가격-3.06%",
+   "n": 1,
+   "pnl": -54720,
+   "avg_rate": -3.06
+  },
+  {
+   "reason": "손절 가격-3.19%",
+   "n": 1,
+   "pnl": -43190,
+   "avg_rate": -3.19
+  },
+  {
+   "reason": "시간정리 30분",
+   "n": 1,
+   "pnl": -29600,
+   "avg_rate": -0.95
+  },
+  {
+   "reason": "슬롯 교체: 체결강도 하락",
+   "n": 1,
+   "pnl": 4920,
+   "avg_rate": 0.2
+  },
+  {
+   "reason": "트레일링 고점-1%",
+   "n": 1,
+   "pnl": 26910,
+   "avg_rate": 0.93
+  },
+  {
+   "reason": "익절 캡 순+2.57%",
+   "n": 1,
+   "pnl": 63310,
+   "avg_rate": 2.8
+  },
+  {
+   "reason": "익절 캡 순+2.54%",
+   "n": 1,
+   "pnl": 86100,
+   "avg_rate": 2.77
+  }
+ ],
+ "watchlist": {
+  "by_condition": [
+   {
+    "cond_name": "(미상)",
+    "n": 20,
+    "bought": 8
+   }
+  ],
+  "not_bought_reasons": [
+   {
+    "reason": "거래량 증가 지속 아님",
+    "n": 12
+   }
+  ]
+ },
+ "events": [
+  {
+   "timestamp": "2026-07-28T12:44:53.219030",
+   "event_type": "SELL_BLOCKED",
+   "severity": "WARNING",
+   "event_message": "460930 매도 3회 실패 -> 차단"
+  },
+  {
+   "timestamp": "2026-07-28T12:44:53.214587",
+   "event_type": "ORDER_FAIL",
+   "severity": "ERROR",
+   "event_message": "SELL 460930: [2000](800033:모의투자 매도가능수량이 부족합니다.) (3/3)"
+  },
+  {
+   "timestamp": "2026-07-28T12:44:50.712127",
+   "event_type": "ORDER_FAIL",
+   "severity": "ERROR",
+   "event_message": "SELL 460930: [2000](800033:모의투자 매도가능수량이 부족합니다.) (2/3)"
+  },
+  {
+   "timestamp": "2026-07-28T12:44:47.469639",
+   "event_type": "ORDER_FAIL",
+   "severity": "ERROR",
+   "event_message": "SELL 460930: [2000](800033:모의투자 매도가능수량이 부족합니다.) (1/3)"
+  },
+  {
+   "timestamp": "2026-07-28T12:44:44.074808",
+   "event_type": "ORDER_FAIL",
+   "severity": "ERROR",
+   "event_message": "SELL 054540: [2000](800033:모의투자 매도가능수량이 부족합니다.) (1/3)"
+  },
+  {
+   "timestamp": "2026-07-28T12:44:38.065265",
+   "event_type": "SELL_BLOCKED",
+   "severity": "WARNING",
+   "event_message": "108860 매도 3회 실패 -> 차단"
+  },
+  {
+   "timestamp": "2026-07-28T12:44:38.060201",
+   "event_type": "ORDER_FAIL",
+   "severity": "ERROR",
+   "event_message": "SELL 108860: [2000](800033:모의투자 매도가능수량이 부족합니다.) (3/3)"
+  },
+  {
+   "timestamp": "2026-07-28T12:44:34.062534",
+   "event_type": "ORDER_FAIL",
+   "severity": "ERROR",
+   "event_message": "SELL 108860: [2000](800033:모의투자 매도가능수량이 부족합니다.) (2/3)"
+  },
+  {
+   "timestamp": "2026-07-28T12:44:29.974924",
+   "event_type": "ORDER_FAIL",
+   "severity": "ERROR",
+   "event_message": "SELL 108860: [2000](800033:모의투자 매도가능수량이 부족합니다.) (1/3)"
+  },
+  {
+   "timestamp": "2026-07-28T11:00:54.978087",
+   "event_type": "STRATEGY_ERROR",
+   "severity": "ERROR",
+   "event_message": "044340: 'TradeFlowTracker' object has no attribute '_history'"
+  },
+  {
+   "timestamp": "2026-07-28T10:44:05.409220",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "413630 413630 602주 @ 4,785원 [1L] | 손절 가격-3.04% (순 -3.27%) | 순손익 -97,133원"
+  },
+  {
+   "timestamp": "2026-07-28T10:37:21.147289",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "413630 413630 602주 @ 4,935원 [1L]"
+  },
+  {
+   "timestamp": "2026-07-28T10:32:22.374900",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "413630 씨피시스템 598주 @ 4,890원 [1L] | 트레일링 고점-1% (-1.01%, 순 +0.70%) | 순손익 +20,246원"
+  },
+  {
+   "timestamp": "2026-07-28T10:21:30.755741",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "108860 셀바스AI 449주 @ 8,900원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-28T10:21:27.531065",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "439960 코스모로보틱스 200주 @ 15,310원 [1B] | 익절 캡 순+2.52% (가격 +2.75%) | 순손익 +75,146원"
+  },
+  {
+   "timestamp": "2026-07-28T10:15:04.956842",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "413630 씨피시스템 598주 @ 4,845원 [1L]"
+  },
+  {
+   "timestamp": "2026-07-28T10:12:08.726630",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "460930 현대힘스 258주 @ 15,470원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-28T10:12:02.740441",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "049720 고려신용정보 246주 @ 9,860원 [1B] | 슬롯 교체: 체결강도 하락(1->0) + 거래량 정체(x0.44) | 보유 10분 -> 대체후보 현대힘스(460930) 점수 4.8 | 순손익 -647원"
+  },
+  {
+   "timestamp": "2026-07-28T10:10:51.741174",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "054540 삼영엠텍 490주 @ 7,120원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-28T10:10:48.858858",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "413630 씨피시스템 487주 @ 4,775원 [1B] | 익절 캡 순+2.57% (가격 +2.80%) | 순손익 +58,107원"
+  },
+  {
+   "timestamp": "2026-07-28T10:10:43.939083",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "039980 폴라리스AI 592주 @ 5,200원 [1L] | 시간정리 30분 (순 -1.18%) | 순손익 -36,748원"
+  },
+  {
+   "timestamp": "2026-07-28T10:01:44.730870",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "049720 고려신용정보 246주 @ 9,840원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-28T10:01:39.931959",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "356680 엑스게이트 287주 @ 11,130원 [1B] | 익절 캡 순+2.54% (가격 +2.77%) | 순손익 +78,951원"
+  },
+  {
+   "timestamp": "2026-07-28T10:01:36.170382",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "413630 씨피시스템 487주 @ 4,645원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-28T10:01:30.865488",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "218150 미래생명자원 617주 @ 2,125원 [1B] | 손절 가격-3.19% (순 -3.42%) | 순손익 -46,305원"
+  },
+  {
+   "timestamp": "2026-07-28T10:01:24.549226",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "439960 코스모로보틱스 200주 @ 14,900원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-28T10:01:21.545664",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "002140 고려산업 606주 @ 2,230원 [1B] | 손절 가격-3.04% (순 -3.27%) | 순손익 -45,626원"
+  },
+  {
+   "timestamp": "2026-07-28T09:55:43.833622",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "002140 고려산업 606주 @ 2,300원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-28T09:55:40.856224",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "218150 미래생명자원 617주 @ 2,195원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-28T09:54:32.099362",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "044340 044340 379주 @ 6,040원 [1L] | 손절 가격-3.51% (순 -3.74%) | 순손익 -88,837원"
+  },
+  {
+   "timestamp": "2026-07-28T09:47:41.884807",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "356680 엑스게이트 287주 @ 10,830원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-28T09:47:22.017640",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "044340 044340 379주 @ 6,260원 [1L]"
+  },
+  {
+   "timestamp": "2026-07-28T09:47:15.941606",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "477850 마키나락스 96주 @ 27,300원 [1B] | 손절 가격-3.02% (순 -3.25%) | 순손익 -87,816원"
+  },
+  {
+   "timestamp": "2026-07-28T09:46:28.221025",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "439960 코스모로보틱스 114주 @ 15,190원 [1B] | 손절 가격-3.06% (순 -3.29%) | 순손익 -58,829원"
+  },
+  {
+   "timestamp": "2026-07-28T09:44:13.461799",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "477850 마키나락스 96주 @ 28,150원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-28T09:44:05.243386",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "439960 코스모로보틱스 114주 @ 15,670원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-28T09:40:36.473839",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "039980 폴라리스AI 592주 @ 5,250원 [1L]"
+  },
+  {
+   "timestamp": "2026-07-28T09:40:14.923416",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "460930 현대힘스 188주 @ 15,900원 [1B] | 손절 가격-3.05% (순 -3.28%) | 순손익 -101,091원"
+  },
+  {
+   "timestamp": "2026-07-28T09:39:14.346706",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "044340 화진 763주 @ 6,130원 [1A] | 익절 캡 순+2.52% (가격 +2.75%) | 순손익 +114,662원"
+  },
+  {
+   "timestamp": "2026-07-28T09:39:11.470097",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "004310 화성밸브 440주 @ 6,030원 [1A] | 손절 가격-3.05% (순 -3.28%) | 순손익 -89,895원"
+  },
+  {
+   "timestamp": "2026-07-28T09:38:35.409701",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "413630 씨피시스템 392주 @ 4,410원 [1A] | 손절 가격-3.71% (순 -3.94%) | 순손익 -70,769원"
+  },
+  {
+   "timestamp": "2026-07-28T09:36:06.571352",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "460930 현대힘스 188주 @ 16,400원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-28T09:35:06.861281",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "203650 드림시큐리티 642주 @ 1,722원 [1A] | 손절 가격-10.22% (순 -10.45%) | 순손익 -128,664원"
+  },
+  {
+   "timestamp": "2026-07-28T09:34:58.770776",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "356680 심텍 167주 @ 11,210원 [1A] | 손절 가격-3.64% (순 -3.87%) | 순손익 -75,109원"
+  },
+  {
+   "timestamp": "2026-07-28T09:34:48.519040",
+   "event_type": "STRATEGY_ERROR",
+   "severity": "ERROR",
+   "event_message": "439960: 'TradeFlowTracker' object has no attribute '_history'"
+  },
+  {
+   "timestamp": "2026-07-28T09:34:31.744874",
+   "event_type": "STRATEGY_ERROR",
+   "severity": "ERROR",
+   "event_message": "477850: 'TradeFlowTracker' object has no attribute '_history'"
+  },
+  {
+   "timestamp": "2026-07-28T09:25:06.260399",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "044340 위닉스 407주 @ 5,870원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-28T09:25:06.257078",
+   "event_type": "DB_LOG_FAIL",
+   "severity": "ERROR",
+   "event_message": "insert_buy 044340: column \"sub_strategy\" of relation \"trades\" does not exist\nLINE 1: ..._price, buy_quantity, buy_amount, strategy_phase, sub_strate...\n                                                             ^\n"
+  },
+  {
+   "timestamp": "2026-07-28T09:25:03.359747",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "004310 현대약품 440주 @ 6,210원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-28T09:25:03.355554",
+   "event_type": "DB_LOG_FAIL",
+   "severity": "ERROR",
+   "event_message": "insert_buy 004310: column \"sub_strategy\" of relation \"trades\" does not exist\nLINE 1: ..._price, buy_quantity, buy_amount, strategy_phase, sub_strate...\n                                                             ^\n"
+  },
+  {
+   "timestamp": "2026-07-28T09:24:51.173797",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "356680 엑스게이트 167주 @ 11,640원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-28T09:24:51.169126",
+   "event_type": "DB_LOG_FAIL",
+   "severity": "ERROR",
+   "event_message": "insert_buy 356680: column \"sub_strategy\" of relation \"trades\" does not exist\nLINE 1: ..._price, buy_quantity, buy_amount, strategy_phase, sub_strate...\n                                                             ^\n"
+  },
+  {
+   "timestamp": "2026-07-28T09:21:52.425420",
+   "event_type": "STRATEGY_ERROR",
+   "severity": "ERROR",
+   "event_message": "332570: 'TradeFlowTracker' object has no attribute '_history'"
+  },
+  {
+   "timestamp": "2026-07-28T09:19:22.825958",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "039980 폴라리스AI 306주 @ 5,280원 [1B] | 손절 가격-3.12% (순 -3.35%) | 순손익 -55,856원"
+  },
+  {
+   "timestamp": "2026-07-28T09:18:47.588526",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "413630 씨피시스템 392주 @ 4,575원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-28T09:18:47.583882",
+   "event_type": "DB_LOG_FAIL",
+   "severity": "ERROR",
+   "event_message": "insert_buy 413630: column \"sub_strategy\" of relation \"trades\" does not exist\nLINE 1: ..._price, buy_quantity, buy_amount, strategy_phase, sub_strate...\n                                                             ^\n"
+  },
+  {
+   "timestamp": "2026-07-28T09:18:44.757529",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "044340 위닉스 356주 @ 6,030원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-28T09:18:44.751318",
+   "event_type": "DB_LOG_FAIL",
+   "severity": "ERROR",
+   "event_message": "insert_buy 044340: column \"sub_strategy\" of relation \"trades\" does not exist\nLINE 1: ..._price, buy_quantity, buy_amount, strategy_phase, sub_strate...\n                                                             ^\n"
+  },
+  {
+   "timestamp": "2026-07-28T09:15:04.788686",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "460930 현대힘스 185주 @ 15,090원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-28T09:15:04.778794",
+   "event_type": "DB_LOG_FAIL",
+   "severity": "ERROR",
+   "event_message": "insert_buy 460930: column \"sub_strategy\" of relation \"trades\" does not exist\nLINE 1: ..._price, buy_quantity, buy_amount, strategy_phase, sub_strate...\n                                                             ^\n"
+  },
+  {
+   "timestamp": "2026-07-28T09:15:01.803613",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "004310 현대약품 401주 @ 6,240원 [1B] | 익절 캡 순+2.57% (가격 +2.80%) | 순손익 +62,572원"
+  },
+  {
+   "timestamp": "2026-07-28T09:12:05.230198",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "108860 셀바스AI 168주 @ 9,230원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-28T09:12:05.225523",
+   "event_type": "DB_LOG_FAIL",
+   "severity": "ERROR",
+   "event_message": "insert_buy 108860: column \"sub_strategy\" of relation \"trades\" does not exist\nLINE 1: ..._price, buy_quantity, buy_amount, strategy_phase, sub_strate...\n                                                             ^\n"
+  },
+  {
+   "timestamp": "2026-07-28T09:11:46.060134",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "004310 현대약품 401주 @ 6,070원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-28T09:11:46.052662",
+   "event_type": "DB_LOG_FAIL",
+   "severity": "ERROR",
+   "event_message": "insert_buy 004310: column \"sub_strategy\" of relation \"trades\" does not exist\nLINE 1: ..._price, buy_quantity, buy_amount, strategy_phase, sub_strate...\n                                                             ^\n"
+  },
+  {
+   "timestamp": "2026-07-28T09:11:41.451793",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "039980 폴라리스AI 306주 @ 5,450원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-28T09:11:41.437859",
+   "event_type": "DB_LOG_FAIL",
+   "severity": "ERROR",
+   "event_message": "insert_buy 039980: column \"sub_strategy\" of relation \"trades\" does not exist\nLINE 1: ..._price, buy_quantity, buy_amount, strategy_phase, sub_strate...\n                                                             ^\n"
+  },
+  {
+   "timestamp": "2026-07-28T09:11:32.045796",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "203650 드림시큐리티 642주 @ 1,919원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-28T09:11:32.026443",
+   "event_type": "DB_LOG_FAIL",
+   "severity": "ERROR",
+   "event_message": "insert_buy 203650: column \"sub_strategy\" of relation \"trades\" does not exist\nLINE 1: ..._price, buy_quantity, buy_amount, strategy_phase, sub_strate...\n                                                             ^\n"
+  }
+ ],
+ "holdings_at_save": [
+  {
+   "id": 152,
+   "trade_date": "2026-08-06",
+   "stock_code": "073240",
+   "stock_name": "금호타이어",
+   "buy_price": 8210,
+   "buy_quantity": 73,
+   "buy_amount": 599330,
+   "sub_strategy": "1A",
+   "status": "manual",
+   "buy_time": "2026-08-06T09:18:21.035501",
+   "entry_reason": "[돌파자동매매용+눌림목자동] 1A 틱즉시진입 (강도 100+ 22.3초 연속, 5,383만원+ 체결 2건(시간x1.00 주가x0.90 급등x1.50)) | 경로=절대 | 시간계수 x1.00 (현재가 8,210) | 비중x0.30 | market"
+  },
+  {
+   "id": 151,
+   "trade_date": "2026-08-06",
+   "stock_code": "058730",
+   "stock_name": "다스코",
+   "buy_price": 3305,
+   "buy_quantity": 552,
+   "buy_amount": 1824360,
+   "sub_strategy": "1A",
+   "status": "manual",
+   "buy_time": "2026-08-06T09:15:34.035685",
+   "entry_reason": "[돌파자동매매용] 1A 틱즉시진입 (강도 100+ 85.3초 연속, 단일체결 0.58억) | 경로=단일 | 시간계수 x1.00 (현재가 3,305) | 비중x0.91 | market"
+  },
+  {
+   "id": 145,
+   "trade_date": "2026-08-06",
+   "stock_code": "036930",
+   "stock_name": "주성엔지니어링",
+   "buy_price": 140100,
+   "buy_quantity": 7,
+   "buy_amount": 980700,
+   "sub_strategy": "1A",
+   "status": "manual",
+   "buy_time": "2026-08-06T09:07:39.108153",
+   "entry_reason": "[돌파자동매매용] 1A 틱즉시진입 (강도 100+ 105.2초 연속, 8,000만원+ 체결 2건(시간x1.00 주가x2.00 급등x1.00)) | 경로=절대 | 시간계수 x1.00 (현재가 140,100) | 비중x0.54 | market"
+  }
+ ],
+ "log_counts": null
+}

@@ -1,0 +1,854 @@
+{
+ "schema": 1,
+ "date": "2026-08-04",
+ "saved_at": "2026-08-11T17:12:15",
+ "summary": {
+  "closed": 20,
+  "wins": 9,
+  "losses": 10,
+  "pnl": 90460,
+  "avg_rate": -0.48,
+  "avg_hold_min": 33.5,
+  "buys": 20,
+  "flat": 1,
+  "win_rate": 47.4
+ },
+ "checklist": [
+  {
+   "rank": 0,
+   "title": "새 조건식(돌파전/돌파후) 부착",
+   "expected": "cond_name에 '돌파전' 등장 · '돌파자동매매용' 소멸",
+   "actual": "옛 이름 잔존: ['돌파자동매매용']",
+   "status": "bad",
+   "detail": "옛 이름이 보이면 HTS 조건식이 봇 구독에 안 붙은 것이다. ⚠️ 편입 시 등락률은 로그에 안 남아 8% 초과 여부는 직접 셀 수 없다 — 이름 확인이 가장 직접적인 대체 검사다.",
+   "source": "watch_list_log.cond_name"
+  },
+  {
+   "rank": 1,
+   "title": "-3% 도달률",
+   "expected": "옛 조건식 기준선 38%보다 낮아야 함",
+   "actual": "0%  (0/20건)",
+   "status": "ok",
+   "detail": "이게 낮아져야 '돌파전이 고점 매수를 줄였다'가 증명된다. 그대로면 조건식 개편의 효과가 없는 것.",
+   "source": "로그 '💧 물타기' ÷ trades 매수 건수"
+  },
+  {
+   "rank": 2,
+   "title": "[물타기] 발동 건수",
+   "expected": "발동 후 회복하는가 (하루 5건 미만)",
+   "actual": "0건",
+   "status": "ok",
+   "detail": "아직 발동 없음. 발동하면 회복 여부를 반드시 볼 것.  · 손절대신추가매수(별개) 0건",
+   "source": "로그 '💧 물타기'"
+  },
+  {
+   "rank": 3,
+   "title": "손절선 범위",
+   "expected": "-4.5% ~ -5.5%",
+   "actual": "손절 없음",
+   "status": "na",
+   "detail": "손절이 나오면 종목별로 갈리는지 볼 것.",
+   "source": "trades.exit_reason 정규식"
+  },
+  {
+   "rank": 4,
+   "title": "돌파후 단독 매수",
+   "expected": "0건 (확인 전용)",
+   "actual": "0건",
+   "status": "ok",
+   "detail": "1건이라도 있으면 `_confirm_only_reject` 배선을 확인할 것. 🔴 resolve_strategy가 미분류를 '1A'로 폴백하므로 source_flags에서 빼는 것만으론 안 막힌다.",
+   "source": "trades.entry_reason"
+  },
+  {
+   "rank": 5,
+   "title": "수동매도 vs 미체결 구분",
+   "expected": "사용자가 HTS에서 판 건은 '수동 매도'로",
+   "actual": "해당 없음",
+   "status": "na",
+   "detail": "전부 '미체결'로 찍히면 `seen_on_server` 표식이 안 붙는 것 (08-11에 6건이 전부 오기록됐다).",
+   "source": "trades.exit_reason"
+  },
+  {
+   "rank": 6,
+   "title": "수동 추가매수 감지",
+   "expected": "직접 추가매수하면 평단·수량이 합산된다",
+   "actual": "0건",
+   "status": "ok",
+   "detail": "직접 추가매수하셨는데 안 뜨면 15초 잔고 대조가 2회 연속 관측을 못 채운 것. 안 하셨으면 0건이 정상이다.",
+   "source": "로그 '수동 추가매수 감지'"
+  },
+  {
+   "rank": 7,
+   "title": "익절캡 발동 수익률",
+   "expected": "순 +6% 부근",
+   "actual": "1건 · 평균 순 +6.09% (가격 +6.32%)",
+   "status": "ok",
+   "detail": "캡이 정상 동작 중.",
+   "source": "trades.profit_rate − 수수료"
+  },
+  {
+   "rank": 8,
+   "title": "꺼진 규칙이 안 도는가",
+   "expected": "전부 0건",
+   "actual": "정체 정리 0, 시간정리 0, 우선순위 교체 0",
+   "status": "ok",
+   "detail": "1건이라도 있으면 `STAGNANT_EXIT_ENABLED` / `PHASE1A_PRIORITY_MAX_PER_DAY` 상수를 확인할 것.",
+   "source": "trades.exit_reason"
+  },
+  {
+   "rank": 9,
+   "title": "09:00~09:05 매수",
+   "expected": "동시 점유 최대 4",
+   "actual": "2건",
+   "status": "ok",
+   "detail": "⚠️ 캡은 **동시 점유**를 막지 거래 횟수를 막지 않는다 — 빨리 팔려서 자리가 나면 다시 산다. 4건 초과가 곧 위반은 아니다. 08-06처럼 개장 18분에 19건 수준이면 그때 캡을 의심할 것.",
+   "source": "trades.buy_time"
+  },
+  {
+   "rank": 10,
+   "title": "눌림목 매수",
+   "expected": "0건 (슬롯 0 = 매매 중단)",
+   "actual": "6건 — ['매드업', 'GS건설', 'GS건설', '휴림로봇', '제주반도체', '휴림로봇']",
+   "status": "bad",
+   "detail": "1건이라도 있으면 `PULLBACK_MAX_SLOTS`를 확인할 것.",
+   "source": "trades.sub_strategy"
+  }
+ ],
+ "checklist_summary": {
+  "ok": 7,
+  "warn": 0,
+  "bad": 2,
+  "na": 2
+ },
+ "trades": [
+  {
+   "id": 94,
+   "stock_code": "0039P0",
+   "stock_name": "매드업",
+   "sub_strategy": "1A_눌림",
+   "status": "closed",
+   "buy_price": 7800,
+   "buy_quantity": 332,
+   "sell_price": 7970,
+   "buy_time": "2026-08-04T09:03:52.885435",
+   "sell_time": "2026-08-04T09:09:10.772012",
+   "profit_rate": 2.18,
+   "profit_amount": 56440,
+   "entry_reason": "[눌림목자동] 눌림 틱즉시진입 (강도 100+ 8.0초 연속, 평균1틱 47만원의 20배+ 체결 2건) | 경로=상대 | 시간계수 x1.00 (현재가 7,770) | 비중x1.29 | limit",
+   "exit_reason": "동적캡 즉시매도 (체결강도 40->26, 거래량 x0.18, 순 +1.95%)",
+   "hold_min": 5.3
+  },
+  {
+   "id": 95,
+   "stock_code": "006340",
+   "stock_name": "대원전선",
+   "sub_strategy": "1A",
+   "status": "closed",
+   "buy_price": 14680,
+   "buy_quantity": 317,
+   "sell_price": 14770,
+   "buy_time": "2026-08-04T09:04:06.062933",
+   "sell_time": "2026-08-04T09:05:48.605088",
+   "profit_rate": 0.61,
+   "profit_amount": 28530,
+   "entry_reason": "[주도주상위] 1A 틱즉시진입 (강도 100+ 1.8초 연속, 3,000만원+ 체결 2건(x1.00)) | 경로=절대 | 시간계수 x1.00 (현재가 14,680) | 비중x2.33 | market",
+   "exit_reason": "동적캡 즉시매도 (체결강도 49->26, 거래량 x0.52, 순 +0.38%)",
+   "hold_min": 1.7
+  },
+  {
+   "id": 96,
+   "stock_code": "006340",
+   "stock_name": "대원전선",
+   "sub_strategy": "1A",
+   "status": "closed",
+   "buy_price": 14590,
+   "buy_quantity": 199,
+   "sell_price": 14150,
+   "buy_time": "2026-08-04T09:09:17.716726",
+   "sell_time": "2026-08-04T09:13:32.115401",
+   "profit_rate": -3.02,
+   "profit_amount": -87560,
+   "entry_reason": "[주도주상위] 1A 틱즉시진입 (강도 100+ 1.5초 연속, 3,000만원+ 체결 6건(x1.00)) | 경로=절대 | 시간계수 x1.00 (현재가 14,590) | 비중x1.45 | market",
+   "exit_reason": "손절 가격-3.02% (순 -3.25%)",
+   "hold_min": 4.2
+  },
+  {
+   "id": 97,
+   "stock_code": "069540",
+   "stock_name": "빛과전자",
+   "sub_strategy": "1A",
+   "status": "closed",
+   "buy_price": 2200,
+   "buy_quantity": 874,
+   "sell_price": 2130,
+   "buy_time": "2026-08-04T09:11:44.781690",
+   "sell_time": "2026-08-04T09:16:25.453200",
+   "profit_rate": -3.18,
+   "profit_amount": -61180,
+   "entry_reason": "[주도주상위] 1A 틱즉시진입 (강도 100+ 28.7초 연속, 평균1틱 109만원의 20배+ 체결 2건) | 경로=상대 | 시간계수 x1.00 (현재가 2,180) | 비중x0.95 | limit",
+   "exit_reason": "손절 가격-3.18% (순 -3.41%)",
+   "hold_min": 4.7
+  },
+  {
+   "id": 98,
+   "stock_code": "030530",
+   "stock_name": "원익홀딩스",
+   "sub_strategy": "1A",
+   "status": "closed",
+   "buy_price": 20950,
+   "buy_quantity": 81,
+   "sell_price": 20300,
+   "buy_time": "2026-08-04T09:13:10.681284",
+   "sell_time": "2026-08-04T09:15:21.112652",
+   "profit_rate": -3.1,
+   "profit_amount": -52650,
+   "entry_reason": "[주도주상위] 1A 틱즉시진입 (강도 100+ 98.1초 연속, 3,000만원+ 체결 2건(x1.00)) | 경로=절대 | 시간계수 x1.00 (현재가 20,850) | 비중x0.85 | limit",
+   "exit_reason": "손절 가격-3.10% (순 -3.33%)",
+   "hold_min": 2.2
+  },
+  {
+   "id": 99,
+   "stock_code": "0039P0",
+   "stock_name": "매드업",
+   "sub_strategy": "1A",
+   "status": "closed",
+   "buy_price": 8090,
+   "buy_quantity": 356,
+   "sell_price": 7840,
+   "buy_time": "2026-08-04T09:15:49.851306",
+   "sell_time": "2026-08-04T09:19:38.349444",
+   "profit_rate": -3.09,
+   "profit_amount": -89000,
+   "entry_reason": "[눌림목자동+주도주상위] 1A 틱즉시진입 (강도 100+ 13.6초 연속, 3,000만원+ 체결 2건(x1.00)) | 경로=절대 | 시간계수 x1.00 (현재가 8,050) | 비중x1.44 | limit",
+   "exit_reason": "손절 가격-3.09% (순 -3.32%)",
+   "hold_min": 3.8
+  },
+  {
+   "id": 100,
+   "stock_code": "100090",
+   "stock_name": "SK오션플랜트",
+   "sub_strategy": "1A",
+   "status": "closed",
+   "buy_price": 13390,
+   "buy_quantity": 448,
+   "sell_price": 13190,
+   "buy_time": "2026-08-04T09:26:48.720699",
+   "sell_time": "2026-08-04T09:41:09.118323",
+   "profit_rate": -1.49,
+   "profit_amount": -89600,
+   "entry_reason": "[주도주상위] 1A 틱즉시진입 (강도 100+ 1.8초 연속, 단일체결 1.36억) | 경로=단일 | 시간계수 x1.00 (현재가 13,390) | 비중x3.00 | market",
+   "exit_reason": "손실반등 하이브리드 매도 (저점 대비 +1.07% 반등 후 체결강도 10->5, 거래량 x0.29, 순 -1.72% — 손절 대기 대신 손실 축소)",
+   "hold_min": 14.3
+  },
+  {
+   "id": 101,
+   "stock_code": "043260",
+   "stock_name": "성호전자",
+   "sub_strategy": "1A",
+   "status": "closed",
+   "buy_price": 17040,
+   "buy_quantity": 209,
+   "sell_price": 16520,
+   "buy_time": "2026-08-04T09:28:29.952323",
+   "sell_time": "2026-08-04T09:30:16.813105",
+   "profit_rate": -3.05,
+   "profit_amount": -108680,
+   "entry_reason": "[주도주상위] 1A 틱즉시진입 (강도 100+ 52.5초 연속, 평균1틱 117만원의 20배+ 체결 2건) | 경로=상대 | 시간계수 x1.00 (현재가 17,000) | 비중x1.78 | limit",
+   "exit_reason": "손절 가격-3.05% (순 -3.28%)",
+   "hold_min": 1.8
+  },
+  {
+   "id": 102,
+   "stock_code": "477850",
+   "stock_name": "마키나락스",
+   "sub_strategy": "1A",
+   "status": "closed",
+   "buy_price": 22000,
+   "buy_quantity": 188,
+   "sell_price": 21875,
+   "buy_time": "2026-08-04T09:29:14.381606",
+   "sell_time": "2026-08-04T09:34:21.561690",
+   "profit_rate": -0.57,
+   "profit_amount": -23500,
+   "entry_reason": "[주도주상위] 1A 틱즉시진입 (강도 100+ 8.8초 연속, 평균1틱 115만원의 20배+ 체결 2건) | 경로=상대 | 시간계수 x1.00 (현재가 21,800) | 비중x2.05 | limit",
+   "exit_reason": "손실반등 하이브리드 매도 (저점 대비 +1.74% 반등 후 체결강도 162->16, 거래량 x0.04, 순 -0.80% — 손절 대기 대신 손실 축소)",
+   "hold_min": 5.1
+  },
+  {
+   "id": 103,
+   "stock_code": "004710",
+   "stock_name": "한솔테크닉스",
+   "sub_strategy": "1A",
+   "status": "closed",
+   "buy_price": 6960,
+   "buy_quantity": 864,
+   "sell_price": 7400,
+   "buy_time": "2026-08-04T09:36:24.275952",
+   "sell_time": "2026-08-04T11:39:27.855536",
+   "profit_rate": 6.32,
+   "profit_amount": 380160,
+   "entry_reason": "[주도주상위] 1A 틱즉시진입 (강도 100+ 88.8초 연속, 단일체결 2.42억) | 경로=단일 | 시간계수 x1.00 (현재가 6,940) | 비중x3.00 | limit",
+   "exit_reason": "익절 캡(주도테마 6.0%) 순+6.09% (가격 +6.32%)",
+   "hold_min": 123.1
+  },
+  {
+   "id": 104,
+   "stock_code": "347700",
+   "stock_name": "스피어",
+   "sub_strategy": "1A",
+   "status": "closed",
+   "buy_price": 18500,
+   "buy_quantity": 69,
+   "sell_price": 17930,
+   "buy_time": "2026-08-04T09:45:07.217838",
+   "sell_time": "2026-08-04T09:46:23.212842",
+   "profit_rate": -3.08,
+   "profit_amount": -39330,
+   "entry_reason": "[주도주상위] 1A 틱즉시진입 (강도 100+ 4.4초 연속, 3,000만원+ 체결 2건(x1.00)) | 경로=절대 | 시간계수 x1.00 (현재가 18,490) | 비중x0.64 | market",
+   "exit_reason": "손절 가격-3.08% (순 -3.31%)",
+   "hold_min": 1.3
+  },
+  {
+   "id": 105,
+   "stock_code": "347850",
+   "stock_name": "디앤디파마텍",
+   "sub_strategy": "1A",
+   "status": "closed",
+   "buy_price": 63600,
+   "buy_quantity": 28,
+   "sell_price": 63150,
+   "buy_time": "2026-08-04T09:59:18.641439",
+   "sell_time": "2026-08-04T10:05:05.895443",
+   "profit_rate": -0.71,
+   "profit_amount": -12600,
+   "entry_reason": "[주도주상위] 1A 틱즉시진입 (강도 100+ 13.0초 연속, 단일체결 1.09억) | 경로=단일 | 시간계수 x1.00 (현재가 63,600) | 비중x0.91 | market",
+   "exit_reason": "손실반등 하이브리드 매도 (저점 대비 +1.20% 반등 후 체결강도 63->35, 거래량 x0.00, 순 -0.94% — 손절 대기 대신 손실 축소)",
+   "hold_min": 5.8
+  },
+  {
+   "id": 106,
+   "stock_code": "006360",
+   "stock_name": "GS건설",
+   "sub_strategy": "1A_눌림",
+   "status": "closed",
+   "buy_price": 26250,
+   "buy_quantity": 229,
+   "sell_price": 26850,
+   "buy_time": "2026-08-04T10:07:15.419112",
+   "sell_time": "2026-08-04T10:14:26.523775",
+   "profit_rate": 2.29,
+   "profit_amount": 137400,
+   "entry_reason": "[눌림목자동] 눌림 틱즉시진입 (강도 100+ 28.2초 연속, 3,000만원+ 체결 2건(x1.00)) | 경로=절대 | 시간계수 x1.00 (현재가 26,200) | 비중x3.00 | market",
+   "exit_reason": "동적캡 즉시매도 (체결강도 27->8, 거래량 x0.42, 순 +2.06%)",
+   "hold_min": 7.2
+  },
+  {
+   "id": 107,
+   "stock_code": "006360",
+   "stock_name": "GS건설",
+   "sub_strategy": "1A_눌림",
+   "status": "closed",
+   "buy_price": 26850,
+   "buy_quantity": 150,
+   "sell_price": 27150,
+   "buy_time": "2026-08-04T10:25:33.663211",
+   "sell_time": "2026-08-04T10:34:47.275160",
+   "profit_rate": 1.12,
+   "profit_amount": 45000,
+   "entry_reason": "[눌림목자동] 눌림 틱즉시진입 (강도 100+ 49.5초 연속, 3,000만원+ 체결 4건(x1.00)) | 경로=절대 | 시간계수 x1.00 (현재가 26,600) | 비중x2.00 | limit",
+   "exit_reason": "동적캡 즉시매도 (체결강도 64->15, 거래량 x0.54, 순 +0.89%)",
+   "hold_min": 9.2
+  },
+  {
+   "id": 108,
+   "stock_code": "090710",
+   "stock_name": "휴림로봇",
+   "sub_strategy": "1A_눌림",
+   "status": "closed",
+   "buy_price": 7110,
+   "buy_quantity": 846,
+   "sell_price": 7110,
+   "buy_time": "2026-08-04T10:30:01.203810",
+   "sell_time": "2026-08-04T10:43:12.520041",
+   "profit_rate": 0.0,
+   "profit_amount": 0,
+   "entry_reason": "[눌림목자동] 눌림 틱즉시진입 (강도 100+ 81.8초 연속, 3,000만원+ 체결 2건(x1.00)) | 경로=절대 | 시간계수 x1.00 (현재가 7,090) | 비중x3.00 | limit",
+   "exit_reason": "손실반등 하이브리드 매도 (저점 대비 +1.14% 반등 후 체결강도 262->26, 거래량 x0.09, 순 -0.23% — 손절 대기 대신 손실 축소)",
+   "hold_min": 13.2
+  },
+  {
+   "id": 109,
+   "stock_code": "080220",
+   "stock_name": "제주반도체",
+   "sub_strategy": "1A_눌림",
+   "status": "closed",
+   "buy_price": 68900,
+   "buy_quantity": 87,
+   "sell_price": 69000,
+   "buy_time": "2026-08-04T11:05:42.004755",
+   "sell_time": "2026-08-04T11:54:56.424467",
+   "profit_rate": 0.15,
+   "profit_amount": 8700,
+   "entry_reason": "[눌림목자동] 눌림 틱즉시진입 (강도 100+ 2.1초 연속, 단일체결 1.17억) | 경로=단일 | 시간계수 x0.85 (현재가 68,800) | 비중x3.00 | market",
+   "exit_reason": "본전스톱 (고점 순+2.09% -> 현재 순-0.08%)",
+   "hold_min": 49.2
+  },
+  {
+   "id": 110,
+   "stock_code": "090710",
+   "stock_name": "휴림로봇",
+   "sub_strategy": "1A_눌림",
+   "status": "closed",
+   "buy_price": 7030,
+   "buy_quantity": 571,
+   "sell_price": 7040,
+   "buy_time": "2026-08-04T11:14:56.117262",
+   "sell_time": "2026-08-04T15:10:07.694122",
+   "profit_rate": 0.14,
+   "profit_amount": 5710,
+   "entry_reason": "[눌림목자동] 눌림 틱즉시진입 (강도 100+ 35.0초 연속, 평균1틱 82만원의 20배+ 체결 2건) | 경로=상대 | 시간계수 x0.85 (현재가 7,000) | 비중x2.00 | limit",
+   "exit_reason": "장마감 강제청산",
+   "hold_min": 235.2
+  },
+  {
+   "id": 111,
+   "stock_code": "036930",
+   "stock_name": "주성엔지니어링",
+   "sub_strategy": "1A",
+   "status": "closed",
+   "buy_price": 133800,
+   "buy_quantity": 20,
+   "sell_price": 134100,
+   "buy_time": "2026-08-04T13:15:16.854339",
+   "sell_time": "2026-08-04T15:02:53.604428",
+   "profit_rate": 0.22,
+   "profit_amount": 6000,
+   "entry_reason": "[돌파자동매매용] 1A 틱즉시진입 (강도 100+ 43.0초 연속, 단일체결 1.20억) | 경로=단일 | 시간계수 x0.80 (현재가 133,600) | 비중x1.35 | market",
+   "exit_reason": "본전스톱 (고점 순+1.64% -> 현재 순-0.01%)",
+   "hold_min": 107.6
+  },
+  {
+   "id": 112,
+   "stock_code": "333430",
+   "stock_name": "일승",
+   "sub_strategy": "1A",
+   "status": "closed",
+   "buy_price": 4313,
+   "buy_quantity": 270,
+   "sell_price": 4250,
+   "buy_time": "2026-08-04T13:15:50.670673",
+   "sell_time": "2026-08-04T13:22:00.721818",
+   "profit_rate": -1.46,
+   "profit_amount": -17010,
+   "entry_reason": "[돌파자동매매용] 1A 틱즉시진입 (강도 100+ 1.5초 연속, 단일체결 1.68억) | 경로=단일 | 시간계수 x0.80 (현재가 4,300) | 비중x0.70 | limit",
+   "exit_reason": "손실반등 하이브리드 매도 (저점 대비 +1.07% 반등 후 체결강도 95->44, 거래량 x0.69, 순 -1.69% — 손절 대기 대신 손실 축소)",
+   "hold_min": 6.2
+  },
+  {
+   "id": 113,
+   "stock_code": "004710",
+   "stock_name": "한솔테크닉스",
+   "sub_strategy": "1A",
+   "status": "closed",
+   "buy_price": 7480,
+   "buy_quantity": 363,
+   "sell_price": 7490,
+   "buy_time": "2026-08-04T13:54:09.306920",
+   "sell_time": "2026-08-04T15:03:07.363598",
+   "profit_rate": 0.13,
+   "profit_amount": 3630,
+   "entry_reason": "[주도주상위] 1A 틱즉시진입 (강도 100+ 72.9초 연속, 평균1틱 58만원의 20배+ 체결 4건) | 경로=상대 | 시간계수 x0.80 (현재가 7,430) | 비중x1.35 | limit",
+   "exit_reason": "본전스톱 (고점 순+1.51% -> 현재 순-0.10%)",
+   "hold_min": 69.0
+  }
+ ],
+ "exit_breakdown": [
+  {
+   "reason": "손실반등 하이브리드 매도",
+   "n": 5,
+   "pnl": -142710,
+   "avg_rate": -0.85
+  },
+  {
+   "reason": "동적캡 즉시매도",
+   "n": 4,
+   "pnl": 267370,
+   "avg_rate": 1.55
+  },
+  {
+   "reason": "본전스톱",
+   "n": 3,
+   "pnl": 18330,
+   "avg_rate": 0.17
+  },
+  {
+   "reason": "손절 가격-3.05%",
+   "n": 1,
+   "pnl": -108680,
+   "avg_rate": -3.05
+  },
+  {
+   "reason": "손절 가격-3.09%",
+   "n": 1,
+   "pnl": -89000,
+   "avg_rate": -3.09
+  },
+  {
+   "reason": "손절 가격-3.02%",
+   "n": 1,
+   "pnl": -87560,
+   "avg_rate": -3.02
+  },
+  {
+   "reason": "손절 가격-3.18%",
+   "n": 1,
+   "pnl": -61180,
+   "avg_rate": -3.18
+  },
+  {
+   "reason": "손절 가격-3.10%",
+   "n": 1,
+   "pnl": -52650,
+   "avg_rate": -3.1
+  },
+  {
+   "reason": "손절 가격-3.08%",
+   "n": 1,
+   "pnl": -39330,
+   "avg_rate": -3.08
+  },
+  {
+   "reason": "장마감 강제청산",
+   "n": 1,
+   "pnl": 5710,
+   "avg_rate": 0.14
+  },
+  {
+   "reason": "익절 캡",
+   "n": 1,
+   "pnl": 380160,
+   "avg_rate": 6.32
+  }
+ ],
+ "watchlist": {
+  "by_condition": [
+   {
+    "cond_name": "주도주상위",
+    "n": 27,
+    "bought": 9
+   },
+   {
+    "cond_name": "눌림목자동",
+    "n": 17,
+    "bought": 4
+   },
+   {
+    "cond_name": "돌파자동매매용",
+    "n": 3,
+    "bought": 2
+   }
+  ],
+  "not_bought_reasons": [
+   {
+    "reason": "체결강도 미무장 (100 이상 0.0/2초 연속)",
+    "n": 32
+   }
+  ]
+ },
+ "events": [
+  {
+   "timestamp": "2026-08-04T15:10:07.709801",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "090710 휴림로봇 571주 @ 7,040원 [1A_눌림] | 장마감 강제청산 | 순손익 -3,522원"
+  },
+  {
+   "timestamp": "2026-08-04T15:03:07.369230",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "004710 한솔테크닉스 363주 @ 7,490원 [1A] | 본전스톱 (고점 순+1.51% -> 현재 순-0.10%) | 순손익 -2,615원"
+  },
+  {
+   "timestamp": "2026-08-04T15:02:53.611758",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "036930 주성엔지니어링 20주 @ 134,100원 [1A] | 본전스톱 (고점 순+1.64% -> 현재 순-0.01%) | 순손익 -155원"
+  },
+  {
+   "timestamp": "2026-08-04T13:54:09.324976",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "004710 한솔테크닉스 363주 @ 7,430원 [1A]"
+  },
+  {
+   "timestamp": "2026-08-04T13:22:00.736229",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "333430 일승 270주 @ 4,250원 [1A] | 손실반등 하이브리드 매도 (저점 대비 +1.07% 반등 후 체결강도 95->44, 거래량 x0.69, 순 -1.69% — 손절 대기 대신 손실 축소) | 순손익 -19,688원"
+  },
+  {
+   "timestamp": "2026-08-04T13:16:23.088528",
+   "event_type": "BUY_ADD",
+   "severity": "INFO",
+   "event_message": "333430 일승 +108주 @ 4,295원 -> 평단 4,313원 총 270주"
+  },
+  {
+   "timestamp": "2026-08-04T13:15:50.680555",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "333430 일승 162주 @ 4,300원 [1A]"
+  },
+  {
+   "timestamp": "2026-08-04T13:15:16.864494",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "036930 주성엔지니어링 20주 @ 133,600원 [1A]"
+  },
+  {
+   "timestamp": "2026-08-04T11:54:56.430838",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "080220 제주반도체 87주 @ 69,000원 [1A_눌림] | 본전스톱 (고점 순+2.09% -> 현재 순-0.08%) | 순손익 -5,087원"
+  },
+  {
+   "timestamp": "2026-08-04T11:39:27.861662",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "004710 한솔테크닉스 864주 @ 7,400원 [1A] | 익절 캡(주도테마 6.0%) 순+6.09% (가격 +6.32%) | 순손익 +366,329원"
+  },
+  {
+   "timestamp": "2026-08-04T11:14:56.127178",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "090710 휴림로봇 571주 @ 7,000원 [1A_눌림]"
+  },
+  {
+   "timestamp": "2026-08-04T11:05:42.026980",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "080220 제주반도체 87주 @ 68,800원 [1A_눌림]"
+  },
+  {
+   "timestamp": "2026-08-04T10:43:12.538888",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "090710 휴림로봇 846주 @ 7,110원 [1A_눌림] | 손실반등 하이브리드 매도 (저점 대비 +1.14% 반등 후 체결강도 262->26, 거래량 x0.09, 순 -0.23% — 손절 대기 대신 손실 축소) | 순손익 -13,835원"
+  },
+  {
+   "timestamp": "2026-08-04T10:34:47.286235",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "006360 GS건설 150주 @ 27,150원 [1A_눌림] | 동적캡 즉시매도 (체결강도 64->15, 거래량 x0.54, 순 +0.89%) | 순손익 +35,737원"
+  },
+  {
+   "timestamp": "2026-08-04T10:30:01.210260",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "090710 휴림로봇 846주 @ 7,090원 [1A_눌림]"
+  },
+  {
+   "timestamp": "2026-08-04T10:25:33.680578",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "006360 GS건설 150주 @ 26,600원 [1A_눌림]"
+  },
+  {
+   "timestamp": "2026-08-04T10:14:26.538638",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "006360 GS건설 229주 @ 26,850원 [1A_눌림] | 동적캡 즉시매도 (체결강도 27->8, 거래량 x0.42, 순 +2.06%) | 순손익 +123,574원"
+  },
+  {
+   "timestamp": "2026-08-04T10:07:15.434609",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "006360 GS건설 229주 @ 26,200원 [1A_눌림]"
+  },
+  {
+   "timestamp": "2026-08-04T10:05:05.906298",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "347850 디앤디파마텍 28주 @ 63,150원 [1A] | 손실반등 하이브리드 매도 (저점 대비 +1.20% 반등 후 체결강도 63->35, 거래량 x0.00, 순 -0.94% — 손절 대기 대신 손실 축소) | 순손익 -16,696원"
+  },
+  {
+   "timestamp": "2026-08-04T09:59:18.655497",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "347850 디앤디파마텍 28주 @ 63,600원 [1A]"
+  },
+  {
+   "timestamp": "2026-08-04T09:46:23.226158",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "347700 스피어 69주 @ 17,930원 [1A] | 손절 가격-3.08% (순 -3.31%) | 순손익 -42,266원"
+  },
+  {
+   "timestamp": "2026-08-04T09:45:07.233114",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "347700 스피어 69주 @ 18,490원 [1A]"
+  },
+  {
+   "timestamp": "2026-08-04T09:41:09.126671",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "100090 SK오션플랜트 448주 @ 13,190원 [1A] | 손실반등 하이브리드 매도 (저점 대비 +1.07% 반등 후 체결강도 10->5, 거래량 x0.29, 순 -1.72% — 손절 대기 대신 손실 축소) | 순손익 -103,397원"
+  },
+  {
+   "timestamp": "2026-08-04T09:36:24.283735",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "004710 한솔테크닉스 864주 @ 6,940원 [1A]"
+  },
+  {
+   "timestamp": "2026-08-04T09:34:21.567238",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "477850 마키나락스 188주 @ 21,875원 [1A] | 손실반등 하이브리드 매도 (저점 대비 +1.74% 반등 후 체결강도 162->16, 거래량 x0.04, 순 -0.80% — 손절 대기 대신 손실 축소) | 순손익 -33,013원"
+  },
+  {
+   "timestamp": "2026-08-04T09:30:16.831588",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "043260 성호전자 209주 @ 16,520원 [1A] | 손절 가격-3.05% (순 -3.28%) | 순손익 -116,871원"
+  },
+  {
+   "timestamp": "2026-08-04T09:29:14.385970",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "477850 마키나락스 188주 @ 21,800원 [1A]"
+  },
+  {
+   "timestamp": "2026-08-04T09:28:29.967547",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "043260 성호전자 209주 @ 17,000원 [1A]"
+  },
+  {
+   "timestamp": "2026-08-04T09:26:48.730521",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "100090 SK오션플랜트 448주 @ 13,390원 [1A]"
+  },
+  {
+   "timestamp": "2026-08-04T09:19:38.357902",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "0039P0 매드업 356주 @ 7,840원 [1A] | 손절 가격-3.09% (순 -3.32%) | 순손익 -95,624원"
+  },
+  {
+   "timestamp": "2026-08-04T09:16:25.458341",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "069540 빛과전자 874주 @ 2,130원 [1A] | 손절 가격-3.18% (순 -3.41%) | 순손익 -65,602원"
+  },
+  {
+   "timestamp": "2026-08-04T09:15:49.866069",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "0039P0 매드업 356주 @ 8,050원 [1A]"
+  },
+  {
+   "timestamp": "2026-08-04T09:15:21.118055",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "030530 원익홀딩스 81주 @ 20,300원 [1A] | 손절 가격-3.10% (순 -3.33%) | 순손익 -56,553원"
+  },
+  {
+   "timestamp": "2026-08-04T09:13:32.130432",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "006340 대원전선 199주 @ 14,150원 [1A] | 손절 가격-3.02% (순 -3.25%) | 순손익 -94,238원"
+  },
+  {
+   "timestamp": "2026-08-04T09:13:10.689504",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "030530 원익홀딩스 81주 @ 20,850원 [1A]"
+  },
+  {
+   "timestamp": "2026-08-04T09:11:44.798528",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "069540 빛과전자 874주 @ 2,180원 [1A]"
+  },
+  {
+   "timestamp": "2026-08-04T09:09:17.734063",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "006340 대원전선 199주 @ 14,590원 [1A]"
+  },
+  {
+   "timestamp": "2026-08-04T09:09:10.786994",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "0039P0 매드업 332주 @ 7,970원 [1A_눌림] | 동적캡 즉시매도 (체결강도 40->26, 거래량 x0.18, 순 +1.95%) | 순손익 +50,484원"
+  },
+  {
+   "timestamp": "2026-08-04T09:05:48.619044",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "006340 대원전선 317주 @ 14,770원 [1A] | 동적캡 즉시매도 (체결강도 49->26, 거래량 x0.52, 순 +0.38%) | 순손익 +17,827원"
+  },
+  {
+   "timestamp": "2026-08-04T09:04:06.086879",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "006340 대원전선 317주 @ 14,680원 [1A]"
+  },
+  {
+   "timestamp": "2026-08-04T09:03:52.913828",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "0039P0 매드업 332주 @ 7,770원 [1A_눌림]"
+  }
+ ],
+ "holdings_at_save": [
+  {
+   "id": 152,
+   "trade_date": "2026-08-06",
+   "stock_code": "073240",
+   "stock_name": "금호타이어",
+   "buy_price": 8210,
+   "buy_quantity": 73,
+   "buy_amount": 599330,
+   "sub_strategy": "1A",
+   "status": "manual",
+   "buy_time": "2026-08-06T09:18:21.035501",
+   "entry_reason": "[돌파자동매매용+눌림목자동] 1A 틱즉시진입 (강도 100+ 22.3초 연속, 5,383만원+ 체결 2건(시간x1.00 주가x0.90 급등x1.50)) | 경로=절대 | 시간계수 x1.00 (현재가 8,210) | 비중x0.30 | market"
+  },
+  {
+   "id": 151,
+   "trade_date": "2026-08-06",
+   "stock_code": "058730",
+   "stock_name": "다스코",
+   "buy_price": 3305,
+   "buy_quantity": 552,
+   "buy_amount": 1824360,
+   "sub_strategy": "1A",
+   "status": "manual",
+   "buy_time": "2026-08-06T09:15:34.035685",
+   "entry_reason": "[돌파자동매매용] 1A 틱즉시진입 (강도 100+ 85.3초 연속, 단일체결 0.58억) | 경로=단일 | 시간계수 x1.00 (현재가 3,305) | 비중x0.91 | market"
+  },
+  {
+   "id": 145,
+   "trade_date": "2026-08-06",
+   "stock_code": "036930",
+   "stock_name": "주성엔지니어링",
+   "buy_price": 140100,
+   "buy_quantity": 7,
+   "buy_amount": 980700,
+   "sub_strategy": "1A",
+   "status": "manual",
+   "buy_time": "2026-08-06T09:07:39.108153",
+   "entry_reason": "[돌파자동매매용] 1A 틱즉시진입 (강도 100+ 105.2초 연속, 8,000만원+ 체결 2건(시간x1.00 주가x2.00 급등x1.00)) | 경로=절대 | 시간계수 x1.00 (현재가 140,100) | 비중x0.54 | market"
+  }
+ ],
+ "log_counts": {
+  "avg_down": 0,
+  "rescue_add": 0,
+  "manual_add": 0,
+  "confirm_only": 0,
+  "ghost": 5
+ }
+}

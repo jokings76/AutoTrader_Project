@@ -1,0 +1,708 @@
+{
+ "schema": 1,
+ "date": "2026-08-03",
+ "saved_at": "2026-08-11T17:12:16",
+ "summary": {
+  "closed": 16,
+  "wins": 9,
+  "losses": 7,
+  "pnl": 34975,
+  "avg_rate": 0.16,
+  "avg_hold_min": 8.28,
+  "buys": 16,
+  "flat": 0,
+  "win_rate": 56.2
+ },
+ "checklist": [
+  {
+   "rank": 0,
+   "title": "새 조건식(돌파전/돌파후) 부착",
+   "expected": "cond_name에 '돌파전' 등장 · '돌파자동매매용' 소멸",
+   "actual": "옛 이름 잔존: ['돌파자동매매용']",
+   "status": "bad",
+   "detail": "옛 이름이 보이면 HTS 조건식이 봇 구독에 안 붙은 것이다. ⚠️ 편입 시 등락률은 로그에 안 남아 8% 초과 여부는 직접 셀 수 없다 — 이름 확인이 가장 직접적인 대체 검사다.",
+   "source": "watch_list_log.cond_name"
+  },
+  {
+   "rank": 1,
+   "title": "-3% 도달률",
+   "expected": "옛 조건식 기준선 38%보다 낮아야 함",
+   "actual": "0%  (0/16건)",
+   "status": "ok",
+   "detail": "이게 낮아져야 '돌파전이 고점 매수를 줄였다'가 증명된다. 그대로면 조건식 개편의 효과가 없는 것.",
+   "source": "로그 '💧 물타기' ÷ trades 매수 건수"
+  },
+  {
+   "rank": 2,
+   "title": "[물타기] 발동 건수",
+   "expected": "발동 후 회복하는가 (하루 5건 미만)",
+   "actual": "0건",
+   "status": "ok",
+   "detail": "아직 발동 없음. 발동하면 회복 여부를 반드시 볼 것.  · 손절대신추가매수(별개) 0건",
+   "source": "로그 '💧 물타기'"
+  },
+  {
+   "rank": 3,
+   "title": "손절선 범위",
+   "expected": "-4.5% ~ -5.5%",
+   "actual": "손절 없음",
+   "status": "na",
+   "detail": "손절이 나오면 종목별로 갈리는지 볼 것.",
+   "source": "trades.exit_reason 정규식"
+  },
+  {
+   "rank": 4,
+   "title": "돌파후 단독 매수",
+   "expected": "0건 (확인 전용)",
+   "actual": "0건",
+   "status": "ok",
+   "detail": "1건이라도 있으면 `_confirm_only_reject` 배선을 확인할 것. 🔴 resolve_strategy가 미분류를 '1A'로 폴백하므로 source_flags에서 빼는 것만으론 안 막힌다.",
+   "source": "trades.entry_reason"
+  },
+  {
+   "rank": 5,
+   "title": "수동매도 vs 미체결 구분",
+   "expected": "사용자가 HTS에서 판 건은 '수동 매도'로",
+   "actual": "해당 없음",
+   "status": "na",
+   "detail": "전부 '미체결'로 찍히면 `seen_on_server` 표식이 안 붙는 것 (08-11에 6건이 전부 오기록됐다).",
+   "source": "trades.exit_reason"
+  },
+  {
+   "rank": 6,
+   "title": "수동 추가매수 감지",
+   "expected": "직접 추가매수하면 평단·수량이 합산된다",
+   "actual": "0건",
+   "status": "ok",
+   "detail": "직접 추가매수하셨는데 안 뜨면 15초 잔고 대조가 2회 연속 관측을 못 채운 것. 안 하셨으면 0건이 정상이다.",
+   "source": "로그 '수동 추가매수 감지'"
+  },
+  {
+   "rank": 7,
+   "title": "익절캡 발동 수익률",
+   "expected": "순 +6% 부근",
+   "actual": "4건 · 평균 순 +1.68% (가격 +1.91%)",
+   "status": "bad",
+   "detail": "순 +4% 부근이면 캡 상수가 안 먹은 것(08-10 상향 전 값).",
+   "source": "trades.profit_rate − 수수료"
+  },
+  {
+   "rank": 8,
+   "title": "꺼진 규칙이 안 도는가",
+   "expected": "전부 0건",
+   "actual": "정체 정리 5, 시간정리 0, 우선순위 교체 0",
+   "status": "bad",
+   "detail": "1건이라도 있으면 `STAGNANT_EXIT_ENABLED` / `PHASE1A_PRIORITY_MAX_PER_DAY` 상수를 확인할 것.",
+   "source": "trades.exit_reason"
+  },
+  {
+   "rank": 9,
+   "title": "09:00~09:05 매수",
+   "expected": "동시 점유 최대 4",
+   "actual": "1건",
+   "status": "ok",
+   "detail": "⚠️ 캡은 **동시 점유**를 막지 거래 횟수를 막지 않는다 — 빨리 팔려서 자리가 나면 다시 산다. 4건 초과가 곧 위반은 아니다. 08-06처럼 개장 18분에 19건 수준이면 그때 캡을 의심할 것.",
+   "source": "trades.buy_time"
+  },
+  {
+   "rank": 10,
+   "title": "눌림목 매수",
+   "expected": "0건 (슬롯 0 = 매매 중단)",
+   "actual": "9건 — ['조건검색', '조건검색', '조건검색', '조건검색', '조건검색', '조건검색', '조건검색', '조건검색', '조건검색']",
+   "status": "bad",
+   "detail": "1건이라도 있으면 `PULLBACK_MAX_SLOTS`를 확인할 것.",
+   "source": "trades.sub_strategy"
+  }
+ ],
+ "checklist_summary": {
+  "ok": 5,
+  "warn": 0,
+  "bad": 4,
+  "na": 2
+ },
+ "trades": [
+  {
+   "id": 78,
+   "stock_code": "037070",
+   "stock_name": "조건검색",
+   "sub_strategy": "1A",
+   "status": "closed",
+   "buy_price": 7320,
+   "buy_quantity": 754,
+   "sell_price": 7420,
+   "buy_time": "2026-08-03T09:00:46.300571",
+   "sell_time": "2026-08-03T09:03:40.654590",
+   "profit_rate": 1.37,
+   "profit_amount": 75400,
+   "entry_reason": "[주도주상위] 1A 틱즉시진입 (강도 100+ 10.9초 연속, 평균1틱 116만원의 20배+ 체결 2건) | 경로=상대 | 시간계수 x1.00 (현재가 7,340) | 비중x2.77 | market",
+   "exit_reason": "익절 조기확정(강도 미상승) 순+1.14% (가격 +1.37%)",
+   "hold_min": 2.9
+  },
+  {
+   "id": 79,
+   "stock_code": "439960",
+   "stock_name": "조건검색",
+   "sub_strategy": "1A",
+   "status": "closed",
+   "buy_price": 16490,
+   "buy_quantity": 211,
+   "sell_price": 16780,
+   "buy_time": "2026-08-03T09:18:27.750278",
+   "sell_time": "2026-08-03T09:19:28.970849",
+   "profit_rate": 1.76,
+   "profit_amount": 61190,
+   "entry_reason": "[주도주상위] 1A 틱즉시진입 (강도 100+ 3.0초 연속, 단일체결 4.36억) | 경로=단일 | 시간계수 x1.00 (현재가 16,470) | 비중x1.74 | market",
+   "exit_reason": "익절 조기확정(강도 미상승) 순+1.53% (가격 +1.76%)",
+   "hold_min": 1.0
+  },
+  {
+   "id": 80,
+   "stock_code": "058610",
+   "stock_name": "조건검색",
+   "sub_strategy": "1A",
+   "status": "closed",
+   "buy_price": 105300,
+   "buy_quantity": 40,
+   "sell_price": 104500,
+   "buy_time": "2026-08-03T09:18:46.743418",
+   "sell_time": "2026-08-03T09:20:23.849177",
+   "profit_rate": -0.76,
+   "profit_amount": -32000,
+   "entry_reason": "[주도주상위] 1A 틱즉시진입 (강도 100+ 5.2초 연속, 3,000만원+ 체결 2건(x1.00)) | 경로=절대 | 시간계수 x1.00 (현재가 105,200) | 비중x2.13 | market",
+   "exit_reason": "동적캡 즉시매도 (체결강도 152->98, 거래량 x0.29, 순 -0.99%)",
+   "hold_min": 1.6
+  },
+  {
+   "id": 81,
+   "stock_code": "439960",
+   "stock_name": "조건검색",
+   "sub_strategy": "1A",
+   "status": "closed",
+   "buy_price": 17130,
+   "buy_quantity": 143,
+   "sell_price": 17215,
+   "buy_time": "2026-08-03T09:23:06.683502",
+   "sell_time": "2026-08-03T09:26:15.949833",
+   "profit_rate": 0.5,
+   "profit_amount": 12155,
+   "entry_reason": "[주도주상위] 1A 틱즉시진입 (강도 100+ 92.2초 연속, 3,000만원+ 체결 8건(x1.00)) | 경로=절대 | 시간계수 x1.00 (현재가 17,040) | 비중x1.22 | limit",
+   "exit_reason": "동적캡 즉시매도 (체결강도 29->20, 거래량 x0.28, 순 +0.27%)",
+   "hold_min": 3.2
+  },
+  {
+   "id": 82,
+   "stock_code": "439960",
+   "stock_name": "조건검색",
+   "sub_strategy": "1A",
+   "status": "closed",
+   "buy_price": 17050,
+   "buy_quantity": 162,
+   "sell_price": 17350,
+   "buy_time": "2026-08-03T09:30:05.743985",
+   "sell_time": "2026-08-03T09:33:30.435253",
+   "profit_rate": 1.76,
+   "profit_amount": 48600,
+   "entry_reason": "[주도주상위] 1A 틱즉시진입 (강도 100+ 101.7초 연속, 3,000만원+ 체결 2건(x1.00)) | 경로=절대 | 시간계수 x1.00 (현재가 17,050) | 비중x1.39 | market",
+   "exit_reason": "익절(지수급락 대응) 순+1.53% (가격 +1.76%)",
+   "hold_min": 3.4
+  },
+  {
+   "id": 83,
+   "stock_code": "006360",
+   "stock_name": "조건검색",
+   "sub_strategy": "1A",
+   "status": "closed",
+   "buy_price": 24500,
+   "buy_quantity": 163,
+   "sell_price": 24450,
+   "buy_time": "2026-08-03T10:13:47.244540",
+   "sell_time": "2026-08-03T10:15:02.146576",
+   "profit_rate": -0.2,
+   "profit_amount": -8150,
+   "entry_reason": "[주도주상위] 1A 틱즉시진입 (강도 100+ 69.9초 연속, 3,000만원+ 체결 2건(x1.00)) | 경로=절대 | 시간계수 x1.00 (현재가 24,500) | 비중x2.00 | market",
+   "exit_reason": "동적캡 즉시매도 (체결강도 100->67, 거래량 x0.00, 순 -0.43%)",
+   "hold_min": 1.2
+  },
+  {
+   "id": 84,
+   "stock_code": "010170",
+   "stock_name": "조건검색",
+   "sub_strategy": "1A_눌림",
+   "status": "closed",
+   "buy_price": 9380,
+   "buy_quantity": 576,
+   "sell_price": 9580,
+   "buy_time": "2026-08-03T10:20:10.114725",
+   "sell_time": "2026-08-03T10:21:44.854730",
+   "profit_rate": 2.13,
+   "profit_amount": 115200,
+   "entry_reason": "[눌림목자동] 눌림 틱즉시진입 (강도 100+ 6.7초 연속, 평균1틱 59만원의 20배+ 체결 2건) | 경로=상대 | 시간계수 x1.00 (현재가 9,380) | 비중x2.70 | market",
+   "exit_reason": "동적캡 즉시매도 (체결강도 300->201, 거래량 x0.80, 순 +1.90%)",
+   "hold_min": 1.6
+  },
+  {
+   "id": 85,
+   "stock_code": "010170",
+   "stock_name": "조건검색",
+   "sub_strategy": "1A_눌림",
+   "status": "closed",
+   "buy_price": 9410,
+   "buy_quantity": 426,
+   "sell_price": 9670,
+   "buy_time": "2026-08-03T10:47:35.641858",
+   "sell_time": "2026-08-03T11:07:09.613915",
+   "profit_rate": 2.76,
+   "profit_amount": 110760,
+   "entry_reason": "[눌림목자동] 눌림 틱즉시진입 (강도 100+ 61.5초 연속, 2,550만원+ 체결 4건(x0.85)) | 경로=절대 | 시간계수 x0.85 (현재가 9,380) | 비중x2.00 | market",
+   "exit_reason": "익절 캡(강도상향+주도테마 2.5%) 순+2.53% (가격 +2.76%)",
+   "hold_min": 19.6
+  },
+  {
+   "id": 86,
+   "stock_code": "042700",
+   "stock_name": "조건검색",
+   "sub_strategy": "1A",
+   "status": "closed",
+   "buy_price": 203000,
+   "buy_quantity": 29,
+   "sell_price": 202500,
+   "buy_time": "2026-08-03T10:48:20.822553",
+   "sell_time": "2026-08-03T10:50:49.629589",
+   "profit_rate": -0.25,
+   "profit_amount": -14500,
+   "entry_reason": "[돌파자동매매용] 1A 틱즉시진입 (강도 100+ 60.2초 연속, 단일체결 2.03억) | 경로=단일 | 시간계수 x0.85 (현재가 202,500) | 비중x3.00 | market",
+   "exit_reason": "동적캡 즉시매도 (체결강도 300->21, 거래량 x0.51, 순 -0.48%)",
+   "hold_min": 2.5
+  },
+  {
+   "id": 87,
+   "stock_code": "059120",
+   "stock_name": "조건검색",
+   "sub_strategy": "1A_눌림",
+   "status": "closed",
+   "buy_price": 6440,
+   "buy_quantity": 937,
+   "sell_price": 6240,
+   "buy_time": "2026-08-03T11:23:32.166393",
+   "sell_time": "2026-08-03T11:46:14.194951",
+   "profit_rate": -3.11,
+   "profit_amount": -187400,
+   "entry_reason": "[눌림목자동] 눌림 틱즉시진입 (강도 100+ 144.7초 연속, 평균1틱 73만원의 20배+ 체결 4건) | 경로=상대 | 시간계수 x0.85 (현재가 6,400) | 비중x3.00 | limit",
+   "exit_reason": "손절 가격-3.11% (순 -3.34%)",
+   "hold_min": 22.7
+  },
+  {
+   "id": 88,
+   "stock_code": "319400",
+   "stock_name": "조건검색",
+   "sub_strategy": "1A_눌림",
+   "status": "closed",
+   "buy_price": 23550,
+   "buy_quantity": 170,
+   "sell_price": 23100,
+   "buy_time": "2026-08-03T11:47:54.594830",
+   "sell_time": "2026-08-03T12:02:37.196586",
+   "profit_rate": -1.91,
+   "profit_amount": -76500,
+   "entry_reason": "[눌림목자동] 눌림 틱즉시진입 (강도 100+ 60.2초 연속, 1,950만원+ 체결 2건(x0.65)) | 경로=절대 | 시간계수 x0.65 (현재가 23,400) | 비중x2.00 | limit",
+   "exit_reason": "슬롯 교체: 체결강도 하락(70->45) + 거래량 정체(x0.61) | 보유 15분 | 순 -2.14% -> 대체후보 조건검색(950160) 점수 34.9",
+   "hold_min": 14.7
+  },
+  {
+   "id": 89,
+   "stock_code": "090710",
+   "stock_name": "조건검색",
+   "sub_strategy": "1A_눌림",
+   "status": "closed",
+   "buy_price": 6820,
+   "buy_quantity": 882,
+   "sell_price": 6740,
+   "buy_time": "2026-08-03T11:48:13.249837",
+   "sell_time": "2026-08-03T12:00:33.950830",
+   "profit_rate": -1.17,
+   "profit_amount": -70560,
+   "entry_reason": "[눌림목자동] 눌림 틱즉시진입 (강도 100+ 39.6초 연속, 평균1틱 41만원의 20배+ 체결 2건) | 경로=상대 | 시간계수 x0.65 (현재가 6,800) | 비중x3.00 | limit",
+   "exit_reason": "슬롯 교체: 체결강도 하락(300->5) + 거래량 정체(x0.48) | 보유 12분 | 순 -1.40% -> 대체후보 조건검색(950160) 점수 34.9",
+   "hold_min": 12.3
+  },
+  {
+   "id": 90,
+   "stock_code": "336260",
+   "stock_name": "조건검색",
+   "sub_strategy": "1A_눌림",
+   "status": "closed",
+   "buy_price": 27150,
+   "buy_quantity": 148,
+   "sell_price": 26550,
+   "buy_time": "2026-08-03T12:56:19.769281",
+   "sell_time": "2026-08-03T13:07:40.652625",
+   "profit_rate": -2.21,
+   "profit_amount": -88800,
+   "entry_reason": "[눌림목자동] 눌림 틱즉시진입 (강도 100+ 14.5초 연속, 단일체결 1.00억) | 경로=단일 | 시간계수 x0.65 (현재가 27,000) | 비중x2.00 | limit",
+   "exit_reason": "슬롯 교체: 체결강도 하락(100->9) + 거래량 정체(x0.72) | 보유 11분 | 순 -2.44% -> 대체후보 조건검색(950160) 점수 34.9",
+   "hold_min": 11.3
+  },
+  {
+   "id": 91,
+   "stock_code": "222800",
+   "stock_name": "조건검색",
+   "sub_strategy": "1A_눌림",
+   "status": "closed",
+   "buy_price": 86200,
+   "buy_quantity": 69,
+   "sell_price": 86800,
+   "buy_time": "2026-08-03T13:07:03.514681",
+   "sell_time": "2026-08-03T13:11:13.028442",
+   "profit_rate": 0.7,
+   "profit_amount": 41400,
+   "entry_reason": "[눌림목자동] 눌림 틱즉시진입 (강도 100+ 106.1초 연속, 2,400만원+ 체결 2건(x0.80)) | 경로=절대 | 시간계수 x0.80 (현재가 86,200) | 비중x3.00 | market",
+   "exit_reason": "동적캡 즉시매도 (체결강도 156->22, 거래량 x0.13, 순 +0.47%)",
+   "hold_min": 4.2
+  },
+  {
+   "id": 92,
+   "stock_code": "010170",
+   "stock_name": "조건검색",
+   "sub_strategy": "1A_눌림",
+   "status": "closed",
+   "buy_price": 9370,
+   "buy_quantity": 428,
+   "sell_price": 9430,
+   "buy_time": "2026-08-03T13:10:05.153823",
+   "sell_time": "2026-08-03T13:25:17.986965",
+   "profit_rate": 0.64,
+   "profit_amount": 25680,
+   "entry_reason": "[눌림목자동] 눌림 틱즉시진입 (강도 100+ 106.3초 연속, 2,400만원+ 체결 4건(x0.80)) | 경로=절대 | 시간계수 x0.80 (현재가 9,340) | 비중x2.00 | limit",
+   "exit_reason": "정체 정리 15분 (순 +0.41%, ±0.5% 밴드 — 슬롯 기회비용)",
+   "hold_min": 15.2
+  },
+  {
+   "id": 93,
+   "stock_code": "222800",
+   "stock_name": "조건검색",
+   "sub_strategy": "1A_눌림",
+   "status": "closed",
+   "buy_price": 88300,
+   "buy_quantity": 45,
+   "sell_price": 88800,
+   "buy_time": "2026-08-03T13:31:45.297507",
+   "sell_time": "2026-08-03T13:46:46.139993",
+   "profit_rate": 0.57,
+   "profit_amount": 22500,
+   "entry_reason": "[눌림목자동] 눌림 틱즉시진입 (강도 100+ 100.2초 연속, 단일체결 0.88억) | 경로=단일 | 시간계수 x0.80 (현재가 88,000) | 비중x2.00 | limit",
+   "exit_reason": "정체 정리 15분 (순 +0.34%, ±0.5% 밴드 — 슬롯 기회비용)",
+   "hold_min": 15.0
+  }
+ ],
+ "exit_breakdown": [
+  {
+   "reason": "동적캡 즉시매도",
+   "n": 6,
+   "pnl": 114105,
+   "avg_rate": 0.35
+  },
+  {
+   "reason": "슬롯 교체: 체결강도 하락",
+   "n": 3,
+   "pnl": -235860,
+   "avg_rate": -1.76
+  },
+  {
+   "reason": "정체 정리 15분",
+   "n": 2,
+   "pnl": 48180,
+   "avg_rate": 0.6
+  },
+  {
+   "reason": "익절 조기확정",
+   "n": 2,
+   "pnl": 136590,
+   "avg_rate": 1.56
+  },
+  {
+   "reason": "손절 가격-3.11%",
+   "n": 1,
+   "pnl": -187400,
+   "avg_rate": -3.11
+  },
+  {
+   "reason": "익절",
+   "n": 1,
+   "pnl": 48600,
+   "avg_rate": 1.76
+  },
+  {
+   "reason": "익절 캡",
+   "n": 1,
+   "pnl": 110760,
+   "avg_rate": 2.76
+  }
+ ],
+ "watchlist": {
+  "by_condition": [
+   {
+    "cond_name": "눌림목자동",
+    "n": 24,
+    "bought": 6
+   },
+   {
+    "cond_name": "주도주상위",
+    "n": 12,
+    "bought": 4
+   },
+   {
+    "cond_name": "돌파자동매매용",
+    "n": 1,
+    "bought": 1
+   }
+  ],
+  "not_bought_reasons": [
+   {
+    "reason": "체결강도 미무장 (100 이상 0.0/3초 연속)",
+    "n": 26
+   }
+  ]
+ },
+ "events": [
+  {
+   "timestamp": "2026-08-03T13:46:46.156483",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "222800 조건검색 45주 @ 88,800원 [1A_눌림] | 정체 정리 15분 (순 +0.34%, ±0.5% 밴드 — 슬롯 기회비용) | 순손익 +13,361원"
+  },
+  {
+   "timestamp": "2026-08-03T13:31:45.313364",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "222800 조건검색 45주 @ 88,000원 [1A_눌림]"
+  },
+  {
+   "timestamp": "2026-08-03T13:25:18.001862",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "010170 조건검색 428주 @ 9,430원 [1A_눌림] | 정체 정리 15분 (순 +0.41%, ±0.5% 밴드 — 슬롯 기회비용) | 순손익 +16,456원"
+  },
+  {
+   "timestamp": "2026-08-03T13:11:13.034715",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "222800 조건검색 69주 @ 86,800원 [1A_눌림] | 동적캡 즉시매도 (체결강도 156->22, 거래량 x0.13, 순 +0.47%) | 순손익 +27,720원"
+  },
+  {
+   "timestamp": "2026-08-03T13:10:05.161258",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "010170 조건검색 428주 @ 9,340원 [1A_눌림]"
+  },
+  {
+   "timestamp": "2026-08-03T13:07:40.661433",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "336260 조건검색 148주 @ 26,550원 [1A_눌림] | 슬롯 교체: 체결강도 하락(100->9) + 거래량 정체(x0.72) | 보유 11분 | 순 -2.44% -> 대체후보 조건검색(950160) 점수 34.9 | 순손익 -98,042원"
+  },
+  {
+   "timestamp": "2026-08-03T13:07:03.530421",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "222800 조건검색 69주 @ 86,200원 [1A_눌림]"
+  },
+  {
+   "timestamp": "2026-08-03T12:56:19.788673",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "336260 조건검색 148주 @ 27,000원 [1A_눌림]"
+  },
+  {
+   "timestamp": "2026-08-03T12:02:37.210175",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "319400 조건검색 170주 @ 23,100원 [1A_눌림] | 슬롯 교체: 체결강도 하락(70->45) + 거래량 정체(x0.61) | 보유 15분 | 순 -2.14% -> 대체후보 조건검색(950160) 점수 34.9 | 순손익 -85,708원"
+  },
+  {
+   "timestamp": "2026-08-03T12:00:33.957303",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "090710 조건검색 882주 @ 6,740원 [1A_눌림] | 슬롯 교체: 체결강도 하락(300->5) + 거래량 정체(x0.48) | 보유 12분 | 순 -1.40% -> 대체후보 조건검색(950160) 점수 34.9 | 순손익 -84,395원"
+  },
+  {
+   "timestamp": "2026-08-03T11:48:13.265890",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "090710 조건검색 882주 @ 6,800원 [1A_눌림]"
+  },
+  {
+   "timestamp": "2026-08-03T11:47:54.610075",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "319400 조건검색 170주 @ 23,400원 [1A_눌림]"
+  },
+  {
+   "timestamp": "2026-08-03T11:46:14.209291",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "059120 조건검색 937주 @ 6,240원 [1A_눌림] | 손절 가격-3.11% (순 -3.34%) | 순손익 -201,279원"
+  },
+  {
+   "timestamp": "2026-08-03T11:23:32.172105",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "059120 조건검색 937주 @ 6,400원 [1A_눌림]"
+  },
+  {
+   "timestamp": "2026-08-03T11:07:09.621969",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "010170 조건검색 426주 @ 9,670원 [1A_눌림] | 익절 캡(강도상향+주도테마 2.5%) 순+2.53% (가격 +2.76%) | 순손익 +101,540원"
+  },
+  {
+   "timestamp": "2026-08-03T10:50:49.636100",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "042700 조건검색 29주 @ 202,500원 [1A] | 동적캡 즉시매도 (체결강도 300->21, 거래량 x0.51, 순 -0.48%) | 순손익 -28,040원"
+  },
+  {
+   "timestamp": "2026-08-03T10:48:20.834412",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "042700 조건검색 29주 @ 202,500원 [1A]"
+  },
+  {
+   "timestamp": "2026-08-03T10:47:35.653897",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "010170 조건검색 426주 @ 9,380원 [1A_눌림]"
+  },
+  {
+   "timestamp": "2026-08-03T10:21:44.868089",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "010170 조건검색 576주 @ 9,580원 [1A_눌림] | 동적캡 즉시매도 (체결강도 300->201, 거래량 x0.80, 순 +1.90%) | 순손익 +102,773원"
+  },
+  {
+   "timestamp": "2026-08-03T10:20:10.126343",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "010170 조건검색 576주 @ 9,380원 [1A_눌림]"
+  },
+  {
+   "timestamp": "2026-08-03T10:15:02.158942",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "006360 조건검색 163주 @ 24,450원 [1A] | 동적캡 즉시매도 (체결강도 100->67, 거래량 x0.00, 순 -0.43%) | 순손익 -17,335원"
+  },
+  {
+   "timestamp": "2026-08-03T10:13:47.252177",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "006360 조건검색 163주 @ 24,500원 [1A]"
+  },
+  {
+   "timestamp": "2026-08-03T09:33:30.455253",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "439960 조건검색 162주 @ 17,350원 [1A] | 익절(지수급락 대응) 순+1.53% (가격 +1.76%) | 순손익 +42,247원"
+  },
+  {
+   "timestamp": "2026-08-03T09:30:05.752524",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "439960 조건검색 162주 @ 17,050원 [1A]"
+  },
+  {
+   "timestamp": "2026-08-03T09:26:15.980118",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "439960 조건검색 143주 @ 17,215원 [1A] | 동적캡 즉시매도 (체결강도 29->20, 거래량 x0.28, 순 +0.27%) | 순손익 +6,521원"
+  },
+  {
+   "timestamp": "2026-08-03T09:23:06.689916",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "439960 조건검색 143주 @ 17,040원 [1A]"
+  },
+  {
+   "timestamp": "2026-08-03T09:20:23.862563",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "058610 조건검색 40주 @ 104,500원 [1A] | 동적캡 즉시매도 (체결강도 152->98, 거래량 x0.29, 순 -0.99%) | 순손익 -41,688원"
+  },
+  {
+   "timestamp": "2026-08-03T09:19:28.974923",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "439960 조건검색 211주 @ 16,780원 [1A] | 익절 조기확정(강도 미상승) 순+1.53% (가격 +1.76%) | 순손익 +53,187원"
+  },
+  {
+   "timestamp": "2026-08-03T09:18:46.758413",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "058610 조건검색 40주 @ 105,200원 [1A]"
+  },
+  {
+   "timestamp": "2026-08-03T09:18:27.759496",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "439960 조건검색 211주 @ 16,470원 [1A]"
+  },
+  {
+   "timestamp": "2026-08-03T09:03:40.663811",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "037070 조건검색 754주 @ 7,420원 [1A] | 익절 조기확정(강도 미상승) 순+1.14% (가격 +1.37%) | 순손익 +62,706원"
+  },
+  {
+   "timestamp": "2026-08-03T09:00:46.365143",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "037070 조건검색 754주 @ 7,340원 [1A]"
+  }
+ ],
+ "holdings_at_save": [
+  {
+   "id": 152,
+   "trade_date": "2026-08-06",
+   "stock_code": "073240",
+   "stock_name": "금호타이어",
+   "buy_price": 8210,
+   "buy_quantity": 73,
+   "buy_amount": 599330,
+   "sub_strategy": "1A",
+   "status": "manual",
+   "buy_time": "2026-08-06T09:18:21.035501",
+   "entry_reason": "[돌파자동매매용+눌림목자동] 1A 틱즉시진입 (강도 100+ 22.3초 연속, 5,383만원+ 체결 2건(시간x1.00 주가x0.90 급등x1.50)) | 경로=절대 | 시간계수 x1.00 (현재가 8,210) | 비중x0.30 | market"
+  },
+  {
+   "id": 151,
+   "trade_date": "2026-08-06",
+   "stock_code": "058730",
+   "stock_name": "다스코",
+   "buy_price": 3305,
+   "buy_quantity": 552,
+   "buy_amount": 1824360,
+   "sub_strategy": "1A",
+   "status": "manual",
+   "buy_time": "2026-08-06T09:15:34.035685",
+   "entry_reason": "[돌파자동매매용] 1A 틱즉시진입 (강도 100+ 85.3초 연속, 단일체결 0.58억) | 경로=단일 | 시간계수 x1.00 (현재가 3,305) | 비중x0.91 | market"
+  },
+  {
+   "id": 145,
+   "trade_date": "2026-08-06",
+   "stock_code": "036930",
+   "stock_name": "주성엔지니어링",
+   "buy_price": 140100,
+   "buy_quantity": 7,
+   "buy_amount": 980700,
+   "sub_strategy": "1A",
+   "status": "manual",
+   "buy_time": "2026-08-06T09:07:39.108153",
+   "entry_reason": "[돌파자동매매용] 1A 틱즉시진입 (강도 100+ 105.2초 연속, 8,000만원+ 체결 2건(시간x1.00 주가x2.00 급등x1.00)) | 경로=절대 | 시간계수 x1.00 (현재가 140,100) | 비중x0.54 | market"
+  }
+ ],
+ "log_counts": {
+  "avg_down": 0,
+  "rescue_add": 0,
+  "manual_add": 0,
+  "confirm_only": 0,
+  "ghost": 11
+ }
+}

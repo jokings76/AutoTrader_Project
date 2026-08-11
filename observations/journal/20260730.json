@@ -1,0 +1,423 @@
+{
+ "schema": 1,
+ "date": "2026-07-30",
+ "saved_at": "2026-08-11T17:12:16",
+ "summary": {
+  "closed": 7,
+  "wins": 5,
+  "losses": 2,
+  "pnl": 62700,
+  "avg_rate": 0.73,
+  "avg_hold_min": 7.46,
+  "buys": 7,
+  "flat": 0,
+  "win_rate": 71.4
+ },
+ "checklist": [
+  {
+   "rank": 0,
+   "title": "새 조건식(돌파전/돌파후) 부착",
+   "expected": "cond_name에 '돌파전' 등장 · '돌파자동매매용' 소멸",
+   "actual": "돌파전 편입 아직 없음 ((미상))",
+   "status": "warn",
+   "detail": "옛 이름이 보이면 HTS 조건식이 봇 구독에 안 붙은 것이다. ⚠️ 편입 시 등락률은 로그에 안 남아 8% 초과 여부는 직접 셀 수 없다 — 이름 확인이 가장 직접적인 대체 검사다.",
+   "source": "watch_list_log.cond_name"
+  },
+  {
+   "rank": 1,
+   "title": "-3% 도달률",
+   "expected": "옛 조건식 기준선 38%보다 낮아야 함",
+   "actual": "그날 로그 없음(로테이션으로 소실) — 스냅샷이 있으면 그쪽을 볼 것",
+   "status": "na",
+   "detail": "이게 낮아져야 '돌파전이 고점 매수를 줄였다'가 증명된다. 그대로면 조건식 개편의 효과가 없는 것.",
+   "source": "로그 '💧 물타기' ÷ trades 매수 건수"
+  },
+  {
+   "rank": 2,
+   "title": "[물타기] 발동 건수",
+   "expected": "발동 후 회복하는가 (하루 5건 미만)",
+   "actual": "그날 로그 없음(로테이션으로 소실) — 스냅샷이 있으면 그쪽을 볼 것",
+   "status": "na",
+   "detail": "로그가 1차 소스다 — 물타기는 기존 행에 합쳐져 DB로는 셀 수 없다.",
+   "source": "로그 '💧 물타기'"
+  },
+  {
+   "rank": 3,
+   "title": "손절선 범위",
+   "expected": "-4.5% ~ -5.5%",
+   "actual": "손절 없음",
+   "status": "na",
+   "detail": "손절이 나오면 종목별로 갈리는지 볼 것.",
+   "source": "trades.exit_reason 정규식"
+  },
+  {
+   "rank": 4,
+   "title": "돌파후 단독 매수",
+   "expected": "0건 (확인 전용)",
+   "actual": "0건",
+   "status": "ok",
+   "detail": "1건이라도 있으면 `_confirm_only_reject` 배선을 확인할 것. 🔴 resolve_strategy가 미분류를 '1A'로 폴백하므로 source_flags에서 빼는 것만으론 안 막힌다.",
+   "source": "trades.entry_reason"
+  },
+  {
+   "rank": 5,
+   "title": "수동매도 vs 미체결 구분",
+   "expected": "사용자가 HTS에서 판 건은 '수동 매도'로",
+   "actual": "해당 없음",
+   "status": "na",
+   "detail": "전부 '미체결'로 찍히면 `seen_on_server` 표식이 안 붙는 것 (08-11에 6건이 전부 오기록됐다).",
+   "source": "trades.exit_reason"
+  },
+  {
+   "rank": 6,
+   "title": "수동 추가매수 감지",
+   "expected": "직접 추가매수하면 평단·수량이 합산된다",
+   "actual": "그날 로그 없음(로테이션으로 소실) — 스냅샷이 있으면 그쪽을 볼 것",
+   "status": "na",
+   "detail": "직접 추가매수하셨는데 안 뜨면 15초 잔고 대조가 2회 연속 관측을 못 채운 것. 안 하셨으면 0건이 정상이다.",
+   "source": "로그 '수동 추가매수 감지'"
+  },
+  {
+   "rank": 7,
+   "title": "익절캡 발동 수익률",
+   "expected": "순 +6% 부근",
+   "actual": "3건 · 평균 순 +2.59% (가격 +2.82%)",
+   "status": "bad",
+   "detail": "순 +4% 부근이면 캡 상수가 안 먹은 것(08-10 상향 전 값).",
+   "source": "trades.profit_rate − 수수료"
+  },
+  {
+   "rank": 8,
+   "title": "꺼진 규칙이 안 도는가",
+   "expected": "전부 0건",
+   "actual": "정체 정리 3, 시간정리 0, 우선순위 교체 0",
+   "status": "bad",
+   "detail": "1건이라도 있으면 `STAGNANT_EXIT_ENABLED` / `PHASE1A_PRIORITY_MAX_PER_DAY` 상수를 확인할 것.",
+   "source": "trades.exit_reason"
+  },
+  {
+   "rank": 9,
+   "title": "09:00~09:05 매수",
+   "expected": "동시 점유 최대 4",
+   "actual": "0건",
+   "status": "ok",
+   "detail": "⚠️ 캡은 **동시 점유**를 막지 거래 횟수를 막지 않는다 — 빨리 팔려서 자리가 나면 다시 산다. 4건 초과가 곧 위반은 아니다. 08-06처럼 개장 18분에 19건 수준이면 그때 캡을 의심할 것.",
+   "source": "trades.buy_time"
+  },
+  {
+   "rank": 10,
+   "title": "눌림목 매수",
+   "expected": "0건 (슬롯 0 = 매매 중단)",
+   "actual": "0건",
+   "status": "ok",
+   "detail": "1건이라도 있으면 `PULLBACK_MAX_SLOTS`를 확인할 것.",
+   "source": "trades.sub_strategy"
+  }
+ ],
+ "checklist_summary": {
+  "ok": 3,
+  "warn": 1,
+  "bad": 2,
+  "na": 5
+ },
+ "trades": [
+  {
+   "id": 52,
+   "stock_code": "439960",
+   "stock_name": "코스모로보틱스",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 15440,
+   "buy_quantity": 59,
+   "sell_price": 14970,
+   "buy_time": "2026-07-30T09:34:39.613966",
+   "sell_time": "2026-07-30T09:37:46.443250",
+   "profit_rate": -3.04,
+   "profit_amount": -27730,
+   "entry_reason": "[기타] 1B 체결강도 FSM (현재가 15,440) | 비중x0.46",
+   "exit_reason": "손절 가격-3.04% (순 -3.27%)",
+   "hold_min": 3.1
+  },
+  {
+   "id": 53,
+   "stock_code": "119850",
+   "stock_name": "지엔씨에너지",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 30450,
+   "buy_quantity": 29,
+   "sell_price": 31300,
+   "buy_time": "2026-07-30T09:37:38.740387",
+   "sell_time": "2026-07-30T09:39:50.448332",
+   "profit_rate": 2.79,
+   "profit_amount": 24650,
+   "entry_reason": "[주도주상위+체결강도100] 1B 체결강도 FSM (현재가 30,450) | 비중x0.45",
+   "exit_reason": "익절 캡 순+2.56% (가격 +2.79%)",
+   "hold_min": 2.2
+  },
+  {
+   "id": 54,
+   "stock_code": "475150",
+   "stock_name": "SK이터닉스",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 44000,
+   "buy_quantity": 21,
+   "sell_price": 44100,
+   "buy_time": "2026-07-30T09:43:42.468950",
+   "sell_time": "2026-07-30T09:54:38.328825",
+   "profit_rate": 0.23,
+   "profit_amount": 2100,
+   "entry_reason": "[기타] 1B 체결강도 FSM (현재가 44,000) | 비중x0.48",
+   "exit_reason": "슬롯 교체: 체결강도 하락(262->0) + 거래량 정체(x0.38) | 보유 11분 -> 대체후보 마키나락스(477850) 점수 0.5",
+   "hold_min": 10.9
+  },
+  {
+   "id": 55,
+   "stock_code": "024060",
+   "stock_name": "흥구석유",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 11160,
+   "buy_quantity": 109,
+   "sell_price": 10980,
+   "buy_time": "2026-07-30T09:46:02.240452",
+   "sell_time": "2026-07-30T09:58:45.462626",
+   "profit_rate": -1.61,
+   "profit_amount": -19620,
+   "entry_reason": "[주도주상위+체결강도100] 1B 체결강도 FSM (현재가 11,160) | 비중x0.61",
+   "exit_reason": "슬롯 교체: 체결강도 하락(300->0) + 거래량 정체(x0.76) | 보유 13분 -> 대체후보 에스피지(058610) 점수 4.4",
+   "hold_min": 12.7
+  },
+  {
+   "id": 56,
+   "stock_code": "477850",
+   "stock_name": "마키나락스",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 21450,
+   "buy_quantity": 50,
+   "sell_price": 22050,
+   "buy_time": "2026-07-30T09:55:57.646780",
+   "sell_time": "2026-07-30T10:01:57.849536",
+   "profit_rate": 2.8,
+   "profit_amount": 30000,
+   "entry_reason": "[기타] 1B 체결강도 FSM (현재가 21,450) | 비중x0.54",
+   "exit_reason": "익절 캡 순+2.57% (가격 +2.80%)",
+   "hold_min": 6.0
+  },
+  {
+   "id": 57,
+   "stock_code": "058610",
+   "stock_name": "에스피지",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 84000,
+   "buy_quantity": 12,
+   "sell_price": 84900,
+   "buy_time": "2026-07-30T10:10:27.766344",
+   "sell_time": "2026-07-30T10:20:56.872668",
+   "profit_rate": 1.07,
+   "profit_amount": 10800,
+   "entry_reason": "[주도주상위+체결강도100] 1B 체결강도 FSM (현재가 84,000) | 비중x0.54",
+   "exit_reason": "슬롯 교체: 체결강도 하락(300->0) + 거래량 정체(x0.97) | 보유 10분 -> 대체후보 한미반도체(042700) 점수 4.1",
+   "hold_min": 10.5
+  },
+  {
+   "id": 58,
+   "stock_code": "119850",
+   "stock_name": "지엔씨에너지",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 29500,
+   "buy_quantity": 50,
+   "sell_price": 30350,
+   "buy_time": "2026-07-30T10:18:49.405374",
+   "sell_time": "2026-07-30T10:25:35.011273",
+   "profit_rate": 2.88,
+   "profit_amount": 42500,
+   "entry_reason": "[주도주상위+체결강도100] 1B 체결강도 FSM (현재가 29,500) | 비중x0.74",
+   "exit_reason": "익절 캡 순+2.65% (가격 +2.88%)",
+   "hold_min": 6.8
+  }
+ ],
+ "exit_breakdown": [
+  {
+   "reason": "슬롯 교체: 체결강도 하락",
+   "n": 3,
+   "pnl": -6720,
+   "avg_rate": -0.1
+  },
+  {
+   "reason": "손절 가격-3.04%",
+   "n": 1,
+   "pnl": -27730,
+   "avg_rate": -3.04
+  },
+  {
+   "reason": "익절 캡 순+2.56%",
+   "n": 1,
+   "pnl": 24650,
+   "avg_rate": 2.79
+  },
+  {
+   "reason": "익절 캡 순+2.57%",
+   "n": 1,
+   "pnl": 30000,
+   "avg_rate": 2.8
+  },
+  {
+   "reason": "익절 캡 순+2.65%",
+   "n": 1,
+   "pnl": 42500,
+   "avg_rate": 2.88
+  }
+ ],
+ "watchlist": {
+  "by_condition": [
+   {
+    "cond_name": "(미상)",
+    "n": 11,
+    "bought": 6
+   }
+  ],
+  "not_bought_reasons": [
+   {
+    "reason": "오늘 분봉 부족(개장 초반) - 거래량 판정 보류",
+    "n": 3
+   },
+   {
+    "reason": "거래량 증가 지속 아님",
+    "n": 2
+   }
+  ]
+ },
+ "events": [
+  {
+   "timestamp": "2026-07-30T10:25:35.025429",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "119850 지엔씨에너지 50주 @ 30,350원 [1B] | 익절 캡 순+2.65% (가격 +2.88%) | 순손익 +39,108원"
+  },
+  {
+   "timestamp": "2026-07-30T10:20:56.886452",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "058610 에스피지 12주 @ 84,900원 [1B] | 슬롯 교체: 체결강도 하락(300->0) + 거래량 정체(x0.97) | 보유 10분 -> 대체후보 한미반도체(042700) 점수 4.1 | 순손익 +8,482원"
+  },
+  {
+   "timestamp": "2026-07-30T10:18:49.408771",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "119850 지엔씨에너지 50주 @ 29,500원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-30T10:10:27.774761",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "058610 에스피지 12주 @ 84,000원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-30T10:01:57.854511",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "477850 마키나락스 50주 @ 22,050원 [1B] | 익절 캡 순+2.57% (가격 +2.80%) | 순손익 +27,533원"
+  },
+  {
+   "timestamp": "2026-07-30T09:58:45.472794",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "024060 흥구석유 109주 @ 10,980원 [1B] | 슬롯 교체: 체결강도 하락(300->0) + 거래량 정체(x0.76) | 보유 13분 -> 대체후보 에스피지(058610) 점수 4.4 | 순손익 -22,418원"
+  },
+  {
+   "timestamp": "2026-07-30T09:55:57.661493",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "477850 마키나락스 50주 @ 21,450원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-30T09:54:38.369736",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "475150 SK이터닉스 21주 @ 44,100원 [1B] | 슬롯 교체: 체결강도 하락(262->0) + 거래량 정체(x0.38) | 보유 11분 -> 대체후보 마키나락스(477850) 점수 0.5 | 순손익 -25원"
+  },
+  {
+   "timestamp": "2026-07-30T09:46:02.247096",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "024060 흥구석유 109주 @ 11,160원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-30T09:43:42.484096",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "475150 SK이터닉스 21주 @ 44,000원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-30T09:39:50.464024",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "119850 지엔씨에너지 29주 @ 31,300원 [1B] | 익절 캡 순+2.56% (가격 +2.79%) | 순손익 +22,619원"
+  },
+  {
+   "timestamp": "2026-07-30T09:37:46.457936",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "439960 코스모로보틱스 59주 @ 14,970원 [1B] | 손절 가격-3.04% (순 -3.27%) | 순손익 -29,825원"
+  },
+  {
+   "timestamp": "2026-07-30T09:37:38.748318",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "119850 지엔씨에너지 29주 @ 30,450원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-30T09:34:39.630984",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "439960 코스모로보틱스 59주 @ 15,440원 [1B]"
+  }
+ ],
+ "holdings_at_save": [
+  {
+   "id": 152,
+   "trade_date": "2026-08-06",
+   "stock_code": "073240",
+   "stock_name": "금호타이어",
+   "buy_price": 8210,
+   "buy_quantity": 73,
+   "buy_amount": 599330,
+   "sub_strategy": "1A",
+   "status": "manual",
+   "buy_time": "2026-08-06T09:18:21.035501",
+   "entry_reason": "[돌파자동매매용+눌림목자동] 1A 틱즉시진입 (강도 100+ 22.3초 연속, 5,383만원+ 체결 2건(시간x1.00 주가x0.90 급등x1.50)) | 경로=절대 | 시간계수 x1.00 (현재가 8,210) | 비중x0.30 | market"
+  },
+  {
+   "id": 151,
+   "trade_date": "2026-08-06",
+   "stock_code": "058730",
+   "stock_name": "다스코",
+   "buy_price": 3305,
+   "buy_quantity": 552,
+   "buy_amount": 1824360,
+   "sub_strategy": "1A",
+   "status": "manual",
+   "buy_time": "2026-08-06T09:15:34.035685",
+   "entry_reason": "[돌파자동매매용] 1A 틱즉시진입 (강도 100+ 85.3초 연속, 단일체결 0.58억) | 경로=단일 | 시간계수 x1.00 (현재가 3,305) | 비중x0.91 | market"
+  },
+  {
+   "id": 145,
+   "trade_date": "2026-08-06",
+   "stock_code": "036930",
+   "stock_name": "주성엔지니어링",
+   "buy_price": 140100,
+   "buy_quantity": 7,
+   "buy_amount": 980700,
+   "sub_strategy": "1A",
+   "status": "manual",
+   "buy_time": "2026-08-06T09:07:39.108153",
+   "entry_reason": "[돌파자동매매용] 1A 틱즉시진입 (강도 100+ 105.2초 연속, 8,000만원+ 체결 2건(시간x1.00 주가x2.00 급등x1.00)) | 경로=절대 | 시간계수 x1.00 (현재가 140,100) | 비중x0.54 | market"
+  }
+ ],
+ "log_counts": null
+}

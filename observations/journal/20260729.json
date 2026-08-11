@@ -1,0 +1,1152 @@
+{
+ "schema": 1,
+ "date": "2026-07-29",
+ "saved_at": "2026-08-11T17:12:16",
+ "summary": {
+  "closed": 30,
+  "wins": 12,
+  "losses": 16,
+  "pnl": -2578525,
+  "avg_rate": -3.07,
+  "avg_hold_min": 9.58,
+  "buys": 30,
+  "flat": 2,
+  "win_rate": 42.9
+ },
+ "checklist": [
+  {
+   "rank": 0,
+   "title": "새 조건식(돌파전/돌파후) 부착",
+   "expected": "cond_name에 '돌파전' 등장 · '돌파자동매매용' 소멸",
+   "actual": "돌파전 편입 아직 없음 ((미상))",
+   "status": "warn",
+   "detail": "옛 이름이 보이면 HTS 조건식이 봇 구독에 안 붙은 것이다. ⚠️ 편입 시 등락률은 로그에 안 남아 8% 초과 여부는 직접 셀 수 없다 — 이름 확인이 가장 직접적인 대체 검사다.",
+   "source": "watch_list_log.cond_name"
+  },
+  {
+   "rank": 1,
+   "title": "-3% 도달률",
+   "expected": "옛 조건식 기준선 38%보다 낮아야 함",
+   "actual": "그날 로그 없음(로테이션으로 소실) — 스냅샷이 있으면 그쪽을 볼 것",
+   "status": "na",
+   "detail": "이게 낮아져야 '돌파전이 고점 매수를 줄였다'가 증명된다. 그대로면 조건식 개편의 효과가 없는 것.",
+   "source": "로그 '💧 물타기' ÷ trades 매수 건수"
+  },
+  {
+   "rank": 2,
+   "title": "[물타기] 발동 건수",
+   "expected": "발동 후 회복하는가 (하루 5건 미만)",
+   "actual": "그날 로그 없음(로테이션으로 소실) — 스냅샷이 있으면 그쪽을 볼 것",
+   "status": "na",
+   "detail": "로그가 1차 소스다 — 물타기는 기존 행에 합쳐져 DB로는 셀 수 없다.",
+   "source": "로그 '💧 물타기'"
+  },
+  {
+   "rank": 3,
+   "title": "손절선 범위",
+   "expected": "-4.5% ~ -5.5%",
+   "actual": "손절 없음",
+   "status": "na",
+   "detail": "손절이 나오면 종목별로 갈리는지 볼 것.",
+   "source": "trades.exit_reason 정규식"
+  },
+  {
+   "rank": 4,
+   "title": "돌파후 단독 매수",
+   "expected": "0건 (확인 전용)",
+   "actual": "0건",
+   "status": "ok",
+   "detail": "1건이라도 있으면 `_confirm_only_reject` 배선을 확인할 것. 🔴 resolve_strategy가 미분류를 '1A'로 폴백하므로 source_flags에서 빼는 것만으론 안 막힌다.",
+   "source": "trades.entry_reason"
+  },
+  {
+   "rank": 5,
+   "title": "수동매도 vs 미체결 구분",
+   "expected": "사용자가 HTS에서 판 건은 '수동 매도'로",
+   "actual": "해당 없음",
+   "status": "na",
+   "detail": "전부 '미체결'로 찍히면 `seen_on_server` 표식이 안 붙는 것 (08-11에 6건이 전부 오기록됐다).",
+   "source": "trades.exit_reason"
+  },
+  {
+   "rank": 6,
+   "title": "수동 추가매수 감지",
+   "expected": "직접 추가매수하면 평단·수량이 합산된다",
+   "actual": "그날 로그 없음(로테이션으로 소실) — 스냅샷이 있으면 그쪽을 볼 것",
+   "status": "na",
+   "detail": "직접 추가매수하셨는데 안 뜨면 15초 잔고 대조가 2회 연속 관측을 못 채운 것. 안 하셨으면 0건이 정상이다.",
+   "source": "로그 '수동 추가매수 감지'"
+  },
+  {
+   "rank": 7,
+   "title": "익절캡 발동 수익률",
+   "expected": "순 +6% 부근",
+   "actual": "8건 · 평균 순 +2.56% (가격 +2.79%)",
+   "status": "bad",
+   "detail": "순 +4% 부근이면 캡 상수가 안 먹은 것(08-10 상향 전 값).",
+   "source": "trades.profit_rate − 수수료"
+  },
+  {
+   "rank": 8,
+   "title": "꺼진 규칙이 안 도는가",
+   "expected": "전부 0건",
+   "actual": "정체 정리 12, 시간정리 1, 우선순위 교체 0",
+   "status": "bad",
+   "detail": "1건이라도 있으면 `STAGNANT_EXIT_ENABLED` / `PHASE1A_PRIORITY_MAX_PER_DAY` 상수를 확인할 것.",
+   "source": "trades.exit_reason"
+  },
+  {
+   "rank": 9,
+   "title": "09:00~09:05 매수",
+   "expected": "동시 점유 최대 4",
+   "actual": "3건",
+   "status": "ok",
+   "detail": "⚠️ 캡은 **동시 점유**를 막지 거래 횟수를 막지 않는다 — 빨리 팔려서 자리가 나면 다시 산다. 4건 초과가 곧 위반은 아니다. 08-06처럼 개장 18분에 19건 수준이면 그때 캡을 의심할 것.",
+   "source": "trades.buy_time"
+  },
+  {
+   "rank": 10,
+   "title": "눌림목 매수",
+   "expected": "0건 (슬롯 0 = 매매 중단)",
+   "actual": "0건",
+   "status": "ok",
+   "detail": "1건이라도 있으면 `PULLBACK_MAX_SLOTS`를 확인할 것.",
+   "source": "trades.sub_strategy"
+  }
+ ],
+ "checklist_summary": {
+  "ok": 3,
+  "warn": 1,
+  "bad": 2,
+  "na": 5
+ },
+ "trades": [
+  {
+   "id": 22,
+   "stock_code": "396300",
+   "stock_name": "세아메카닉스",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 4005,
+   "buy_quantity": 667,
+   "sell_price": 4115,
+   "buy_time": "2026-07-29T09:02:55.738876",
+   "sell_time": "2026-07-29T09:11:12.877481",
+   "profit_rate": 2.75,
+   "profit_amount": 73370,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 4,005) | 비중x1.34",
+   "exit_reason": "익절 캡 순+2.52% (가격 +2.75%)",
+   "hold_min": 8.3
+  },
+  {
+   "id": 23,
+   "stock_code": "006340",
+   "stock_name": "대원전선",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 14510,
+   "buy_quantity": 255,
+   "sell_price": 14070,
+   "buy_time": "2026-07-29T09:03:08.872231",
+   "sell_time": "2026-07-29T09:09:54.507071",
+   "profit_rate": -3.03,
+   "profit_amount": -112200,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 14,510) | 비중x1.85",
+   "exit_reason": "손절 가격-3.03% (순 -3.26%)",
+   "hold_min": 6.8
+  },
+  {
+   "id": 24,
+   "stock_code": "475150",
+   "stock_name": "SK이터닉스",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 48900,
+   "buy_quantity": 81,
+   "sell_price": 50300,
+   "buy_time": "2026-07-29T09:03:11.772146",
+   "sell_time": "2026-07-29T09:10:35.092037",
+   "profit_rate": 2.86,
+   "profit_amount": 113400,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 48,900) | 비중x2.00",
+   "exit_reason": "익절 캡 순+2.63% (가격 +2.86%)",
+   "hold_min": 7.4
+  },
+  {
+   "id": 25,
+   "stock_code": "264850",
+   "stock_name": "이랜시스",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 5170,
+   "buy_quantity": 392,
+   "sell_price": 5320,
+   "buy_time": "2026-07-29T09:09:57.256798",
+   "sell_time": "2026-07-29T09:11:54.791482",
+   "profit_rate": 2.9,
+   "profit_amount": 58800,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 5,170) | 비중x1.02",
+   "exit_reason": "익절 캡 순+2.67% (가격 +2.90%)",
+   "hold_min": 2.0
+  },
+  {
+   "id": 26,
+   "stock_code": "059120",
+   "stock_name": "아진엑스텍",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 6580,
+   "buy_quantity": 332,
+   "sell_price": 6760,
+   "buy_time": "2026-07-29T09:10:37.886599",
+   "sell_time": "2026-07-29T09:12:03.197669",
+   "profit_rate": 2.74,
+   "profit_amount": 59760,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 6,580) | 비중x1.09",
+   "exit_reason": "익절 캡 순+2.51% (가격 +2.74%)",
+   "hold_min": 1.4
+  },
+  {
+   "id": 27,
+   "stock_code": "463020",
+   "stock_name": "뉴엔AI",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 9150,
+   "buy_quantity": 137,
+   "sell_price": 9400,
+   "buy_time": "2026-07-29T09:11:15.583325",
+   "sell_time": "2026-07-29T09:13:17.406655",
+   "profit_rate": 2.73,
+   "profit_amount": 34250,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 9,150) | 비중x0.63",
+   "exit_reason": "익절 캡 순+2.50% (가격 +2.73%)",
+   "hold_min": 2.0
+  },
+  {
+   "id": 28,
+   "stock_code": "332570",
+   "stock_name": "PS일렉트로닉스",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 8100,
+   "buy_quantity": 261,
+   "sell_price": 7850,
+   "buy_time": "2026-07-29T09:11:57.574889",
+   "sell_time": "2026-07-29T09:25:31.865730",
+   "profit_rate": -3.09,
+   "profit_amount": -65250,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 8,100) | 비중x1.06",
+   "exit_reason": "손절 가격-3.09% (순 -3.32%)",
+   "hold_min": 13.6
+  },
+  {
+   "id": 29,
+   "stock_code": "178320",
+   "stock_name": "서진시스템",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 33400,
+   "buy_quantity": 119,
+   "sell_price": 33200,
+   "buy_time": "2026-07-29T09:12:06.203000",
+   "sell_time": "2026-07-29T09:22:47.430734",
+   "profit_rate": -0.6,
+   "profit_amount": -23800,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 33,400) | 비중x2.00",
+   "exit_reason": "슬롯 교체: 체결강도 하락(9999->0) + 거래량 정체(x0.60) | 보유 11분 -> 대체후보 현대무벡스(319400) 점수 6.1",
+   "hold_min": 10.7
+  },
+  {
+   "id": 30,
+   "stock_code": "460930",
+   "stock_name": "현대힘스",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 13520,
+   "buy_quantity": 139,
+   "sell_price": 13730,
+   "buy_time": "2026-07-29T09:13:33.330335",
+   "sell_time": "2026-07-29T09:26:57.303406",
+   "profit_rate": 1.55,
+   "profit_amount": 29190,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 13,520) | 비중x0.94",
+   "exit_reason": "슬롯 교체: 체결강도 하락(212->0) + 거래량 정체(x0.43) | 보유 13분 -> 대체후보 다스코(058730) 점수 9.0",
+   "hold_min": 13.4
+  },
+  {
+   "id": 31,
+   "stock_code": "463020",
+   "stock_name": "뉴엔AI",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 9190,
+   "buy_quantity": 163,
+   "sell_price": 9450,
+   "buy_time": "2026-07-29T09:23:49.781013",
+   "sell_time": "2026-07-29T09:27:11.126169",
+   "profit_rate": 2.83,
+   "profit_amount": 42380,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 9,190) | 비중x0.75",
+   "exit_reason": "익절 캡 순+2.60% (가격 +2.83%)",
+   "hold_min": 3.4
+  },
+  {
+   "id": 32,
+   "stock_code": "264850",
+   "stock_name": "이랜시스",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 5250,
+   "buy_quantity": 221,
+   "sell_price": 5090,
+   "buy_time": "2026-07-29T09:25:35.462419",
+   "sell_time": "2026-07-29T09:29:49.051310",
+   "profit_rate": -3.05,
+   "profit_amount": -35360,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 5,250) | 비중x0.58",
+   "exit_reason": "손절 가격-3.05% (순 -3.28%)",
+   "hold_min": 4.2
+  },
+  {
+   "id": 33,
+   "stock_code": "080220",
+   "stock_name": "제주반도체",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 60900,
+   "buy_quantity": 50,
+   "sell_price": 61000,
+   "buy_time": "2026-07-29T09:27:01.208274",
+   "sell_time": "2026-07-29T09:38:01.266370",
+   "profit_rate": 0.16,
+   "profit_amount": 5000,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 60,900) | 비중x1.53",
+   "exit_reason": "슬롯 교체: 체결강도 하락(11896->0) + 거래량 정체(x0.76) | 보유 11분 -> 대체후보 SK오션플랜트(100090) 점수 5.6",
+   "hold_min": 11.0
+  },
+  {
+   "id": 34,
+   "stock_code": "090710",
+   "stock_name": "휴림로봇",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 6160,
+   "buy_quantity": 649,
+   "sell_price": 6190,
+   "buy_time": "2026-07-29T09:27:48.005872",
+   "sell_time": "2026-07-29T09:39:05.377319",
+   "profit_rate": -39.15,
+   "profit_amount": -1565170,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 6,160) | 비중x2.00",
+   "exit_reason": "슬롯 교체: 체결강도 하락(335->0) + 거래량 정체(x0.02) | 보유 11분 -> 대체후보 이랜시스(264850) 점수 5.7",
+   "hold_min": 11.3
+  },
+  {
+   "id": 35,
+   "stock_code": "058730",
+   "stock_name": "다스코",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 3215,
+   "buy_quantity": 1244,
+   "sell_price": 3175,
+   "buy_time": "2026-07-29T09:29:53.864936",
+   "sell_time": "2026-07-29T10:00:00.334103",
+   "profit_rate": -1.24,
+   "profit_amount": -49760,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 3,215) | 비중x2.00",
+   "exit_reason": "시간정리 30분 (순 -1.47%)",
+   "hold_min": 30.1
+  },
+  {
+   "id": 36,
+   "stock_code": "319400",
+   "stock_name": "현대무벡스",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 22600,
+   "buy_quantity": 138,
+   "sell_price": 22600,
+   "buy_time": "2026-07-29T09:38:07.148044",
+   "sell_time": "2026-07-29T09:48:13.905891",
+   "profit_rate": 0.0,
+   "profit_amount": 0,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 22,600) | 비중x1.56",
+   "exit_reason": "슬롯 교체: 체결강도 하락(135->0) + 거래량 정체(x0.05) | 보유 10분 -> 대체후보 서진시스템(178320) 점수 7.0",
+   "hold_min": 10.1
+  },
+  {
+   "id": 37,
+   "stock_code": "347700",
+   "stock_name": "스피어",
+   "sub_strategy": "1L",
+   "status": "closed",
+   "buy_price": 14930,
+   "buy_quantity": 267,
+   "sell_price": 14740,
+   "buy_time": "2026-07-29T09:38:55.651301",
+   "sell_time": "2026-07-29T09:50:22.120876",
+   "profit_rate": -1.27,
+   "profit_amount": -50730,
+   "entry_reason": "[초기스냅샷] 주도주 우선 진입 | 테마: 원격진료/비대면진료(U-Healthcare) | 체결강도 100이상 2분지속 (현재가 14,930) | 비중x2.00",
+   "exit_reason": "슬롯 교체: 체결강도 하락(106->0) + 거래량 정체(x0.02) | 보유 11분 -> 대체후보 현대힘스(460930) 점수 5.0",
+   "hold_min": 11.4
+  },
+  {
+   "id": 38,
+   "stock_code": "475150",
+   "stock_name": "SK이터닉스",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 48650,
+   "buy_quantity": 14,
+   "sell_price": 47150,
+   "buy_time": "2026-07-29T09:39:12.041373",
+   "sell_time": "2026-07-29T09:47:50.122250",
+   "profit_rate": -3.08,
+   "profit_amount": -21000,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 48,650) | 비중x0.35",
+   "exit_reason": "손절 가격-3.08% (순 -3.31%)",
+   "hold_min": 8.6
+  },
+  {
+   "id": 39,
+   "stock_code": "463020",
+   "stock_name": "뉴엔AI",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 8780,
+   "buy_quantity": 68,
+   "sell_price": 9020,
+   "buy_time": "2026-07-29T09:47:53.510072",
+   "sell_time": "2026-07-29T09:50:31.322642",
+   "profit_rate": 2.73,
+   "profit_amount": 16320,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 8,780) | 비중x0.30",
+   "exit_reason": "익절 캡 순+2.50% (가격 +2.73%)",
+   "hold_min": 2.6
+  },
+  {
+   "id": 40,
+   "stock_code": "322000",
+   "stock_name": "HD현대에너지솔루션",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 112900,
+   "buy_quantity": 9,
+   "sell_price": 109500,
+   "buy_time": "2026-07-29T09:49:35.200172",
+   "sell_time": "2026-07-29T10:00:48.251517",
+   "profit_rate": -3.01,
+   "profit_amount": -30600,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 112,900) | 비중x0.53",
+   "exit_reason": "손절 가격-3.01% (순 -3.24%)",
+   "hold_min": 11.2
+  },
+  {
+   "id": 41,
+   "stock_code": "064260",
+   "stock_name": "다날",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 4460,
+   "buy_quantity": 173,
+   "sell_price": 4585,
+   "buy_time": "2026-07-29T09:50:34.898557",
+   "sell_time": "2026-07-29T09:57:14.421353",
+   "profit_rate": 2.8,
+   "profit_amount": 21625,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 4,460) | 비중x0.39",
+   "exit_reason": "익절 캡 순+2.57% (가격 +2.80%)",
+   "hold_min": 6.7
+  },
+  {
+   "id": 42,
+   "stock_code": "347700",
+   "stock_name": "스피어",
+   "sub_strategy": "1L",
+   "status": "closed",
+   "buy_price": 14880,
+   "buy_quantity": 268,
+   "sell_price": 14880,
+   "buy_time": "2026-07-29T09:53:26.488740",
+   "sell_time": "2026-07-29T10:04:30.705331",
+   "profit_rate": 0.0,
+   "profit_amount": 0,
+   "entry_reason": "[초기스냅샷] 주도주 우선 진입 | 테마: 원격진료/비대면진료(U-Healthcare) | 체결강도 100이상 2분지속 (현재가 14,880) | 비중x2.00",
+   "exit_reason": "슬롯 교체: 체결강도 하락(742->0) + 거래량 정체(x0.57) | 보유 11분 -> 대체후보 현대힘스(460930) 점수 9.0",
+   "hold_min": 11.1
+  },
+  {
+   "id": 43,
+   "stock_code": "396300",
+   "stock_name": "세아메카닉스",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 3985,
+   "buy_quantity": 233,
+   "sell_price": 4035,
+   "buy_time": "2026-07-29T09:57:18.037257",
+   "sell_time": "2026-07-29T10:07:40.932902",
+   "profit_rate": 1.25,
+   "profit_amount": 11650,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 3,985) | 비중x0.46",
+   "exit_reason": "슬롯 교체: 체결강도 하락(990->0) + 거래량 정체(x0.79) | 보유 10분 -> 대체후보 아진엑스텍(059120) 점수 4.4",
+   "hold_min": 10.4
+  },
+  {
+   "id": 44,
+   "stock_code": "024840",
+   "stock_name": "KBI메탈",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 3625,
+   "buy_quantity": 496,
+   "sell_price": 3600,
+   "buy_time": "2026-07-29T10:00:59.054272",
+   "sell_time": "2026-07-29T10:12:49.670937",
+   "profit_rate": -46.74,
+   "profit_amount": -840400,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 3,625) | 비중x0.90",
+   "exit_reason": "슬롯 교체: 체결강도 하락(7510->0) + 거래량 정체(x0.11) | 보유 12분 -> 대체후보 이랜시스(264850) 점수 4.9",
+   "hold_min": 11.8
+  },
+  {
+   "id": 45,
+   "stock_code": "463020",
+   "stock_name": "뉴엔AI",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 9610,
+   "buy_quantity": 62,
+   "sell_price": 9320,
+   "buy_time": "2026-07-29T10:01:49.401829",
+   "sell_time": "2026-07-29T10:05:39.623947",
+   "profit_rate": -3.02,
+   "profit_amount": -17980,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 9,610) | 비중x0.30",
+   "exit_reason": "손절 가격-3.02% (순 -3.25%)",
+   "hold_min": 3.8
+  },
+  {
+   "id": 46,
+   "stock_code": "347700",
+   "stock_name": "스피어",
+   "sub_strategy": "1L",
+   "status": "closed",
+   "buy_price": 14820,
+   "buy_quantity": 269,
+   "sell_price": 14370,
+   "buy_time": "2026-07-29T10:07:33.703118",
+   "sell_time": "2026-07-29T10:17:17.039416",
+   "profit_rate": -3.04,
+   "profit_amount": -121050,
+   "entry_reason": "[초기스냅샷] 주도주 우선 진입 | 테마: 원격진료/비대면진료(U-Healthcare) | 체결강도 100이상 2분지속 (현재가 14,820) | 비중x2.00",
+   "exit_reason": "손절 가격-3.04% (순 -3.27%)",
+   "hold_min": 9.7
+  },
+  {
+   "id": 47,
+   "stock_code": "144960",
+   "stock_name": "뉴파워프라즈마",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 8570,
+   "buy_quantity": 209,
+   "sell_price": 8310,
+   "buy_time": "2026-07-29T10:07:56.908794",
+   "sell_time": "2026-07-29T10:16:18.743170",
+   "profit_rate": -3.03,
+   "profit_amount": -54340,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 8,570) | 비중x0.90",
+   "exit_reason": "손절 가격-3.03% (순 -3.26%)",
+   "hold_min": 8.4
+  },
+  {
+   "id": 48,
+   "stock_code": "080220",
+   "stock_name": "제주반도체",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 59000,
+   "buy_quantity": 25,
+   "sell_price": 58300,
+   "buy_time": "2026-07-29T10:11:26.455328",
+   "sell_time": "2026-07-29T10:21:56.497427",
+   "profit_rate": -1.19,
+   "profit_amount": -17500,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 59,000) | 비중x0.74",
+   "exit_reason": "슬롯 교체: 체결강도 하락(253->0) + 거래량 정체(x0.70) | 보유 10분 -> 대체후보 이랜시스(264850) 점수 7.0",
+   "hold_min": 10.5
+  },
+  {
+   "id": 49,
+   "stock_code": "059120",
+   "stock_name": "아진엑스텍",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 6460,
+   "buy_quantity": 278,
+   "sell_price": 6410,
+   "buy_time": "2026-07-29T10:13:15.125232",
+   "sell_time": "2026-07-29T10:24:03.296251",
+   "profit_rate": -0.77,
+   "profit_amount": -13900,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 6,460) | 비중x0.90",
+   "exit_reason": "슬롯 교체: 체결강도 하락(485->0) + 거래량 정체(x0.12) | 보유 11분 -> 대체후보 HD현대에너지솔루션(322000) 점수 7.0",
+   "hold_min": 10.8
+  },
+  {
+   "id": 50,
+   "stock_code": "178320",
+   "stock_name": "서진시스템",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 31500,
+   "buy_quantity": 57,
+   "sell_price": 31750,
+   "buy_time": "2026-07-29T10:16:22.196164",
+   "sell_time": "2026-07-29T10:27:11.230956",
+   "profit_rate": 0.79,
+   "profit_amount": 14250,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 31,500) | 비중x0.90",
+   "exit_reason": "슬롯 교체: 체결강도 하락(429->0) + 거래량 정체(x0.08) | 보유 11분 -> 대체후보 뉴파워프라즈마(144960) 점수 5.2",
+   "hold_min": 10.8
+  },
+  {
+   "id": 51,
+   "stock_code": "396300",
+   "stock_name": "세아메카닉스",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 3980,
+   "buy_quantity": 329,
+   "sell_price": 3860,
+   "buy_time": "2026-07-29T10:22:02.289448",
+   "sell_time": "2026-07-29T10:45:55.395349",
+   "profit_rate": -3.02,
+   "profit_amount": -39480,
+   "entry_reason": "[초기스냅샷] 1B 체결강도 FSM (현재가 3,980) | 비중x0.66",
+   "exit_reason": "손절 가격-3.02% (순 -3.25%)",
+   "hold_min": 23.9
+  }
+ ],
+ "exit_breakdown": [
+  {
+   "reason": "슬롯 교체: 체결강도 하락",
+   "n": 12,
+   "pnl": -2451410,
+   "avg_rate": -7.16
+  },
+  {
+   "reason": "손절 가격-3.03%",
+   "n": 2,
+   "pnl": -166540,
+   "avg_rate": -3.03
+  },
+  {
+   "reason": "손절 가격-3.02%",
+   "n": 2,
+   "pnl": -57460,
+   "avg_rate": -3.02
+  },
+  {
+   "reason": "익절 캡 순+2.50%",
+   "n": 2,
+   "pnl": 50570,
+   "avg_rate": 2.73
+  },
+  {
+   "reason": "손절 가격-3.04%",
+   "n": 1,
+   "pnl": -121050,
+   "avg_rate": -3.04
+  },
+  {
+   "reason": "손절 가격-3.09%",
+   "n": 1,
+   "pnl": -65250,
+   "avg_rate": -3.09
+  },
+  {
+   "reason": "시간정리 30분",
+   "n": 1,
+   "pnl": -49760,
+   "avg_rate": -1.24
+  },
+  {
+   "reason": "손절 가격-3.05%",
+   "n": 1,
+   "pnl": -35360,
+   "avg_rate": -3.05
+  },
+  {
+   "reason": "손절 가격-3.01%",
+   "n": 1,
+   "pnl": -30600,
+   "avg_rate": -3.01
+  },
+  {
+   "reason": "손절 가격-3.08%",
+   "n": 1,
+   "pnl": -21000,
+   "avg_rate": -3.08
+  },
+  {
+   "reason": "익절 캡 순+2.57%",
+   "n": 1,
+   "pnl": 21625,
+   "avg_rate": 2.8
+  },
+  {
+   "reason": "익절 캡 순+2.60%",
+   "n": 1,
+   "pnl": 42380,
+   "avg_rate": 2.83
+  },
+  {
+   "reason": "익절 캡 순+2.67%",
+   "n": 1,
+   "pnl": 58800,
+   "avg_rate": 2.9
+  },
+  {
+   "reason": "익절 캡 순+2.51%",
+   "n": 1,
+   "pnl": 59760,
+   "avg_rate": 2.74
+  },
+  {
+   "reason": "익절 캡 순+2.52%",
+   "n": 1,
+   "pnl": 73370,
+   "avg_rate": 2.75
+  },
+  {
+   "reason": "익절 캡 순+2.63%",
+   "n": 1,
+   "pnl": 113400,
+   "avg_rate": 2.86
+  }
+ ],
+ "watchlist": {
+  "by_condition": [
+   {
+    "cond_name": "(미상)",
+    "n": 21,
+    "bought": 18
+   }
+  ],
+  "not_bought_reasons": [
+   {
+    "reason": "거래량 증가 지속 아님",
+    "n": 3
+   }
+  ]
+ },
+ "events": [
+  {
+   "timestamp": "2026-07-29T10:45:55.395603",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "396300 세아메카닉스 329주 @ 3,860원 [1B] | 손절 가격-3.02% (순 -3.25%) | 순손익 -42,492원"
+  },
+  {
+   "timestamp": "2026-07-29T10:27:11.242769",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "178320 서진시스템 57주 @ 31,750원 [1B] | 슬롯 교체: 체결강도 하락(429->0) + 거래량 정체(x0.08) | 보유 11분 -> 대체후보 뉴파워프라즈마(144960) 점수 5.2 | 순손익 +10,120원"
+  },
+  {
+   "timestamp": "2026-07-29T10:24:03.310450",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "059120 아진엑스텍 278주 @ 6,410원 [1B] | 슬롯 교체: 체결강도 하락(485->0) + 거래량 정체(x0.12) | 보유 11분 -> 대체후보 HD현대에너지솔루션(322000) 점수 7.0 | 순손익 -18,031원"
+  },
+  {
+   "timestamp": "2026-07-29T10:22:02.305086",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "396300 세아메카닉스 329주 @ 3,980원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-29T10:21:56.505510",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "080220 제주반도체 25주 @ 58,300원 [1B] | 슬롯 교체: 체결강도 하락(253->0) + 거래량 정체(x0.70) | 보유 10분 -> 대체후보 이랜시스(264850) 점수 7.0 | 순손익 -20,892원"
+  },
+  {
+   "timestamp": "2026-07-29T10:17:17.043771",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "347700 스피어 269주 @ 14,370원 [1L] | 손절 가격-3.04% (순 -3.27%) | 순손익 -130,219원"
+  },
+  {
+   "timestamp": "2026-07-29T10:16:22.210029",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "178320 서진시스템 57주 @ 31,500원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-29T10:16:18.805123",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "144960 뉴파워프라즈마 209주 @ 8,310원 [1B] | 손절 가격-3.03% (순 -3.26%) | 순손익 -58,460원"
+  },
+  {
+   "timestamp": "2026-07-29T10:13:15.132738",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "059120 아진엑스텍 278주 @ 6,460원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-29T10:12:49.684857",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "024840 KBI메탈 266주 @ 3,600원 [1B] | 슬롯 교체: 체결강도 하락(7510->0) + 거래량 정체(x0.11) | 보유 12분 -> 대체후보 이랜시스(264850) 점수 4.9 | 순손익 -8,868원"
+  },
+  {
+   "timestamp": "2026-07-29T10:11:26.470731",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "080220 제주반도체 25주 @ 59,000원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-29T10:07:56.915386",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "144960 뉴파워프라즈마 209주 @ 8,570원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-29T10:07:40.938536",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "396300 세아메카닉스 233주 @ 4,035원 [1B] | 슬롯 교체: 체결강도 하락(990->0) + 거래량 정체(x0.79) | 보유 10분 -> 대체후보 아진엑스텍(059120) 점수 4.4 | 순손익 +9,514원"
+  },
+  {
+   "timestamp": "2026-07-29T10:07:33.708824",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "347700 스피어 269주 @ 14,820원 [1L]"
+  },
+  {
+   "timestamp": "2026-07-29T10:05:39.639337",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "463020 뉴엔AI 62주 @ 9,320원 [1B] | 손절 가격-3.02% (순 -3.25%) | 순손익 -19,350원"
+  },
+  {
+   "timestamp": "2026-07-29T10:04:30.707859",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "347700 스피어 268주 @ 14,880원 [1L] | 슬롯 교체: 체결강도 하락(742->0) + 거래량 정체(x0.57) | 보유 11분 -> 대체후보 현대힘스(460930) 점수 9.0 | 순손익 -9,172원"
+  },
+  {
+   "timestamp": "2026-07-29T10:01:49.419470",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "463020 뉴엔AI 62주 @ 9,610원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-29T10:00:59.067552",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "024840 KBI메탈 496주 @ 3,625원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-29T10:00:48.256808",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "322000 HD현대에너지솔루션 9주 @ 109,500원 [1B] | 손절 가격-3.01% (순 -3.24%) | 순손익 -32,937원"
+  },
+  {
+   "timestamp": "2026-07-29T10:00:00.341855",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "058730 다스코 1244주 @ 3,175원 [1B] | 시간정리 30분 (순 -1.47%) | 순손익 -58,959원"
+  },
+  {
+   "timestamp": "2026-07-29T09:57:18.048769",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "396300 세아메카닉스 233주 @ 3,985원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-29T09:57:14.433548",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "064260 다날 173주 @ 4,585원 [1B] | 익절 캡 순+2.57% (가격 +2.80%) | 순손익 +19,850원"
+  },
+  {
+   "timestamp": "2026-07-29T09:53:26.507019",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "347700 스피어 268주 @ 14,880원 [1L]"
+  },
+  {
+   "timestamp": "2026-07-29T09:50:34.913867",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "064260 다날 173주 @ 4,460원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-29T09:50:31.327441",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "463020 뉴엔AI 68주 @ 9,020원 [1B] | 익절 캡 순+2.50% (가격 +2.73%) | 순손익 +14,947원"
+  },
+  {
+   "timestamp": "2026-07-29T09:50:22.135185",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "347700 스피어 267주 @ 14,740원 [1L] | 슬롯 교체: 체결강도 하락(106->0) + 거래량 정체(x0.02) | 보유 11분 -> 대체후보 현대힘스(460930) 점수 5.0 | 순손익 -59,899원"
+  },
+  {
+   "timestamp": "2026-07-29T09:49:35.213443",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "322000 HD현대에너지솔루션 9주 @ 112,900원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-29T09:48:13.915511",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "319400 현대무벡스 138주 @ 22,600원 [1B] | 슬롯 교체: 체결강도 하락(135->0) + 거래량 정체(x0.05) | 보유 10분 -> 대체후보 서진시스템(178320) 점수 7.0 | 순손익 -7,173원"
+  },
+  {
+   "timestamp": "2026-07-29T09:47:53.521980",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "463020 뉴엔AI 68주 @ 8,780원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-29T09:47:50.139961",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "475150 SK이터닉스 14주 @ 47,150원 [1B] | 손절 가격-3.08% (순 -3.31%) | 순손익 -22,567원"
+  },
+  {
+   "timestamp": "2026-07-29T09:39:12.050472",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "475150 SK이터닉스 14주 @ 48,650원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-29T09:39:05.391091",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "090710 휴림로봇 393주 @ 6,190원 [1B] | 슬롯 교체: 체결강도 하락(335->0) + 거래량 정체(x0.02) | 보유 11분 -> 대체후보 이랜시스(264850) 점수 5.7 | 순손익 +6,222원"
+  },
+  {
+   "timestamp": "2026-07-29T09:38:55.664976",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "347700 스피어 267주 @ 14,930원 [1L]"
+  },
+  {
+   "timestamp": "2026-07-29T09:38:07.167064",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "319400 현대무벡스 138주 @ 22,600원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-29T09:38:01.275039",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "080220 제주반도체 50주 @ 61,000원 [1B] | 슬롯 교체: 체결강도 하락(11896->0) + 거래량 정체(x0.76) | 보유 11분 -> 대체후보 SK오션플랜트(100090) 점수 5.6 | 순손익 -2,004원"
+  },
+  {
+   "timestamp": "2026-07-29T09:29:53.871293",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "058730 다스코 1244주 @ 3,215원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-29T09:29:49.057486",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "264850 이랜시스 221주 @ 5,090원 [1B] | 손절 가격-3.05% (순 -3.28%) | 순손익 -38,029원"
+  },
+  {
+   "timestamp": "2026-07-29T09:27:48.012603",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "090710 휴림로봇 649주 @ 6,160원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-29T09:27:11.137157",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "463020 뉴엔AI 163주 @ 9,450원 [1B] | 익절 캡 순+2.60% (가격 +2.83%) | 순손익 +38,935원"
+  },
+  {
+   "timestamp": "2026-07-29T09:27:01.213051",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "080220 제주반도체 50주 @ 60,900원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-29T09:26:57.323696",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "460930 현대힘스 139주 @ 13,730원 [1B] | 슬롯 교체: 체결강도 하락(212->0) + 거래량 정체(x0.43) | 보유 13분 -> 대체후보 다스코(058730) 점수 9.0 | 순손익 +24,868원"
+  },
+  {
+   "timestamp": "2026-07-29T09:25:35.470830",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "264850 이랜시스 221주 @ 5,250원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-29T09:25:31.875261",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "332570 PS일렉트로닉스 261주 @ 7,850원 [1B] | 손절 가격-3.09% (순 -3.32%) | 순손익 -70,112원"
+  },
+  {
+   "timestamp": "2026-07-29T09:23:49.796440",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "463020 뉴엔AI 163주 @ 9,190원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-29T09:22:47.444438",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "178320 서진시스템 119주 @ 33,200원 [1B] | 슬롯 교체: 체결강도 하락(9999->0) + 거래량 정체(x0.60) | 보유 11분 -> 대체후보 현대무벡스(319400) 점수 6.1 | 순손익 -32,942원"
+  },
+  {
+   "timestamp": "2026-07-29T09:13:33.350189",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "460930 현대힘스 139주 @ 13,520원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-29T09:13:17.454753",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "463020 뉴엔AI 137주 @ 9,400원 [1B] | 익절 캡 순+2.50% (가격 +2.73%) | 순손익 +31,367원"
+  },
+  {
+   "timestamp": "2026-07-29T09:12:06.218455",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "178320 서진시스템 119주 @ 33,400원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-29T09:12:03.233948",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "059120 아진엑스텍 332주 @ 6,760원 [1B] | 익절 캡 순+2.51% (가격 +2.74%) | 순손익 +54,736원"
+  },
+  {
+   "timestamp": "2026-07-29T09:11:57.591757",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "332570 PS일렉트로닉스 261주 @ 8,100원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-29T09:11:54.804988",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "264850 이랜시스 392주 @ 5,320원 [1B] | 익절 캡 순+2.67% (가격 +2.90%) | 순손익 +54,139원"
+  },
+  {
+   "timestamp": "2026-07-29T09:11:15.591670",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "463020 뉴엔AI 137주 @ 9,150원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-29T09:11:12.893253",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "396300 세아메카닉스 667주 @ 4,115원 [1B] | 익절 캡 순+2.52% (가격 +2.75%) | 순손익 +67,226원"
+  },
+  {
+   "timestamp": "2026-07-29T09:10:37.902770",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "059120 아진엑스텍 332주 @ 6,580원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-29T09:10:35.105950",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "475150 SK이터닉스 81주 @ 50,300원 [1B] | 익절 캡 순+2.63% (가격 +2.86%) | 순손익 +104,290원"
+  },
+  {
+   "timestamp": "2026-07-29T09:09:57.270480",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "264850 이랜시스 392주 @ 5,170원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-29T09:09:54.525003",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "006340 대원전선 255주 @ 14,070원 [1B] | 손절 가격-3.03% (순 -3.26%) | 순손익 -120,710원"
+  },
+  {
+   "timestamp": "2026-07-29T09:03:11.787560",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "475150 SK이터닉스 81주 @ 48,900원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-29T09:03:08.879762",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "006340 대원전선 255주 @ 14,510원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-29T09:02:55.754645",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "396300 세아메카닉스 667주 @ 4,005원 [1B]"
+  }
+ ],
+ "holdings_at_save": [
+  {
+   "id": 152,
+   "trade_date": "2026-08-06",
+   "stock_code": "073240",
+   "stock_name": "금호타이어",
+   "buy_price": 8210,
+   "buy_quantity": 73,
+   "buy_amount": 599330,
+   "sub_strategy": "1A",
+   "status": "manual",
+   "buy_time": "2026-08-06T09:18:21.035501",
+   "entry_reason": "[돌파자동매매용+눌림목자동] 1A 틱즉시진입 (강도 100+ 22.3초 연속, 5,383만원+ 체결 2건(시간x1.00 주가x0.90 급등x1.50)) | 경로=절대 | 시간계수 x1.00 (현재가 8,210) | 비중x0.30 | market"
+  },
+  {
+   "id": 151,
+   "trade_date": "2026-08-06",
+   "stock_code": "058730",
+   "stock_name": "다스코",
+   "buy_price": 3305,
+   "buy_quantity": 552,
+   "buy_amount": 1824360,
+   "sub_strategy": "1A",
+   "status": "manual",
+   "buy_time": "2026-08-06T09:15:34.035685",
+   "entry_reason": "[돌파자동매매용] 1A 틱즉시진입 (강도 100+ 85.3초 연속, 단일체결 0.58억) | 경로=단일 | 시간계수 x1.00 (현재가 3,305) | 비중x0.91 | market"
+  },
+  {
+   "id": 145,
+   "trade_date": "2026-08-06",
+   "stock_code": "036930",
+   "stock_name": "주성엔지니어링",
+   "buy_price": 140100,
+   "buy_quantity": 7,
+   "buy_amount": 980700,
+   "sub_strategy": "1A",
+   "status": "manual",
+   "buy_time": "2026-08-06T09:07:39.108153",
+   "entry_reason": "[돌파자동매매용] 1A 틱즉시진입 (강도 100+ 105.2초 연속, 8,000만원+ 체결 2건(시간x1.00 주가x2.00 급등x1.00)) | 경로=절대 | 시간계수 x1.00 (현재가 140,100) | 비중x0.54 | market"
+  }
+ ],
+ "log_counts": null
+}

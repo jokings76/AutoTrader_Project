@@ -1,0 +1,798 @@
+{
+ "schema": 1,
+ "date": "2026-07-31",
+ "saved_at": "2026-08-11T17:12:16",
+ "summary": {
+  "closed": 18,
+  "wins": 5,
+  "losses": 10,
+  "pnl": -371196,
+  "avg_rate": -0.69,
+  "avg_hold_min": 15.04,
+  "buys": 18,
+  "flat": 3,
+  "win_rate": 33.3
+ },
+ "checklist": [
+  {
+   "rank": 0,
+   "title": "새 조건식(돌파전/돌파후) 부착",
+   "expected": "cond_name에 '돌파전' 등장 · '돌파자동매매용' 소멸",
+   "actual": "돌파전 편입 아직 없음 ((미상))",
+   "status": "warn",
+   "detail": "옛 이름이 보이면 HTS 조건식이 봇 구독에 안 붙은 것이다. ⚠️ 편입 시 등락률은 로그에 안 남아 8% 초과 여부는 직접 셀 수 없다 — 이름 확인이 가장 직접적인 대체 검사다.",
+   "source": "watch_list_log.cond_name"
+  },
+  {
+   "rank": 1,
+   "title": "-3% 도달률",
+   "expected": "옛 조건식 기준선 38%보다 낮아야 함",
+   "actual": "그날 로그 없음(로테이션으로 소실) — 스냅샷이 있으면 그쪽을 볼 것",
+   "status": "na",
+   "detail": "이게 낮아져야 '돌파전이 고점 매수를 줄였다'가 증명된다. 그대로면 조건식 개편의 효과가 없는 것.",
+   "source": "로그 '💧 물타기' ÷ trades 매수 건수"
+  },
+  {
+   "rank": 2,
+   "title": "[물타기] 발동 건수",
+   "expected": "발동 후 회복하는가 (하루 5건 미만)",
+   "actual": "그날 로그 없음(로테이션으로 소실) — 스냅샷이 있으면 그쪽을 볼 것",
+   "status": "na",
+   "detail": "로그가 1차 소스다 — 물타기는 기존 행에 합쳐져 DB로는 셀 수 없다.",
+   "source": "로그 '💧 물타기'"
+  },
+  {
+   "rank": 3,
+   "title": "손절선 범위",
+   "expected": "-4.5% ~ -5.5%",
+   "actual": "손절 없음",
+   "status": "na",
+   "detail": "손절이 나오면 종목별로 갈리는지 볼 것.",
+   "source": "trades.exit_reason 정규식"
+  },
+  {
+   "rank": 4,
+   "title": "돌파후 단독 매수",
+   "expected": "0건 (확인 전용)",
+   "actual": "0건",
+   "status": "ok",
+   "detail": "1건이라도 있으면 `_confirm_only_reject` 배선을 확인할 것. 🔴 resolve_strategy가 미분류를 '1A'로 폴백하므로 source_flags에서 빼는 것만으론 안 막힌다.",
+   "source": "trades.entry_reason"
+  },
+  {
+   "rank": 5,
+   "title": "수동매도 vs 미체결 구분",
+   "expected": "사용자가 HTS에서 판 건은 '수동 매도'로",
+   "actual": "수동매도 1 / 미체결 0",
+   "status": "ok",
+   "detail": "전부 '미체결'로 찍히면 `seen_on_server` 표식이 안 붙는 것 (08-11에 6건이 전부 오기록됐다).",
+   "source": "trades.exit_reason"
+  },
+  {
+   "rank": 6,
+   "title": "수동 추가매수 감지",
+   "expected": "직접 추가매수하면 평단·수량이 합산된다",
+   "actual": "그날 로그 없음(로테이션으로 소실) — 스냅샷이 있으면 그쪽을 볼 것",
+   "status": "na",
+   "detail": "직접 추가매수하셨는데 안 뜨면 15초 잔고 대조가 2회 연속 관측을 못 채운 것. 안 하셨으면 0건이 정상이다.",
+   "source": "로그 '수동 추가매수 감지'"
+  },
+  {
+   "rank": 7,
+   "title": "익절캡 발동 수익률",
+   "expected": "순 +6% 부근",
+   "actual": "1건 · 평균 순 +1.59% (가격 +1.82%)",
+   "status": "bad",
+   "detail": "순 +4% 부근이면 캡 상수가 안 먹은 것(08-10 상향 전 값).",
+   "source": "trades.profit_rate − 수수료"
+  },
+  {
+   "rank": 8,
+   "title": "꺼진 규칙이 안 도는가",
+   "expected": "전부 0건",
+   "actual": "정체 정리 2, 시간정리 5, 우선순위 교체 0",
+   "status": "bad",
+   "detail": "1건이라도 있으면 `STAGNANT_EXIT_ENABLED` / `PHASE1A_PRIORITY_MAX_PER_DAY` 상수를 확인할 것.",
+   "source": "trades.exit_reason"
+  },
+  {
+   "rank": 9,
+   "title": "09:00~09:05 매수",
+   "expected": "동시 점유 최대 4",
+   "actual": "0건",
+   "status": "ok",
+   "detail": "⚠️ 캡은 **동시 점유**를 막지 거래 횟수를 막지 않는다 — 빨리 팔려서 자리가 나면 다시 산다. 4건 초과가 곧 위반은 아니다. 08-06처럼 개장 18분에 19건 수준이면 그때 캡을 의심할 것.",
+   "source": "trades.buy_time"
+  },
+  {
+   "rank": 10,
+   "title": "눌림목 매수",
+   "expected": "0건 (슬롯 0 = 매매 중단)",
+   "actual": "0건",
+   "status": "ok",
+   "detail": "1건이라도 있으면 `PULLBACK_MAX_SLOTS`를 확인할 것.",
+   "source": "trades.sub_strategy"
+  }
+ ],
+ "checklist_summary": {
+  "ok": 4,
+  "warn": 1,
+  "bad": 2,
+  "na": 4
+ },
+ "trades": [
+  {
+   "id": 59,
+   "stock_code": "010120",
+   "stock_name": "LS ELECTRIC",
+   "sub_strategy": "1L",
+   "status": "closed",
+   "buy_price": 177600,
+   "buy_quantity": 22,
+   "sell_price": 177600,
+   "buy_time": "2026-07-31T09:25:18.073223",
+   "sell_time": "2026-07-31T09:26:24.812068",
+   "profit_rate": 0.0,
+   "profit_amount": 0,
+   "entry_reason": "[주도주상위] 주도주 우선 진입 | 테마: 태양광에너지 | 체결강도 100이상 2분지속 (현재가 177,600) | 비중x2.00",
+   "exit_reason": "동적캡 즉시매도 (체결강도 166->100, 거래량 x0.15, 순 -0.23%)",
+   "hold_min": 1.1
+  },
+  {
+   "id": 60,
+   "stock_code": "475150",
+   "stock_name": "SK이터닉스",
+   "sub_strategy": "1L",
+   "status": "closed",
+   "buy_price": 48100,
+   "buy_quantity": 41,
+   "sell_price": 48450,
+   "buy_time": "2026-07-31T09:25:21.615550",
+   "sell_time": "2026-07-31T09:39:11.318325",
+   "profit_rate": 0.73,
+   "profit_amount": 14350,
+   "entry_reason": "[주도주상위] 주도주 우선 진입 | 테마: 풍력에너지 | 체결강도 100이상 2분지속 (현재가 48,100) | 비중x0.99",
+   "exit_reason": "트레일링 고점-1% (-1.02%, 순 +0.50%)",
+   "hold_min": 13.8
+  },
+  {
+   "id": 61,
+   "stock_code": "047040",
+   "stock_name": "대우건설",
+   "sub_strategy": "1L",
+   "status": "closed",
+   "buy_price": 12800,
+   "buy_quantity": 283,
+   "sell_price": 12900,
+   "buy_time": "2026-07-31T09:25:26.134723",
+   "sell_time": "2026-07-31T09:31:28.187982",
+   "profit_rate": 0.78,
+   "profit_amount": 28300,
+   "entry_reason": "[주도주상위] 주도주 우선 진입 | 테마: 전후 재건(우크라/중동 전쟁 등) | 체결강도 100이상 2분지속 (현재가 12,800) | 비중x1.82",
+   "exit_reason": "트레일링 고점-1% (-1.15%, 순 +0.55%)",
+   "hold_min": 6.0
+  },
+  {
+   "id": 62,
+   "stock_code": "067310",
+   "stock_name": "하나마이크론",
+   "sub_strategy": "1L",
+   "status": "closed",
+   "buy_price": 28700,
+   "buy_quantity": 115,
+   "sell_price": 28900,
+   "buy_time": "2026-07-31T09:26:27.991597",
+   "sell_time": "2026-07-31T09:29:06.396301",
+   "profit_rate": 0.7,
+   "profit_amount": 23000,
+   "entry_reason": "[주도주상위] 주도주 우선 진입 | 테마: 밸류업(25년 기업가치 제고계획 발표) | 체결강도 100이상 2분지속 (현재가 28,700) | 비중x1.65",
+   "exit_reason": "트레일링 고점-1% (-1.03%, 순 +0.47%)",
+   "hold_min": 2.6
+  },
+  {
+   "id": 63,
+   "stock_code": "069540",
+   "stock_name": "빛과전자",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 1907,
+   "buy_quantity": 541,
+   "sell_price": 1906,
+   "buy_time": "2026-07-31T09:27:59.371712",
+   "sell_time": "2026-07-31T09:38:28.413108",
+   "profit_rate": -0.05,
+   "profit_amount": -541,
+   "entry_reason": "[주도주상위] 1B 체결강도 FSM (현재가 1,907) | 비중x0.52",
+   "exit_reason": "슬롯 교체: 체결강도 하락(30->0) + 거래량 정체(x0.24) | 보유 10분 | 순 -0.28% -> 대체후보 PS일렉트로닉스(332570) 점수 3.1",
+   "hold_min": 10.5
+  },
+  {
+   "id": 64,
+   "stock_code": "067310",
+   "stock_name": "하나마이크론",
+   "sub_strategy": "1L",
+   "status": "closed",
+   "buy_price": 29100,
+   "buy_quantity": 137,
+   "sell_price": 29050,
+   "buy_time": "2026-07-31T09:32:10.360699",
+   "sell_time": "2026-07-31T09:33:19.706077",
+   "profit_rate": -0.17,
+   "profit_amount": -6850,
+   "entry_reason": "[주도주상위] 주도주 우선 진입 | 테마: 밸류업(25년 기업가치 제고계획 발표) | 체결강도 100이상 2분지속 (현재가 29,100) | 비중x2.00",
+   "exit_reason": "동적캡 즉시매도 (체결강도 253->100, 거래량 x0.32, 순 -0.40%)",
+   "hold_min": 1.2
+  },
+  {
+   "id": 65,
+   "stock_code": "475150",
+   "stock_name": "SK이터닉스",
+   "sub_strategy": "1L",
+   "status": "closed",
+   "buy_price": 48350,
+   "buy_quantity": 69,
+   "sell_price": 48400,
+   "buy_time": "2026-07-31T09:42:19.468309",
+   "sell_time": "2026-07-31T10:12:20.525623",
+   "profit_rate": 0.1,
+   "profit_amount": 3450,
+   "entry_reason": "[주도주상위] 주도주 우선 진입 | 테마: 풍력에너지 | 체결강도 100이상 2분지속 (현재가 48,350) | 비중x1.69",
+   "exit_reason": "시간정리 30분 (순 -0.13%)",
+   "hold_min": 30.0
+  },
+  {
+   "id": 66,
+   "stock_code": "413630",
+   "stock_name": "씨피시스템",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 3960,
+   "buy_quantity": 369,
+   "sell_price": 3950,
+   "buy_time": "2026-07-31T09:43:13.184519",
+   "sell_time": "2026-07-31T09:53:34.016662",
+   "profit_rate": -0.25,
+   "profit_amount": -3690,
+   "entry_reason": "[주도주상위] 1B 체결강도 FSM (현재가 3,960) | 비중x0.73",
+   "exit_reason": "슬롯 교체: 체결강도 하락(67->0) + 거래량 정체(x0.14) | 보유 10분 | 순 -0.48% -> 대체후보 PS일렉트로닉스(332570) 점수 0.9",
+   "hold_min": 10.3
+  },
+  {
+   "id": 67,
+   "stock_code": "039980",
+   "stock_name": "폴라리스AI",
+   "sub_strategy": "1L",
+   "status": "closed",
+   "buy_price": 4715,
+   "buy_quantity": 848,
+   "sell_price": 4700,
+   "buy_time": "2026-07-31T09:59:39.923958",
+   "sell_time": "2026-07-31T10:31:13.511756",
+   "profit_rate": -0.32,
+   "profit_amount": -12720,
+   "entry_reason": "[눌림목자동] 주도주 우선 진입 | 테마: 철도 | 체결강도 100이상 2분지속 (현재가 4,715) | 비중x2.00",
+   "exit_reason": "시간정리 30분",
+   "hold_min": 31.6
+  },
+  {
+   "id": 68,
+   "stock_code": "413630",
+   "stock_name": "씨피시스템",
+   "sub_strategy": "1L",
+   "status": "closed",
+   "buy_price": 4020,
+   "buy_quantity": 995,
+   "sell_price": 3890,
+   "buy_time": "2026-07-31T10:09:22.765057",
+   "sell_time": "2026-07-31T10:34:29.982441",
+   "profit_rate": -3.23,
+   "profit_amount": -129350,
+   "entry_reason": "[주도주상위+돌파자동매매용] 주도주 우선 진입 | 테마: 조선기자재 | 체결강도 100이상 2분지속 (현재가 4,020) | 비중x2.00",
+   "exit_reason": "손절 가격-3.23% (순 -3.46%)",
+   "hold_min": 25.1
+  },
+  {
+   "id": 69,
+   "stock_code": "058610",
+   "stock_name": "에스피지",
+   "sub_strategy": "1L",
+   "status": "closed",
+   "buy_price": 82600,
+   "buy_quantity": 48,
+   "sell_price": 82600,
+   "buy_time": "2026-07-31T10:12:25.475017",
+   "sell_time": "2026-07-31T10:18:26.809123",
+   "profit_rate": 0.0,
+   "profit_amount": 0,
+   "entry_reason": "[돌파자동매매용] 주도주 우선 진입 | 테마: 철도 | 체결강도 100이상 2분지속 (현재가 82,600) | 비중x2.00",
+   "exit_reason": "수동 매도 감지 (실제 체결가 미상, 매수가로 대체 기록)",
+   "hold_min": 6.0
+  },
+  {
+   "id": 70,
+   "stock_code": "093370",
+   "stock_name": "후성",
+   "sub_strategy": "1L",
+   "status": "closed",
+   "buy_price": 8190,
+   "buy_quantity": 488,
+   "sell_price": 8040,
+   "buy_time": "2026-07-31T10:20:23.288202",
+   "sell_time": "2026-07-31T10:50:35.687414",
+   "profit_rate": -1.83,
+   "profit_amount": -73200,
+   "entry_reason": "[눌림목자동] 주도주 우선 진입 | 테마: 2차전지(소재/부품) | 체결강도 100이상 2분지속 (현재가 8,190) | 비중x2.00",
+   "exit_reason": "시간정리 30분",
+   "hold_min": 30.2
+  },
+  {
+   "id": 71,
+   "stock_code": "001210",
+   "stock_name": "금호전기",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 5010,
+   "buy_quantity": 236,
+   "sell_price": 4855,
+   "buy_time": "2026-07-31T10:22:03.296699",
+   "sell_time": "2026-07-31T10:33:52.498074",
+   "profit_rate": -3.09,
+   "profit_amount": -36580,
+   "entry_reason": "[주도주상위] 1B 체결강도 FSM (현재가 5,010) | 비중x0.59",
+   "exit_reason": "손절 가격-3.09% (순 -3.32%)",
+   "hold_min": 11.8
+  },
+  {
+   "id": 72,
+   "stock_code": "403870",
+   "stock_name": "HPSP",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 33850,
+   "buy_quantity": 49,
+   "sell_price": 32750,
+   "buy_time": "2026-07-31T10:24:11.715823",
+   "sell_time": "2026-07-31T10:38:47.170601",
+   "profit_rate": -3.25,
+   "profit_amount": -53900,
+   "entry_reason": "[눌림목자동] 1B 체결강도 FSM (현재가 33,850) | 비중x0.84",
+   "exit_reason": "손절 가격-3.25% (순 -3.48%)",
+   "hold_min": 14.6
+  },
+  {
+   "id": 73,
+   "stock_code": "025560",
+   "stock_name": "미래산업",
+   "sub_strategy": "1B",
+   "status": "closed",
+   "buy_price": 6610,
+   "buy_quantity": 206,
+   "sell_price": 6730,
+   "buy_time": "2026-07-31T10:26:17.500438",
+   "sell_time": "2026-07-31T10:27:25.987377",
+   "profit_rate": 1.82,
+   "profit_amount": 19800,
+   "entry_reason": "[눌림목자동] 1B 체결강도 FSM (현재가 6,610) | 비중x0.68",
+   "exit_reason": "익절 캡(1B 1.5%) 순+1.59% (가격 +1.82%)",
+   "hold_min": 1.1
+  },
+  {
+   "id": 74,
+   "stock_code": "058610",
+   "stock_name": "에스피지",
+   "sub_strategy": "1L",
+   "status": "closed",
+   "buy_price": 84700,
+   "buy_quantity": 36,
+   "sell_price": 82100,
+   "buy_time": "2026-07-31T10:32:43.065782",
+   "sell_time": "2026-07-31T10:47:17.087785",
+   "profit_rate": -3.07,
+   "profit_amount": -93600,
+   "entry_reason": "[주도주상위+눌림목자동+돌파자동매매용] 주도주 우선 진입 | 테마: 철도 | 체결강도 100이상 2분지속 (현재가 84,700) | 비중x1.56",
+   "exit_reason": "손절 가격-3.07% (순 -3.30%)",
+   "hold_min": 14.6
+  },
+  {
+   "id": 75,
+   "stock_code": "078930",
+   "stock_name": "GS",
+   "sub_strategy": "1L",
+   "status": "closed",
+   "buy_price": 86900,
+   "buy_quantity": 46,
+   "sell_price": 86900,
+   "buy_time": "2026-07-31T10:34:36.531800",
+   "sell_time": "2026-07-31T11:04:40.019180",
+   "profit_rate": 0.0,
+   "profit_amount": 0,
+   "entry_reason": "[주도주상위] 주도주 우선 진입 | 테마: 냉각시스템(액침냉각 등) | 체결강도 100이상 2분지속 (현재가 86,900) | 비중x2.00",
+   "exit_reason": "시간정리 30분",
+   "hold_min": 30.1
+  },
+  {
+   "id": 76,
+   "stock_code": "064260",
+   "stock_name": "다날",
+   "sub_strategy": "1L",
+   "status": "closed",
+   "buy_price": 4425,
+   "buy_quantity": 903,
+   "sell_price": 4370,
+   "buy_time": "2026-07-31T10:47:21.165293",
+   "sell_time": "2026-07-31T11:17:23.654246",
+   "profit_rate": -1.24,
+   "profit_amount": -49665,
+   "entry_reason": "[눌림목자동] 주도주 우선 진입 | 테마: NFT(대체불가토큰) | 체결강도 100이상 2분지속 (현재가 4,425) | 비중x2.00",
+   "exit_reason": "시간정리 30분 (순 -1.47%)",
+   "hold_min": 30.0
+  }
+ ],
+ "exit_breakdown": [
+  {
+   "reason": "시간정리 30분",
+   "n": 5,
+   "pnl": -132135,
+   "avg_rate": -0.66
+  },
+  {
+   "reason": "트레일링 고점-1%",
+   "n": 3,
+   "pnl": 65650,
+   "avg_rate": 0.74
+  },
+  {
+   "reason": "동적캡 즉시매도",
+   "n": 2,
+   "pnl": -6850,
+   "avg_rate": -0.09
+  },
+  {
+   "reason": "슬롯 교체: 체결강도 하락",
+   "n": 2,
+   "pnl": -4231,
+   "avg_rate": -0.15
+  },
+  {
+   "reason": "손절 가격-3.23%",
+   "n": 1,
+   "pnl": -129350,
+   "avg_rate": -3.23
+  },
+  {
+   "reason": "손절 가격-3.07%",
+   "n": 1,
+   "pnl": -93600,
+   "avg_rate": -3.07
+  },
+  {
+   "reason": "손절 가격-3.25%",
+   "n": 1,
+   "pnl": -53900,
+   "avg_rate": -3.25
+  },
+  {
+   "reason": "손절 가격-3.09%",
+   "n": 1,
+   "pnl": -36580,
+   "avg_rate": -3.09
+  },
+  {
+   "reason": "수동 매도 감지",
+   "n": 1,
+   "pnl": 0,
+   "avg_rate": 0.0
+  },
+  {
+   "reason": "익절 캡",
+   "n": 1,
+   "pnl": 19800,
+   "avg_rate": 1.82
+  }
+ ],
+ "watchlist": {
+  "by_condition": [
+   {
+    "cond_name": "(미상)",
+    "n": 34,
+    "bought": 13
+   }
+  ],
+  "not_bought_reasons": [
+   {
+    "reason": "거래량 증가 지속 아님",
+    "n": 12
+   },
+   {
+    "reason": "눌림 미성립 (되돌림 3.30%, 1~3% 밖 또는 5MA 미터치)",
+    "n": 1
+   },
+   {
+    "reason": "체결강도 지속 미달",
+    "n": 1
+   },
+   {
+    "reason": "눌림 OK but 반등 미확인 (양봉·5MA돌파 필요, 되돌림 1.24%)",
+    "n": 1
+   },
+   {
+    "reason": "눌림 미성립 (되돌림 4.89%, 1~3% 밖 또는 5MA 미터치)",
+    "n": 1
+   },
+   {
+    "reason": "점수 3.1/9 < 4.5 (거래량 1.8/4, 강도 0.0/3, OBV 1.2/2)",
+    "n": 1
+   },
+   {
+    "reason": "눌림 미성립 (되돌림 3.27%, 1~3% 밖 또는 5MA 미터치)",
+    "n": 1
+   },
+   {
+    "reason": "점수 1.2/9 < 4.5 (거래량 1.1/4, 강도 0.0/3, OBV 0.2/2)",
+    "n": 1
+   },
+   {
+    "reason": "눌림 OK but 반등 미확인 (양봉·5MA돌파 필요, 되돌림 0.00%)",
+    "n": 1
+   },
+   {
+    "reason": "눌림 OK but 반등 미확인 (양봉·5MA돌파 필요, 되돌림 1.60%)",
+    "n": 1
+   }
+  ]
+ },
+ "events": [
+  {
+   "timestamp": "2026-07-31T11:17:23.668876",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "064260 다날 903주 @ 4,370원 [1L] | 시간정리 30분 (순 -1.47%) | 순손익 -58,855원"
+  },
+  {
+   "timestamp": "2026-07-31T11:04:40.035513",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "078930 GS 46주 @ 86,900원 [1L] | 시간정리 30분 | 순손익 -9,194원"
+  },
+  {
+   "timestamp": "2026-07-31T10:50:35.702726",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "093370 후성 488주 @ 8,040원 [1L] | 시간정리 30분 | 순손익 -82,392원"
+  },
+  {
+   "timestamp": "2026-07-31T10:47:21.179314",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "064260 다날 903주 @ 4,425원 [1L]"
+  },
+  {
+   "timestamp": "2026-07-31T10:47:17.093693",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "058610 에스피지 36주 @ 82,100원 [1L] | 손절 가격-3.07% (순 -3.30%) | 순손익 -100,613원"
+  },
+  {
+   "timestamp": "2026-07-31T10:38:47.176045",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "403870 HPSP 49주 @ 32,750원 [1B] | 손절 가격-3.25% (순 -3.48%) | 순손익 -57,715원"
+  },
+  {
+   "timestamp": "2026-07-31T10:34:36.547582",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "078930 GS 46주 @ 86,900원 [1L]"
+  },
+  {
+   "timestamp": "2026-07-31T10:34:29.989475",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "413630 씨피시스템 995주 @ 3,890원 [1L] | 손절 가격-3.23% (순 -3.46%) | 순손익 -138,550원"
+  },
+  {
+   "timestamp": "2026-07-31T10:33:52.505512",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "001210 금호전기 236주 @ 4,855원 [1B] | 손절 가격-3.09% (순 -3.32%) | 순손익 -39,299원"
+  },
+  {
+   "timestamp": "2026-07-31T10:32:43.081386",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "058610 에스피지 36주 @ 84,700원 [1L]"
+  },
+  {
+   "timestamp": "2026-07-31T10:31:13.527002",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "039980 폴라리스AI 848주 @ 4,700원 [1L] | 시간정리 30분 | 순손익 -21,916원"
+  },
+  {
+   "timestamp": "2026-07-31T10:27:25.994826",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "025560 미래산업 165주 @ 6,730원 [1B] | 익절 캡(1B 1.5%) 순+1.59% (가격 +1.82%) | 순손익 +17,292원"
+  },
+  {
+   "timestamp": "2026-07-31T10:26:17.507130",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "025560 미래산업 206주 @ 6,610원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-31T10:24:11.723699",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "403870 HPSP 49주 @ 33,850원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-31T10:22:03.314599",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "001210 금호전기 236주 @ 5,010원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-31T10:20:23.306834",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "093370 후성 488주 @ 8,190원 [1L]"
+  },
+  {
+   "timestamp": "2026-07-31T10:12:25.491554",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "058610 에스피지 48주 @ 82,600원 [1L]"
+  },
+  {
+   "timestamp": "2026-07-31T10:12:20.531351",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "475150 SK이터닉스 69주 @ 48,400원 [1L] | 시간정리 30분 (순 -0.13%) | 순손익 -4,223원"
+  },
+  {
+   "timestamp": "2026-07-31T10:09:22.774220",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "413630 씨피시스템 995주 @ 4,020원 [1L]"
+  },
+  {
+   "timestamp": "2026-07-31T09:59:39.932071",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "039980 폴라리스AI 848주 @ 4,715원 [1L]"
+  },
+  {
+   "timestamp": "2026-07-31T09:53:34.023757",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "413630 씨피시스템 369주 @ 3,950원 [1B] | 슬롯 교체: 체결강도 하락(67->0) + 거래량 정체(x0.14) | 보유 10분 | 순 -0.48% -> 대체후보 PS일렉트로닉스(332570) 점수 0.9 | 순손익 -7,051원"
+  },
+  {
+   "timestamp": "2026-07-31T09:43:13.189471",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "413630 씨피시스템 369주 @ 3,960원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-31T09:42:19.484740",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "475150 SK이터닉스 69주 @ 48,350원 [1L]"
+  },
+  {
+   "timestamp": "2026-07-31T09:39:11.334132",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "475150 SK이터닉스 41주 @ 48,450원 [1L] | 트레일링 고점-1% (-1.02%, 순 +0.50%) | 순손익 +9,814원"
+  },
+  {
+   "timestamp": "2026-07-31T09:38:28.482600",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "069540 빛과전자 541주 @ 1,906원 [1B] | 슬롯 교체: 체결강도 하락(30->0) + 거래량 정체(x0.24) | 보유 10분 | 순 -0.28% -> 대체후보 PS일렉트로닉스(332570) 점수 3.1 | 순손익 -2,914원"
+  },
+  {
+   "timestamp": "2026-07-31T09:33:19.712304",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "067310 하나마이크론 137주 @ 29,050원 [1L] | 동적캡 즉시매도 (체결강도 253->100, 거래량 x0.32, 순 -0.40%) | 순손익 -16,019원"
+  },
+  {
+   "timestamp": "2026-07-31T09:32:10.374110",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "067310 하나마이크론 137주 @ 29,100원 [1L]"
+  },
+  {
+   "timestamp": "2026-07-31T09:31:28.200858",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "047040 대우건설 283주 @ 12,900원 [1L] | 트레일링 고점-1% (-1.15%, 순 +0.55%) | 순손익 +19,968원"
+  },
+  {
+   "timestamp": "2026-07-31T09:29:06.410933",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "067310 하나마이크론 115주 @ 28,900원 [1L] | 트레일링 고점-1% (-1.03%, 순 +0.47%) | 순손익 +15,409원"
+  },
+  {
+   "timestamp": "2026-07-31T09:27:59.377203",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "069540 빛과전자 541주 @ 1,907원 [1B]"
+  },
+  {
+   "timestamp": "2026-07-31T09:26:28.005501",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "067310 하나마이크론 115주 @ 28,700원 [1L]"
+  },
+  {
+   "timestamp": "2026-07-31T09:26:24.829010",
+   "event_type": "SELL",
+   "severity": "INFO",
+   "event_message": "010120 LS ELECTRIC 22주 @ 177,600원 [1L] | 동적캡 즉시매도 (체결강도 166->100, 거래량 x0.15, 순 -0.23%) | 순손익 -8,987원"
+  },
+  {
+   "timestamp": "2026-07-31T09:25:26.142363",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "047040 대우건설 283주 @ 12,800원 [1L]"
+  },
+  {
+   "timestamp": "2026-07-31T09:25:21.634160",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "475150 SK이터닉스 41주 @ 48,100원 [1L]"
+  },
+  {
+   "timestamp": "2026-07-31T09:25:18.093244",
+   "event_type": "BUY",
+   "severity": "INFO",
+   "event_message": "010120 LS ELECTRIC 22주 @ 177,600원 [1L]"
+  }
+ ],
+ "holdings_at_save": [
+  {
+   "id": 152,
+   "trade_date": "2026-08-06",
+   "stock_code": "073240",
+   "stock_name": "금호타이어",
+   "buy_price": 8210,
+   "buy_quantity": 73,
+   "buy_amount": 599330,
+   "sub_strategy": "1A",
+   "status": "manual",
+   "buy_time": "2026-08-06T09:18:21.035501",
+   "entry_reason": "[돌파자동매매용+눌림목자동] 1A 틱즉시진입 (강도 100+ 22.3초 연속, 5,383만원+ 체결 2건(시간x1.00 주가x0.90 급등x1.50)) | 경로=절대 | 시간계수 x1.00 (현재가 8,210) | 비중x0.30 | market"
+  },
+  {
+   "id": 151,
+   "trade_date": "2026-08-06",
+   "stock_code": "058730",
+   "stock_name": "다스코",
+   "buy_price": 3305,
+   "buy_quantity": 552,
+   "buy_amount": 1824360,
+   "sub_strategy": "1A",
+   "status": "manual",
+   "buy_time": "2026-08-06T09:15:34.035685",
+   "entry_reason": "[돌파자동매매용] 1A 틱즉시진입 (강도 100+ 85.3초 연속, 단일체결 0.58억) | 경로=단일 | 시간계수 x1.00 (현재가 3,305) | 비중x0.91 | market"
+  },
+  {
+   "id": 145,
+   "trade_date": "2026-08-06",
+   "stock_code": "036930",
+   "stock_name": "주성엔지니어링",
+   "buy_price": 140100,
+   "buy_quantity": 7,
+   "buy_amount": 980700,
+   "sub_strategy": "1A",
+   "status": "manual",
+   "buy_time": "2026-08-06T09:07:39.108153",
+   "entry_reason": "[돌파자동매매용] 1A 틱즉시진입 (강도 100+ 105.2초 연속, 8,000만원+ 체결 2건(시간x1.00 주가x2.00 급등x1.00)) | 경로=절대 | 시간계수 x1.00 (현재가 140,100) | 비중x0.54 | market"
+  }
+ ],
+ "log_counts": null
+}
