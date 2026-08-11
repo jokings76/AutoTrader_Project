@@ -3,10 +3,15 @@ from core.order_manager import OrderManager
 from utils.logger import logger
 
 # 전략 매핑 (동일)
+# (2026-08-11) 조건식 개편: 돌파자동매매용 -> 돌파전 + 돌파후(확인 전용).
+# ⚠️ 이 표는 update_snapshot 경로에서만 쓰이는데 그 경로는 죽어 있다
+#    (kiwoom_ws가 넘기는 키가 'jmcode'가 아니라 '9001'이라 한 번도 안 불렸다).
+#    이름만 맞춰 두되, 여기 값이 매매에 영향을 준다고 착각하지 말 것.
 CONDITION_STRATEGIES = {
     "주도주상위": {"sizing": "MAX_VOLUME", "exit_strategy": "TRAILING_EXIT"},
     "체결강도100": {"sizing": "REGULAR_VOLUME", "exit_strategy": "REGULAR"},
-    "돌파자동매매용": {"sizing": "MAX_VOLUME", "exit_strategy": "TRAILING_EXIT"},
+    "돌파전": {"sizing": "MAX_VOLUME", "exit_strategy": "TRAILING_EXIT"},
+    "돌파후": {"sizing": "MAX_VOLUME", "exit_strategy": "TRAILING_EXIT"},
     "관심종목감시": {"sizing": "REGULAR_VOLUME", "exit_strategy": "REGULAR"},
     "DEFAULT": {"sizing": "REGULAR_VOLUME", "exit_strategy": "REGULAR"},
 }
