@@ -33,7 +33,7 @@ class _WS:
 def build_bot(cb_seq="9"):
     bot = M.TradingBot.__new__(M.TradingBot)      # __init__의 무거운 초기화 회피
     M.TradingBot.__init__(bot)
-    bot.ws = _WS({"1": "주도주상위", "2": "돌파자동매매용",
+    bot.ws = _WS({"1": "주도주상위", "2": "돌파전",
                   "3": "눌림목자동", "9": "종가베팅"})
     bot._closing_bet_seq = cb_seq
     bot.calls = []

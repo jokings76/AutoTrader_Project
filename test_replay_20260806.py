@@ -507,7 +507,13 @@ s16.holdings["SL"] = {
     "ma20_updated": None,
     "warmup_until": s16._now() + _td(seconds=999),   # 워밍업 중까지 겹쳐서
 }
-s16.on_price_update("SL", 9_600)               # -4.0%
+# (2026-08-11) 손절선 상수화 + 물타기(-3%)가 손절을 가로채므로 끄고 본다.
+_sv_ad16 = SM.AVG_DOWN_ENABLED
+SM.AVG_DOWN_ENABLED = False
+try:
+    s16.on_price_update("SL", int(10_000 * (1 + SM.STOP_LOSS_RATE)) - 1)
+finally:
+    SM.AVG_DOWN_ENABLED = _sv_ad16
 check("숙성 미달 + 워밍업 중이라도 손절은 정상 발동", "SL" not in s16.holdings,
       f"잔존 {list(s16.holdings)}")
 
@@ -589,15 +595,34 @@ setup(sr, "RC")
 sr._prev_closes["RC"] = 9_900.0
 _rescue_pos(sr, "RC")
 _rescue_feed(sr, "RC")
-sr.on_price_update("RC", 9_690)      # 첫 -3.1% -> 관찰 시작
-sr.on_price_update("RC", 9_650)      # 저점 갱신
-sr.on_price_update("RC", 9_690)      # 저점 대비 +0.41% 반등 -> 집행 시도
+# 🔴 (2026-08-11) -3% 물타기는 [C] 등락률 하한을 **우회**한다("무조건"이므로).
+# 여기서 보려는 것은 [C] x rescue 교차이므로 물타기를 끄고 본다.
+# 물타기가 [C]를 우회한다는 사실 자체는 아래 대조 블록에서 못박는다.
+_sv_adC = SM.AVG_DOWN_ENABLED
+SM.AVG_DOWN_ENABLED = False
+try:
+    sr.on_price_update("RC", 9_540)      # 손절선 첫 이탈 -> 관찰 시작
+    sr.on_price_update("RC", 9_500)      # 저점 갱신
+    sr.on_price_update("RC", 9_540)      # 저점 대비 +0.42% 반등 -> 집행 시도
+finally:
+    SM.AVG_DOWN_ENABLED = _sv_adC
 buys_r = [o for o in sr.order_manager.orders if o["side"] == "buy"]
 sells_r = [o for o in sr.order_manager.orders if o["side"] == "sell"]
 check("[C]가 막으면 추가매수는 0건", len(buys_r) == 0, f"매수 {len(buys_r)}건")
 check("🔴 그때 **손절로 수렴한다**(관찰 상태로 방치되지 않는다)",
       len(sells_r) >= 1 and "RC" not in sr.holdings,
       f"매도 {len(sells_r)}건 / 잔존 {list(sr.holdings)}")
+
+# 🔴 대조 — 같은 조건에서 **물타기는 [C]를 우회해 산다**(2026-08-11 사양).
+#    rescue와 정반대라 반드시 구분해 둔다.
+srX = build(datetime(2026, 8, 6, 10, 0, 0), change_rate=-2.12)
+setup(srX, "RX")
+srX._prev_closes["RX"] = 9_900.0
+_rescue_pos(srX, "RX")
+srX.on_price_update("RX", 9_700)     # 원가 -3.0%
+check("🆕 물타기는 등락률 하한([C])을 우회한다",
+      len([o for o in srX.order_manager.orders if o["side"] == "buy"]) == 1,
+      f'매수 {len([o for o in srX.order_manager.orders if o["side"] == "buy"])}건')
 
 # ── 대조군: 전일종가 9,400 -> -3% 지점은 전일대비 +3.09% (하한 통과) ──
 sr2 = build(datetime(2026, 8, 6, 10, 0, 0), change_rate=3.09)

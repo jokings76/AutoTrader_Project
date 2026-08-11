@@ -47,6 +47,12 @@ section("[1] 임포트 · 구문 · 배선")
 # ──────────────────────────────────────────────────────────────
 import main                                     # noqa: E402
 import core.strategy_manager as SM              # noqa: E402
+
+# 🔴 (2026-08-11) 이 감사는 **손절·청산 경로**를 본다. -3% 물타기가 켜져 있으면
+#    손절선(-4.5%)보다 먼저 개입해 평단을 낮추므로 손절이 안 난다(의도된 동작).
+#    물타기 자체는 test_patch_20260811.py에서 검증한다. 기본값은 아래에서 확인.
+_AVGDOWN_DEFAULT = SM.AVG_DOWN_ENABLED
+SM.AVG_DOWN_ENABLED = False
 import core.daily_backtest as DB                # noqa: E402
 import core.slot_replacement as SR              # noqa: E402
 from core.strategy.portfolio_optimizer import DEFAULT_BASE_AMOUNT   # noqa: E402
@@ -208,6 +214,13 @@ check("VI 매수차단 폭 < 정적VI 폭",
       SM.VI_UPPER_ENTRY_BLOCK_PCT < SM.VI_STATIC_RATIO)
 check("추가매수 관찰 하한 > 손절선 (구조 전 더 내려갈 여지)",
       SM.RESCUE_ADD_OBSERVE_FLOOR > abs(SM.STOP_LOSS_RATE))
+check("🆕 -3% 물타기 기본값 ON (감사 중에만 꺼둔다)",
+      _AVGDOWN_DEFAULT is True, str(_AVGDOWN_DEFAULT))
+check("물타기 문턱 < 손절선 (물타기가 손절보다 먼저 온다)",
+      SM.AVG_DOWN_TRIGGER < abs(SM.STOP_LOSS_RATE),
+      f"{SM.AVG_DOWN_TRIGGER} < {abs(SM.STOP_LOSS_RATE)}")
+check("구조 후 최종선 > 물타기 후 평단손절 (원가 -6%가 진짜 백스톱)",
+      SM.RESCUE_ADD_FINAL_STOP > 0, str(SM.RESCUE_ADD_FINAL_STOP))
 check("추가매수 최종손절 > 관찰 하한", SM.RESCUE_ADD_FINAL_STOP > SM.RESCUE_ADD_OBSERVE_FLOOR)
 
 
@@ -383,11 +396,11 @@ check("🔴 +1.0%에서 매도하지 않음(본전스톱 무장만)", not r, str
 r = sells_of(lambda: pos_at(10_000).on_price_update("Z", 10_300))
 check("🔴 시가 캐시 없으면 VI 매도 없음", not any("VI" in x for x in r), str(r))
 # 손절선 바로 위
-r = sells_of(lambda: pos_at(10_000).on_price_update("Z", 9_705))
-check("🔴 손절선 직전(-2.95%)에서 손절하지 않음", not any("손절" in x for x in r), str(r))
+r = sells_of(lambda: pos_at(10_000).on_price_update("Z", int(10_000 * (1 + SM.STOP_LOSS_RATE)) + 5))
+check("🔴 손절선 직전에서 손절하지 않음", not any("손절" in x for x in r), str(r))
 # 손절선 도달 -> 반드시 나간다 (추가매수 조건 미충족 시)
-r = sells_of(lambda: pos_at(10_000).on_price_update("Z", 9_700))
-check("✅ 손절선(-3%) 도달 시 반드시 청산", any("손절" in x for x in r), str(r))
+r = sells_of(lambda: pos_at(10_000).on_price_update("Z", int(10_000 * (1 + SM.STOP_LOSS_RATE)) - 1))
+check("✅ 손절선 도달 시 반드시 청산", any("손절" in x for x in r), str(r))
 # 가격 위생검사 — 여기에 이상한 값이 들어오면 그 자리에서 시장가 매도가 나간다
 s = pos_at(10_000)
 crashed = []
@@ -408,7 +421,7 @@ check("🔴 음수 가격에 손절이 나가지 않음(부호 파싱 회귀 방
 # 정상 범위는 그대로 동작해야 한다 (가드가 과잉차단하지 않는지 대조군)
 _Repo.sells = []
 s3 = pos_at(10_000)
-s3.on_price_update("Z", 9_700)
+s3.on_price_update("Z", int(10_000 * (1 + SM.STOP_LOSS_RATE)) - 1)
 check("✅ 대조군: 정상 가격이면 가드가 막지 않는다",
       any("손절" in (x.get("exit_reason") or "") for x in _Repo.sells))
 # KRX 일일 상하한(±30%)은 반드시 통과해야 한다
@@ -491,7 +504,7 @@ def scenario(label, price, buy=10_000, open_px=None, guard=False,
     return why
 
 
-w = scenario("손절 -3% + VI 근접 + 가드", 9_700, buy=10_000, open_px=8_900, guard=True)
+w = scenario("손절 + VI 근접 + 가드", int(10_000 * (1 + SM.STOP_LOSS_RATE)) - 1, buy=10_000, open_px=8_900, guard=True)
 check("손절이 최우선", "손절" in w, w[:50])
 w = scenario("가드 + VI 근접 (이익)", 10_960, buy=10_000, open_px=10_000, guard=True)
 check("가드가 VI보다 우선", "지수 가드" in w, w[:50])
@@ -501,7 +514,7 @@ check("VI가 캡보다 먼저 확정", "VI 상단" in w, w[:60])
 _capx = int(10_000 * (1 + SM.TAKE_PROFIT_CAP + SM.ROUND_TRIP_COST) + 50)
 w = scenario("일반 익절캡 도달", _capx, buy=10_000)
 check("VI 조건 없으면 익절캡", "익절" in w and "VI" not in w, f"{_capx} -> {w[:44]}")
-w = scenario("워밍업 중 손절", 9_700, buy=10_000, warm=True)
+w = scenario("워밍업 중 손절", int(10_000 * (1 + SM.STOP_LOSS_RATE)) - 1, buy=10_000, warm=True)
 check("워밍업 중에도 손절 작동", "손절" in w, w[:50])
 w = scenario("워밍업 중 소폭 이익", 10_150, buy=10_000, warm=True)
 check("워밍업 중 익절캡은 대기", w == "(보유유지)", w[:50])
@@ -607,6 +620,24 @@ if _doc:
             f"{SM.PHASE1A_OPEN_SURGE_BURST_MULT}")
     doc_has("매수금액", f"매수금액 3곳 {SM.POSITION_AMOUNT} "
                      f"{DEFAULT_BASE_AMOUNT} {BUY_AMOUNT_PER_STOCK} 일치")
+    # (2026-08-11 신규) 손절 계층 / 물타기 / 조건식 — 이 셋이 오늘 바뀐 축이다.
+    # ⚠️ 08-11에 손절·물타기를 바꿨는데 감사가 통과했다 — 여기에 대조 항목이
+    #    **없었기 때문**이다. 새 상수를 넣으면 이 블록에도 반드시 추가할 것.
+    doc_has("변동성손절", f"변동성손절 {SM.STOP_LOSS_VOL_ENABLED} "
+                       f"{SM.STOP_LOSS_VOL_WINDOW_SEC} {SM.STOP_LOSS_VOL_MIN_TICKS} "
+                       f"{SM.STOP_LOSS_VOL_MULT} {SM.STOP_LOSS_VOL_MIN} "
+                       f"{SM.STOP_LOSS_VOL_MAX}")
+    doc_has("고정손절", f"고정손절 {SM.STOP_LOSS_RATE}")
+    doc_has("추가매수관찰", f"추가매수관찰 {SM.RESCUE_ADD_OBSERVE_SEC} "
+                        f"{SM.RESCUE_ADD_OBSERVE_FLOOR} {SM.RESCUE_ADD_FINAL_STOP}")
+    # ⚠️ 이 감사는 손절 경로를 보려고 AVG_DOWN_ENABLED를 꺼둔다. 그러니
+    #    **꺼둔 값이 아니라 기본값**(_AVGDOWN_DEFAULT)과 문서를 대조해야 한다.
+    #    안 그러면 "문서가 틀렸다"는 거짓 실패가 난다(실제로 한 번 났다).
+    doc_has("물타기", f"물타기 {_AVGDOWN_DEFAULT} {SM.AVG_DOWN_TRIGGER} "
+                   f"{SM.AVG_DOWN_MAX_AMOUNT} {SM.AVG_DOWN_BLOCK_ON_INDEX_GUARD}")
+    doc_has("확인전용", f"확인전용 {tuple(SM.CONFIRM_ONLY_CONDITIONS)}")
+    doc_has("숙성조건식별", f"숙성조건식별 {SM.MIN_ENTRY_DELAY_SEC_BY_COND}")
+
     # (2026-08-06 신규) [B][C][D]
     doc_has("등락률하한", f"등락률하한 {SM.MIN_ENTRY_CHANGE_PCT}")
     doc_has("상승이탈", f"상승이탈 {SM.ENTRY_BREAKOUT_ENABLED} {SM.ENTRY_BREAKOUT_PCT}")
@@ -670,14 +701,14 @@ def one(label, expect, **kw):
     check(f"{label} -> {expect or '보유유지'}", ok, why[:58])
 
 
-one("손절만 성립", "손절", price=9_700)
+one("손절만 성립", "손절", price=int(10_000 * (1 + SM.STOP_LOSS_RATE)) - 1)
 # (2026-08-10) 캡 상향(4.0 -> 6.0)에 맞춰 상수에서 역산한다.
 one("익절캡만 성립", "익절",
     price=int(10_000 * (1 + SM.TAKE_PROFIT_CAP + SM.ROUND_TRIP_COST) + 50))
 one("아무것도 성립 안 함", None, price=10_100)
-one("워밍업 중 + 손절", "손절", price=9_700, warm=True)
+one("워밍업 중 + 손절", "손절", price=int(10_000 * (1 + SM.STOP_LOSS_RATE)) - 1, warm=True)
 one("워밍업 중 + 익절 구간", None, price=10_450, warm=True)
-one("손절선 1원 위", None, price=9_701)
+one("손절선 1원 위", None, price=int(10_000 * (1 + SM.STOP_LOSS_RATE)) + 1)
 one("익절캡 1원 아래", None, price=10_399)
 
 # VI: 시가를 넣어야 성립 — 별도 구성
@@ -695,7 +726,9 @@ def one_vi(label, expect, open_px, buy, price, **kw):
 
 
 one_vi("VI 근접 + 캡 미달", "VI 상단", 10_800, 11_500, 11_840)
-one_vi("VI 근접 + 손절 동시", "손절", 12_000, 13_600, 13_180)
+# 손절선이 상수라 가격을 역산한다 (매수 13,600 / 손절선 아래로).
+one_vi("VI 근접 + 손절 동시", "손절", 12_000, 13_600,
+       int(13_600 * (1 + SM.STOP_LOSS_RATE)) - 1)
 one_vi("VI 근접인데 순손실", None, 10_800, 12_000, 11_840)
 one_vi("VI 멀고 캡도 미달", None, 10_000, 10_000, 10_200)
 one_vi("VI 근접 + 워밍업", "VI 상단", 10_800, 11_500, 11_840, warm=True)

@@ -229,7 +229,7 @@ check("[신버전] `캐시 or 틀린값` -> 정확한 값이 이긴다",
 # ⚠️ 소스 문자열이나 추측한 메서드명으로 단언하지 않는다(08-06 감사 교훈).
 #    실제 호출·반환값으로만 검증한다.
 s2 = build(datetime(2026, 8, 6, 9, 18, 21))
-setup(s2, "073240", cond="돌파자동매매용", open_px=None)
+setup(s2, "073240", cond="돌파전", open_px=None)
 s2._opening_prices["073240"] = 7_200.0      # 09:00:55에 정확히 캐시된 값
 s2._prev_closes["073240"] = 7_361.0
 s2.api.candles = trunc                       # 절단된 분봉만 돌려주는 상황
@@ -247,16 +247,16 @@ check("[차단] 시가 캐시가 살아있다(틀린 값으로 덮이지 않음)
 
 # 시가대비 필터 자체의 경계 — evaluate_tick_entry의 실제 반환 사유로 본다.
 s2c = build(datetime(2026, 8, 6, 9, 18, 21))
-setup(s2c, "SG", cond="돌파자동매매용", open_px=None)
+setup(s2c, "SG", cond="돌파전", open_px=None)
 s2c.phase1b.start_watching("SG")
 s2c.update_strength_timer("SG", 130.0, now=T - 10)     # 무장시켜 시가 게이트까지 도달
 _, info_hi = s2c.evaluate_tick_entry("SG", "1A", 8_210, open_price=7_200,
-                                     cond_name="돌파자동매매용",
+                                     cond_name="돌파전",
                                      now_dt=datetime(2026, 8, 6, 9, 18, 21))
 check("[차단] 진짜 시가 7,200 -> +14.0%라 '매수 보류' 사유가 나온다",
       "시가대비" in info_hi.get("reason", ""), info_hi.get("reason", ""))
 _, info_lo = s2c.evaluate_tick_entry("SG", "1A", 8_210, open_price=7_650,
-                                     cond_name="돌파자동매매용",
+                                     cond_name="돌파전",
                                      now_dt=datetime(2026, 8, 6, 9, 18, 21))
 check("[구버전 재현] 절단값 7,650 -> +7.3%라 시가 게이트를 통과했다",
       "시가대비" not in info_lo.get("reason", ""), info_lo.get("reason", ""))
@@ -450,7 +450,15 @@ s6.holdings["SL"] = {
     "ma20_updated": None,
     "warmup_until": s6._now() + timedelta(seconds=999),   # 워밍업 중
 }
-s6.on_price_update("SL", 9_600)   # -4%
+# (2026-08-11) 이 블록은 **손절 경로**를 본다. -3% 물타기가 켜져 있으면 손절선
+# (-4.5%)보다 먼저 개입해 평단을 낮추므로 손절이 안 난다(의도된 동작).
+# 물타기 자체는 test_patch_20260811에서 따로 검증하고, 여기선 끄고 본다.
+_sv_ad6 = SM.AVG_DOWN_ENABLED
+SM.AVG_DOWN_ENABLED = False
+try:
+    s6.on_price_update("SL", int(10_000 * (1 + SM.STOP_LOSS_RATE)) - 1)
+finally:
+    SM.AVG_DOWN_ENABLED = _sv_ad6
 check("[불변] 손절은 워밍업 중에도, 하한 규칙과 무관하게 작동",
       "SL" not in s6.holdings, str(list(s6.holdings)))
 
@@ -764,21 +772,21 @@ for _fn, _nm in ((SM.StrategyManager._open_entry_plan, "_open_entry_plan"),
           "vwap_entry_reject" in _src and "VWAP_ENTRY_MIN_GAP_PCT" not in _src)
 
 # ═════════════════════════════════════════════════════════
-print("\n[13] 조건식별 숙성 예외 — 돌파자동매매용만 30초 (2026-08-07)")
+print("\n[13] 조건식별 숙성 예외 — 돌파전만 30초 (2026-08-07)")
 # ═════════════════════════════════════════════════════════
 # [왜] 돌파는 편입의 78%(14/18)가 09:00~09:02에 몰리는데 60초 숙성이 그
 # 구간을 통째로 덮었다. 08-07에 숙성으로 막힌 4종목이 **전부 돌파 최초편입**
 # (원익홀딩스 55초/후성 31초는 끝내 미매수).
 check("기본 숙성은 60초 유지", SM.MIN_ENTRY_DELAY_SEC == 60.0)
-check("돌파자동매매용만 30초", SM.MIN_ENTRY_DELAY_SEC_BY_COND == {"돌파자동매매용": 30.0},
+check("돌파전만 30초", SM.MIN_ENTRY_DELAY_SEC_BY_COND == {"돌파전": 30.0},
       str(SM.MIN_ENTRY_DELAY_SEC_BY_COND))
 
 s13 = build(now_dt=datetime(2026, 8, 7, 9, 30, 0))
-for _c, _cond, _want in (("BRK", "돌파자동매매용", 30.0),
+for _c, _cond, _want in (("BRK", "돌파전", 30.0),
                          ("LEAD", "주도주상위", 60.0),
                          ("PB", "눌림목자동", 60.0),
-                         ("MIX", "돌파자동매매용+주도주상위", 30.0),
-                         ("MIX2", "주도주상위+돌파자동매매용", 30.0)):
+                         ("MIX", "돌파전+주도주상위", 30.0),
+                         ("MIX2", "주도주상위+돌파전", 30.0)):
     s13._cond_names[_c] = _cond
     check(f"[{_cond}] 요구시간 {_want:.0f}초",
           s13.entry_delay_sec(_c) == _want, f"{s13.entry_delay_sec(_c):.0f}초")
@@ -802,7 +810,7 @@ check("돌파 경계: 30.1초는 통과", s13._entry_delay_reject("BRK", now=_n1
 
 # 08-07 실측 재생 — 원익홀딩스(돌파, 편입 후 55초)가 이제 통과하는가
 s13b = build(now_dt=datetime(2026, 8, 7, 9, 1, 11))
-s13b._cond_names["030530"] = "돌파자동매매용"
+s13b._cond_names["030530"] = "돌파전"
 _n13b = time.time()
 s13b._first_seen["030530"] = _n13b - 55
 check("🔴 [실측] 원익홀딩스 편입 후 55초 -> 이제 통과 (그날은 5초 차이로 탈락)",

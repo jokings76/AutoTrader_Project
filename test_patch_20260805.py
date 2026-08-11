@@ -171,6 +171,11 @@ check("최종손절(-6%)이 일반손절(-3%)보다 깊다",
       SM.RESCUE_ADD_FINAL_STOP > abs(SM.STOP_LOSS_RATE))
 
 # ═════════════════════════════════════════════════════════
+# 🔴 (2026-08-11) -3% 물타기가 손절선(-4.5%)보다 **먼저** 개입해 평단을
+#    낮추므로, rescue 경로를 보는 [2]~[7] 구간에서는 꺼둔다.
+#    물타기 자체의 검증은 test_patch_20260811.py에 따로 있다.
+_SV_AVGDOWN = SM.AVG_DOWN_ENABLED
+SM.AVG_DOWN_ENABLED = False
 print("\n[2] #3 추가매수 — 관찰 창 -> 반등 확증 시에만 발동")
 # ═════════════════════════════════════════════════════════
 # ⚠️ 손절은 -3%에 **최초로 닿는 순간** 발동하므로 그 시점엔 현재가=최근저점이라
@@ -179,19 +184,19 @@ print("\n[2] #3 추가매수 — 관찰 창 -> 반등 확증 시에만 발동")
 s, _ = build()
 pos = put_pos(s)
 feed(s, "R1")
-s.on_price_update("R1", 9_690)          # 첫 -3.1% 도달
+s.on_price_update("R1", 9_540)          # 손절선(-4.5%) 첫 이탈
 sells = [o for o in s.order_manager.orders if o["side"] == "sell"]
 check("①② 충족 -> 첫 도달에 매도하지 않고 관찰 시작",
       not sells and pos.get("rescue_watch_until") is not None,
       f"매도 {len(sells)}건")
-check("관찰 저점이 기록됨", pos.get("rescue_low") == 9_690)
+check("관찰 저점이 기록됨", pos.get("rescue_low") == 9_540)
 
-s.on_price_update("R1", 9_650)          # 더 밀림 — 저점 갱신, 아직 반등 아님
-check("관찰 중 저점 갱신", pos.get("rescue_low") == 9_650)
+s.on_price_update("R1", 9_500)          # 더 밀림 — 저점 갱신, 아직 반등 아님
+check("관찰 중 저점 갱신", pos.get("rescue_low") == 9_500)
 check("아직 매도도 매수도 없음",
       not [o for o in s.order_manager.orders if o["side"] in ("sell", "buy")])
 
-s.on_price_update("R1", 9_690)          # 저점 대비 +0.41%, 여전히 -3.1%
+s.on_price_update("R1", 9_540)          # 저점 대비 +0.42%, 여전히 손절선 아래
 buys = [o for o in s.order_manager.orders if o["side"] == "buy"]
 check("저점 대비 +0.3% 반등 -> 추가매수 집행", len(buys) == 1,
       f"매수 {len(buys)}건")
@@ -207,7 +212,7 @@ for nm, kw in (("거래대금 미달", dict(accel=False)),
     s2, _ = build()
     put_pos(s2, "R2")
     feed(s2, "R2", **kw)
-    s2.on_price_update("R2", 9_690)
+    s2.on_price_update("R2", 9_540)
     sold = [o for o in s2.order_manager.orders if o["side"] == "sell"]
     check(f"①② 중 {nm} -> 관찰도 안 하고 즉시 손절",
           len(sold) == 1 and "R2" not in s2.holdings, f"매도 {len(sold)}건")
@@ -218,19 +223,19 @@ print("\n[3] #3 관찰 창의 출구 — 하한 이탈 / 만료 / 반등 없음"
 sA, _ = build()
 pA = put_pos(sA, "RA")
 feed(sA, "RA")
-sA.on_price_update("RA", 9_690)
+sA.on_price_update("RA", 9_540)
 check("관찰 시작됨", pA.get("rescue_watch_until") is not None)
-sA.on_price_update("RA", 9_540)          # 원가 -4.6% (하한 -4.5% 이탈)
+sA.on_price_update("RA", 9_440)   # 원가 -5.6% (관찰 하한 -5.5% 이탈)
 soldA = [o for o in sA.order_manager.orders if o["side"] == "sell"]
-check("관찰 중 하한(-4.5%) 이탈 -> 즉시 손절",
+check("관찰 중 하한 이탈 -> 즉시 손절",
       len(soldA) == 1 and "RA" not in sA.holdings)
 
 sB, _ = build()
 pB = put_pos(sB, "RB")
 feed(sB, "RB")
-sB.on_price_update("RB", 9_690)
+sB.on_price_update("RB", 9_540)
 pB["rescue_watch_until"] = time.time() - 1     # 창 만료 상태로
-sB.on_price_update("RB", 9_695)
+sB.on_price_update("RB", 9_545)
 soldB = [o for o in sB.order_manager.orders if o["side"] == "sell"]
 check("관찰 창 만료(반등 없음) -> 손절",
       len(soldB) == 1 and "RB" not in sB.holdings)
@@ -242,7 +247,7 @@ s4, _ = build()
 s4._rescue_count_today = SM.RESCUE_ADD_MAX_PER_DAY
 put_pos(s4, "R4")
 feed(s4, "R4")
-s4.on_price_update("R4", 9_690)
+s4.on_price_update("R4", 9_540)
 check("하루 한도 소진 -> 관찰 없이 손절",
       len([o for o in s4.order_manager.orders if o["side"] == "sell"]) == 1
       and "R4" not in s4.holdings)
@@ -251,7 +256,7 @@ s5, _ = build()
 put_pos(s5, "R5")
 feed(s5, "R5")
 s5._entry_block_reason = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
-s5.on_price_update("R5", 9_690)
+s5.on_price_update("R5", 9_540)
 check("판정 중 예외 -> 손절로 수렴 (최후 방어선 유지)",
       len([o for o in s5.order_manager.orders if o["side"] == "sell"]) == 1
       and "R5" not in s5.holdings)
@@ -260,19 +265,19 @@ s6, _ = build()
 put_pos(s6, "R6")
 feed(s6, "R6")
 s6._entry_block_reason = lambda: "MDD 일손실 차단"
-s6.on_price_update("R6", 9_690)
+s6.on_price_update("R6", 9_540)
 check("MDD/가드 차단 중 -> 관찰 없이 손절",
       len([o for o in s6.order_manager.orders if o["side"] == "sell"]) == 1)
 
 s3, _ = build()
 p3 = put_pos(s3, "R3")
 feed(s3, "R3")
-s3.on_price_update("R3", 9_690)
-s3.on_price_update("R3", 9_650)
-s3.on_price_update("R3", 9_690)
+s3.on_price_update("R3", 9_540)
+s3.on_price_update("R3", 9_500)
+s3.on_price_update("R3", 9_540)
 check("1회차 추가매수 성공", p3.get("rescue_added") is True)
 s3.order_manager.orders.clear()
-s3.on_price_update("R3", 9_500)          # 평단 -3% 재도달, 원가 -6% 전
+s3.on_price_update("R3", 9_410)   # 원가 -5.9% (최종선 -6% 전)
 check("같은 종목 2회차 추가매수는 없음",
       not [o for o in s3.order_manager.orders if o["side"] == "buy"])
 
@@ -282,12 +287,12 @@ print("\n[5] #3 최종 방어선 — 원가 -6%면 무조건 청산")
 s7, _ = build()
 p7 = put_pos(s7, "R7")
 feed(s7, "R7")
-s7.on_price_update("R7", 9_690)
-s7.on_price_update("R7", 9_650)
-s7.on_price_update("R7", 9_690)
+s7.on_price_update("R7", 9_540)
+s7.on_price_update("R7", 9_500)
+s7.on_price_update("R7", 9_540)
 check("추가매수 완료", p7.get("rescue_added") is True)
 s7.order_manager.orders.clear()
-s7.on_price_update("R7", 9_450)          # 원가 -5.5% (아직 -6% 전)
+s7.on_price_update("R7", 9_410)   # 원가 -5.9% (아직 -6% 전)
 check("원가 -6% 전에는 청산하지 않음(버틴다)",
       not [o for o in s7.order_manager.orders if o["side"] == "sell"],
       f'평단 {s7.holdings["R7"]["buy_price"]:,.0f}')
@@ -381,7 +386,7 @@ print("\n[7] 회귀 — 손절이 여전히 최후 방어선인가")
 s13, _ = build()
 put_pos(s13, "R8", warm=True)            # 워밍업 중
 feed(s13, "R8", accel=False)             # 추가매수 조건 불충족
-s13.on_price_update("R8", 9_690)
+s13.on_price_update("R8", 9_540)
 check("워밍업 중에도 손절은 작동",
       len([o for o in s13.order_manager.orders if o["side"] == "sell"]) == 1)
 
@@ -389,7 +394,7 @@ s14, _ = build()
 put_pos(s14, "R9")
 feed(s14, "R9")
 SM.RESCUE_ADD_ENABLED = False
-s14.on_price_update("R9", 9_690)
+s14.on_price_update("R9", 9_540)
 check("RESCUE_ADD_ENABLED=False면 구버전대로 손절",
       len([o for o in s14.order_manager.orders if o["side"] == "sell"]) == 1)
 SM.RESCUE_ADD_ENABLED = True
@@ -403,6 +408,8 @@ check("ENTRY_BREAKOUT_ENABLED=False면 상승 이탈 미발동",
 SM.ENTRY_BREAKOUT_ENABLED = True
 
 # ═════════════════════════════════════════════════════════
+SM.AVG_DOWN_ENABLED = _SV_AVGDOWN     # 물타기 원복 ([2]~[7] 구간 한정)
+check("[원복] 물타기 설정이 되돌아왔다", SM.AVG_DOWN_ENABLED is True)
 print("\n[9] 시가대비 필터 — ka10001 1콜로 채워지는가 (REST 추가 0콜)")
 # ═════════════════════════════════════════════════════════
 # 08-05 실측: 이 필터의 발동 로그가 하루 종일 0건이었고 PS일렉트로닉스가
@@ -687,7 +694,14 @@ check("워밍업 중에도 VI 매도는 작동", "VI1" not in _r.holdings)
 
 # 우선순위: 손절 > 지수가드 > VI
 _s, _p = vi_setup(10_000, 11_500)            # VI 상단 11,000, 매수 11,500
-_s.on_price_update("VI1", 11_155)            # -3.0% 손절 & VI 0.5% 이내는 아님
+# (2026-08-11) 손절선이 상수라 수치를 박지 않는다. 물타기(-3%)는 손절 경로를
+# 가로채므로 이 판정에서는 끈다(우선순위 검증이 목적).
+_sv_ad_vi = SM.AVG_DOWN_ENABLED
+SM.AVG_DOWN_ENABLED = False
+try:
+    _s.on_price_update("VI1", int(11_500 * (1 + SM.STOP_LOSS_RATE)) - 1)
+finally:
+    SM.AVG_DOWN_ENABLED = _sv_ad_vi
 check("손절 구간에서는 손절 사유로 나간다",
       "VI1" not in _s.holdings
       and any("손절" in (x.get("exit_reason") or "") for x in _Repo.sells),

@@ -371,15 +371,15 @@ check("주도주상위 시가대비 상한 초과 -> 매수보류", not ok and "
       info.get("reason", ""))
 ok, info = eval_1a(lambda tf: feed(tf, "X", 3, SM.PHASE1A_BURST_TRADE_VALUE), open_px=10_000, px=10_400)
 check("시가대비 +4%는 통과", ok, info.get("reason", ""))
-ok, info = eval_1a(lambda tf: feed(tf, "X", 3, SM.PHASE1A_BURST_TRADE_VALUE * 2), cond="돌파자동매매용",
+ok, info = eval_1a(lambda tf: feed(tf, "X", 3, SM.PHASE1A_BURST_TRADE_VALUE * 2), cond="돌파전",
                    open_px=10_000, px=_SURGE_BLOCK_PX)
-check("시가급등 필터가 돌파자동매매용에도 적용됨 (2026-08-01 확대)",
+check("시가급등 필터가 돌파전에도 적용됨 (2026-08-01 확대)",
       not ok and "시가대비" in info["reason"], info.get("reason", ""))
 ok, info = eval_1a(lambda tf: feed(tf, "X", 3, SM.PHASE1A_BURST_TRADE_VALUE * 2), cond="기타",
                    open_px=10_000, px=_SURGE_BLOCK_PX)
 check("cond_name이 '기타'로 뭉개져도 필터가 꺼지지 않음",
       not ok and "시가대비" in info["reason"], info.get("reason", ""))
-ok, info = eval_1a(lambda tf: feed(tf, "X", 3, SM.PHASE1A_BURST_TRADE_VALUE), cond="돌파자동매매용",
+ok, info = eval_1a(lambda tf: feed(tf, "X", 3, SM.PHASE1A_BURST_TRADE_VALUE), cond="돌파전",
                    open_px=0.0, px=10_600)
 check("당일 시가를 모르면(0) 필터는 건너뜀 — 모르는 값으로 막지 않음", ok)
 
@@ -459,9 +459,9 @@ T = lambda h, m: datetime(2026, 8, 3, h, m, 0)
 # --- 단독 소스: 시각과 무관하게 완전 분리 ---
 check("눌림목자동 단독 -> Pullback만 평가", route("눌림목자동") == ["PB"], str(route("눌림목자동")))
 check("주도주상위 단독 -> 1A만 평가", route("주도주상위") == ["1A"], str(route("주도주상위")))
-check("돌파자동매매용 단독 -> 1A만 평가", route("돌파자동매매용") == ["1A"])
-check("주도주상위+돌파자동매매용(눌림목 없음) -> 1A만",
-      route("주도주상위+돌파자동매매용") == ["1A"])
+check("돌파전 단독 -> 1A만 평가", route("돌파전") == ["1A"])
+check("주도주상위+돌파전(눌림목 없음) -> 1A만",
+      route("주도주상위+돌파전") == ["1A"])
 check("눌림목자동 단독은 오후에도 Pullback (전환 규칙 영향 없음)",
       route("눌림목자동", T(13, 0)) == ["PB"])
 check("주도주상위 단독은 오후에도 1A (전환 규칙 영향 없음)",
@@ -476,17 +476,17 @@ check("중복 10:30 정각 -> Pullback으로 전환",
       route("주도주상위+눌림목자동", T(10, 30)) == ["PB"],
       str(route("주도주상위+눌림목자동", T(10, 30))))
 check("중복 13:00 -> Pullback", route("주도주상위+눌림목자동", T(13, 0)) == ["PB"])
-check("중복(눌림목자동+돌파자동매매용) 09:30 -> 1A",
-      route("눌림목자동+돌파자동매매용", T(9, 30)) == ["1A"])
-check("중복(눌림목자동+돌파자동매매용) 11:00 -> Pullback",
-      route("눌림목자동+돌파자동매매용", T(11, 0)) == ["PB"])
+check("중복(눌림목자동+돌파전) 09:30 -> 1A",
+      route("눌림목자동+돌파전", T(9, 30)) == ["1A"])
+check("중복(눌림목자동+돌파전) 11:00 -> Pullback",
+      route("눌림목자동+돌파전", T(11, 0)) == ["PB"])
 check("3개 전부 중복도 같은 규칙 (10:00 1A / 11:00 PB)",
-      route("주도주상위+눌림목자동+돌파자동매매용", T(10, 0)) == ["1A"]
-      and route("주도주상위+눌림목자동+돌파자동매매용", T(11, 0)) == ["PB"])
+      route("주도주상위+눌림목자동+돌파전", T(10, 0)) == ["1A"]
+      and route("주도주상위+눌림목자동+돌파전", T(11, 0)) == ["PB"])
 
 # --- 09:20 지연 게이트 제거 ---
-check("돌파자동매매용이 09:05에도 즉시 1A 평가됨 (지연 게이트 제거)",
-      route("돌파자동매매용", T(9, 5)) == ["1A"], str(route("돌파자동매매용", T(9, 5))))
+check("돌파전이 09:05에도 즉시 1A 평가됨 (지연 게이트 제거)",
+      route("돌파전", T(9, 5)) == ["1A"], str(route("돌파전", T(9, 5))))
 check("주도주상위도 09:05 즉시 평가", route("주도주상위", T(9, 5)) == ["1A"])
 
 # --- Pullback 시간창 09:00 ~ 14:50 (2026-08-03: 09:25에서 앞당김) ---
@@ -1150,8 +1150,8 @@ check("가중 배수는 상한 고정 (tier 폭주 없음)",
 print("\n[25] 제안 B — 조건검색식별 성과 자동 보정")
 # ═════════════════════════════════════════════════════════
 check("병합 조건명도 대표 키 하나로 접힘",
-      SM.StrategyManager.cond_perf_key("주도주상위+돌파자동매매용") == "cond:주도주상위")
-check("돌파자동매매용 단독 키", SM.StrategyManager.cond_perf_key("돌파자동매매용") == "cond:돌파자동매매용")
+      SM.StrategyManager.cond_perf_key("주도주상위+돌파전") == "cond:주도주상위")
+check("돌파전 단독 키", SM.StrategyManager.cond_perf_key("돌파전") == "cond:돌파전")
 check("알 수 없는 조건명은 기타로", SM.StrategyManager.cond_perf_key("기타") == "cond:기타")
 
 def thr_for(cond, losses=None):
@@ -1180,13 +1180,13 @@ s = build_strat()
 s.phase1b.start_watching("CK")
 s.phase1b.orderbook.update("CK", {"ask_prices": [10_000], "ask_volumes": [10]}, now=now)
 feed(s.phase1b.trade_flow, "CK", 5, 1_000_000)
-s._cond_names["CK"] = "돌파자동매매용"
+s._cond_names["CK"] = "돌파전"
 s._execute_buy("CK", "CK", 1, {"current_price": 10_000}, "1A")
 check("매수 시 조건식 성과 키가 포지션에 기록",
-      s.holdings["CK"].get("cond_key") == "cond:돌파자동매매용")
+      s.holdings["CK"].get("cond_key") == "cond:돌파전")
 s._execute_sell("CK", 10_500, "익절 테스트")
 check("청산 시 조건식 축에도 성과가 쌓임",
-      s.perf.sample_count("cond:돌파자동매매용") == 1)
+      s.perf.sample_count("cond:돌파전") == 1)
 
 # ═════════════════════════════════════════════════════════
 print("\n[26] 제안 C — tier 기반 매수금액 가중 (상방 한정)")
@@ -1257,7 +1257,7 @@ check("감시중인데 체결틱 0인 종목을 지목", "체결틱 0인 종목 
 
 s3 = build_strat(datetime(2026, 8, 3, 10, 0, 0))
 s3.watch_list_today.add("NOWATCH")       # 후보인데 감시조차 미시작
-s3._note_reject("NOWATCH", "조건식 지연 — 돌파자동매매용는 09:20부터 평가")
+s3._note_reject("NOWATCH", "조건식 지연 — 돌파전는 09:20부터 평가")
 msg3 = s3.build_entry_diagnostics()
 check("후보인데 감시 미시작인 종목을 지목(1A 평가 미도달)",
       "감시 미시작 1개" in msg3, msg3)

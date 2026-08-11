@@ -248,16 +248,25 @@ buy_callers = [n for n in dir(SM.StrategyManager)
                if not n.startswith("__") and n != "_execute_buy"   # 자기 자신 제외
                and inspect.isfunction(getattr(SM.StrategyManager, n, None))
                and "_execute_buy(" in inspect.getsource(getattr(SM.StrategyManager, n))]
-# ⚠️ 문서는 오래 "3곳"이라 적었지만 **실제로는 4곳**이다 — `_maybe_tick_entry`에
-#    `ENTRY_PULLBACK_ENABLED=False`일 때 쓰는 즉시매수 폴백이 하나 더 있다
-#    (08-08 심층 감사에서 발견, 문서 수정함). 목록이 틀리면 "규칙을 모든
-#    매수 경로에 반영했는가"라는 이 프로젝트의 핵심 점검이 통째로 새어나간다.
-check("_execute_buy 호출부는 정확히 4곳",
-      len(buy_callers) == 4, ", ".join(sorted(buy_callers)))
-check("호출부 구성이 문서와 같다(폴링/틱폴백/되돌림체결/추가매수)",
+# ⚠️ 문서는 오래 "3곳"이라 적었지만 08-08에 **4곳**으로 정정했고
+#    (`_maybe_tick_entry`의 즉시매수 폴백), 08-11에 `_maybe_average_down`
+#    (-3% 물타기)이 추가돼 **5곳**이 됐다. 목록이 틀리면 "규칙을 모든 매수
+#    경로에 반영했는가"라는 이 프로젝트의 핵심 점검이 통째로 새어나간다.
+check("_execute_buy 호출부는 정확히 5곳",
+      len(buy_callers) == 5, ", ".join(sorted(buy_callers)))
+check("호출부 구성이 문서와 같다(폴링/틱폴백/되돌림체결/추가매수/물타기)",
       set(buy_callers) == {"_evaluate_1a_pullback_entry", "_maybe_tick_entry",
-                           "_try_fill_entry_plan", "_do_rescue_add"},
+                           "_try_fill_entry_plan", "_do_rescue_add",
+                           "_maybe_average_down"},
       str(sorted(buy_callers)))
+# 🔴 5번째(물타기)만 진입 게이트를 우회한다 — 그 우회가 **안전 게이트까지**
+#    번지지 않았는지 소스로 확인한다(등락률/VWAP/VI는 우회, MDD·지수가드는 존중).
+_src_ad = inspect.getsource(SM.StrategyManager._maybe_average_down)
+check("물타기는 bypass_entry_gates=True로만 우회한다",
+      "bypass_entry_gates=True" in _src_ad)
+check("물타기가 MDD 일손실 차단을 존중한다", "risk_can_trade" in _src_ad)
+check("물타기가 지수 가드를 존중한다", "_is_index_guard_active" in _src_ad)
+check("물타기는 당일 매수분에만 적용된다(복원분 제외)", "buy_time" in _src_ad)
 # 그 4번째(폴백)는 되돌림이 켜져 있으면 도달 불가여야 한다
 _src_mte = inspect.getsource(SM.StrategyManager._maybe_tick_entry)
 check("틱 폴백 매수는 되돌림이 꺼졌을 때만 도달한다(현재는 사실상 죽은 경로)",
@@ -312,9 +321,15 @@ def _pos(s, code, buy=10_000, qty=10, warm_done=True):
 
 s3 = build(datetime(2026, 8, 10, 9, 2, 0))
 _pos(s3, "SL")
-s3.on_price_update("SL", 9_600)          # -4%
+# (2026-08-11) 손절선 상수화 + 물타기(-3%)가 손절을 가로채므로 끄고 본다.
+_sv_ad3 = SM.AVG_DOWN_ENABLED
+SM.AVG_DOWN_ENABLED = False
+try:
+    s3.on_price_update("SL", int(10_000 * (1 + SM.STOP_LOSS_RATE)) - 1)
+finally:
+    SM.AVG_DOWN_ENABLED = _sv_ad3
 sells = [o for o in s3.order_manager.orders if o["side"] == "sell"]
-check("초반 구간에서도 손절(-3% 초과)은 정상 집행", len(sells) == 1,
+check("초반 구간에서도 손절은 정상 집행", len(sells) == 1,
       f"매도 {len(sells)}건")
 check("손절은 시장가", sells and sells[0]["style"] == "market")
 

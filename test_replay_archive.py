@@ -170,9 +170,15 @@ class _OrderMgr:
 # 아카이브 로딩 — **실제 틱 날짜**로 다시 묶는다
 # ─────────────────────────────────────────────────────────
 def load_archive():
-    """{'YYYYMMDD': {code: [(epoch, price, side, volume), ...]}}"""
-    by_date = defaultdict(lambda: defaultdict(list))
-    seen = set()   # (실제날짜, 종목) — 같은 종목이 여러 폴더에 중복 저장돼 있다
+    """{'YYYYMMDD': {code: [(dt, price, side, volume), ...]}}
+
+    🔴 (2026-08-11 수정) 예전엔 파일의 **첫 틱 날짜만** 채택하고 나머지 날짜의
+    틱을 통째로 버렸다. 아카이브 파일 하나에 여러 날짜가 섞여 있으므로
+    (ka10079 소급수집 부작용), 파일이 07-13부터 시작하는 종목은 최근 날짜 틱이
+    전부 사라졌다 — 표본이 조용히 줄어드는 결함이었다.
+    -> **파일 안의 모든 날짜를 각각 추출**한다.
+    """
+    raw = defaultdict(lambda: defaultdict(set))
     for path in sorted(glob.glob(os.path.join(ARCHIVE_DIR, "*", "*.json"))):
         code = os.path.splitext(os.path.basename(path))[0]
         try:
@@ -180,17 +186,10 @@ def load_archive():
                 ticks = json.load(f).get("ticks") or []
         except Exception:
             continue
-        if not ticks:
-            continue
-        day = str(ticks[0].get("time_str", ""))[:8]
-        if len(day) != 8 or (day, code) in seen:
-            continue
-        seen.add((day, code))
-        out = []
         for tk in ticks:
             ts = str(tk.get("time_str") or "")
-            if len(ts) != 14 or ts[:8] != day:
-                continue          # 날짜가 섞인 틱은 버린다
+            if len(ts) != 14:
+                continue
             try:
                 dt = datetime.strptime(ts, "%Y%m%d%H%M%S")
                 px = int(tk.get("price") or 0)
@@ -199,10 +198,14 @@ def load_archive():
                 continue
             if px <= 0 or vol <= 0:
                 continue
-            out.append((dt, px, str(tk.get("side") or "neutral"), vol))
-        if len(out) >= 50:
-            out.sort(key=lambda r: r[0])
-            by_date[day][code] = out
+            # 같은 (날짜,종목)이 여러 폴더에 중복 저장돼 있어 set으로 접는다.
+            raw[ts[:8]][code].add((dt, px, str(tk.get("side") or "neutral"), vol))
+
+    by_date = defaultdict(dict)
+    for day, per in raw.items():
+        for code, rows in per.items():
+            if len(rows) >= 50:
+                by_date[day][code] = sorted(rows, key=lambda r: r[0])
     return by_date
 
 

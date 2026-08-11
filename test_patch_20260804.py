@@ -381,8 +381,11 @@ _sold_b = [o for o in s5b.order_manager.orders if o.get("side") == "sell"]
 check("🔴 [회귀] 손실 구간에서는 반등소진 매도가 나가지 않는다",
       not _sold_b and s5b.holdings.get("Y2", {}).get("qty") == 100,
       f"매도 {len(_sold_b)}건 / 잔량 {s5b.holdings.get('Y2', {}).get('qty')}")
-check("🔴 [회귀] 손실 구간은 -3% 손절이 그대로 담당한다(최후 방어선 불변)",
-      SM.STOP_LOSS_RATE == -0.03, str(SM.STOP_LOSS_RATE))
+# (2026-08-11) 손절선이 -3% -> -4.5%로 바뀌었다. 이 단언의 취지는 '값'이 아니라
+# **"손실 구간의 최후 방어선은 여전히 손절"**이므로 수치를 박지 않고 성질만 본다.
+check("🔴 [회귀] 손실 구간은 손절이 그대로 담당한다(최후 방어선 존재)",
+      SM.STOP_LOSS_RATE < 0 and abs(SM.STOP_LOSS_RATE) <= 0.10,
+      str(SM.STOP_LOSS_RATE))
 
 # 롤백 — False로 두면 08-05~08-10 사양(손실 구간 전용)이 그대로 돌아온다
 _saved_lr = SM.LOSS_REBOUND_REQUIRE_BREAKEVEN
@@ -412,7 +415,14 @@ p6 = put_pos(s6, code="Z1")
 p6["partial_exited"] = True
 p6["qty"] = 50
 p6["trail_peak"] = 10_000
-s6.on_price_update("Z1", 9_600)             # -4%
+# (2026-08-11) -3% 물타기가 켜져 있으면 손절선(-4.5%)보다 **먼저** 개입해
+# 평단을 낮추므로 손절이 안 난다(의도된 동작). 여기선 손절 경로만 보므로 끈다.
+_sv_ad = SM.AVG_DOWN_ENABLED
+SM.AVG_DOWN_ENABLED = False
+try:
+    s6.on_price_update("Z1", int(10_000 * (1 + SM.STOP_LOSS_RATE)) - 1)   # 손절선 아래
+finally:
+    SM.AVG_DOWN_ENABLED = _sv_ad
 check("분할 잔량도 손절은 전량 청산", "Z1" not in s6.holdings)
 check("사유가 손절(트레일 아님)",
       any("손절" in (r.get("exit_reason") or "") for r in _Repo.sells),

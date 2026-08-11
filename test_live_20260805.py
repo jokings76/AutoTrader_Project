@@ -21,7 +21,7 @@ _os_testlog.environ["AUTOTRADER_TEST_LOG"] = "1"
 import inspect
 import sys
 import time
-from datetime import datetime, time as dtime
+from datetime import datetime, timedelta, time as dtime
 
 import core.strategy_manager as SM
 from core.phase1b_controller import Phase1BController
@@ -166,11 +166,21 @@ check("tick_archive도 IS_MOCK 분기를 탄다",
 
 check("config.ini가 실전으로 설정됨 (IS_MOCK=False)", settings.IS_MOCK is False,
       f"IS_MOCK={settings.IS_MOCK!r}")
-check("조건검색식 3개 + 종가베팅 분리 유지",
-      settings.CONDITION_NAMES == ["주도주상위", "눌림목자동", "돌파자동매매용"]
+# (2026-08-11) 조건식 개편: 돌파자동매매용 -> 돌파전(매수) + 돌파후(확인전용).
+check("조건검색식 4개 + 종가베팅 분리 유지",
+      settings.CONDITION_NAMES == ["주도주상위", "눌림목자동", "돌파전", "돌파후"]
       and settings.CLOSING_BET_CONDITION_NAME == "종가베팅"
       and settings.CLOSING_BET_CONDITION_NAME not in settings.CONDITION_NAMES,
       f"{settings.CONDITION_NAMES} + {settings.CLOSING_BET_CONDITION_NAME}")
+# 확인 전용 조건식은 **구독은 되지만 단독 매수는 안 된다**.
+check("확인전용 조건식이 CONDITION_NAMES에 있다(구독 대상)",
+      all(c in settings.CONDITION_NAMES for c in SM.CONFIRM_ONLY_CONDITIONS),
+      f"{SM.CONFIRM_ONLY_CONDITIONS}")
+for _cn, _want in (("돌파후", True), ("돌파전", False),
+                   ("돌파전+돌파후", False), ("주도주상위+돌파후", False)):
+    _r = SM.StrategyManager._confirm_only_reject(_cn)
+    check(f"확인전용 판정 [{_cn}] -> {'차단' if _want else '통과'}",
+          bool(_r) is _want, str(_r)[:50])
 
 # ═════════════════════════════════════════════════════════
 print("\n[2] 예수금 — D+2 매도대금이 매수여력에 반영되는가")
@@ -360,11 +370,21 @@ s.holdings["X1"] = {
     "buy_time": clock(), "stock_name": "X1", "strategy_phase": "1A",
     "sub_strategy": "1A", "highest_price": 10_000, "lowest_price": 10_000,
     "ma20": None, "ma20_updated": None,
-    "warmup_until": clock().timestamp() + 999,  # 워밍업 한창
+    # ⚠️ (2026-08-11 수정) 여기 float(timestamp)를 넣어뒀었다. 실물은 항상
+    #    datetime이라 `self._now() < warmup_until`에서 TypeError가 난다.
+    #    손절이 항상 먼저 발동해 그 줄에 도달하지 않아 **가려져 있던 결함**이고,
+    #    손절선이 -4.5%로 깊어지자 바로 터졌다.
+    "warmup_until": clock() + timedelta(seconds=999),  # 워밍업 한창
 }
-s.on_price_update("X1", 9_600)   # -4% (손절선 -3% 이탈)
+# -3% 물타기가 손절선(-4.5%)보다 먼저 개입하므로, 손절 경로만 보려면 끈다.
+_sv_ad = SM.AVG_DOWN_ENABLED
+SM.AVG_DOWN_ENABLED = False
+try:
+    s.on_price_update("X1", int(10_000 * (1 + SM.STOP_LOSS_RATE)) - 1)
+finally:
+    SM.AVG_DOWN_ENABLED = _sv_ad
 sold = [o for o in s.order_manager.orders if o["side"] == "sell"]
-check("워밍업 중에도 -3% 손절이 실제로 나간다", len(sold) == 1, f"매도 {len(sold)}건")
+check("워밍업 중에도 손절이 실제로 나간다", len(sold) == 1, f"매도 {len(sold)}건")
 check("손절은 전량 매도", sold and sold[0]["qty"] == 10, str(sold))
 
 # ═════════════════════════════════════════════════════════

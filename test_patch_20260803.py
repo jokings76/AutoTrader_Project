@@ -269,7 +269,8 @@ try:
     p6 = put_pos(s6, code="000006")
     s6.on_price_update("000006", px_arm)          # 먼저 무장
     check("무장 확인", p6.get("breakeven_armed") is True)
-    s6.on_price_update("000006", 9_600)           # -4% 급락
+    # (2026-08-11) 손절선이 상수라 수치를 박지 않는다 — 손절선 바로 아래로 민다.
+    s6.on_price_update("000006", int(10_000 * (1 + SM.STOP_LOSS_RATE)) - 1)
     check("급락 시 손절로 청산", sold(s6, "000006"))
 finally:
     SM.BREAKEVEN_STOP_ENABLED = True   # 원상복구 — 실제 기본값(ON)으로
@@ -295,7 +296,7 @@ print("\n[9] 손절 — 워밍업 중에도 반드시 작동해야 한다")
 s9 = build()
 p9 = put_pos(s9, code="000009", warmup_done=False)   # 워밍업 진행 중
 check("워밍업 중인 포지션인지 확인", s9._now() < p9["warmup_until"])
-s9.on_price_update("000009", 9_600)                  # -4% 급락
+s9.on_price_update("000009", int(10_000 * (1 + SM.STOP_LOSS_RATE)) - 1)  # 손절선 아래
 check("워밍업 중에도 손절 발동", sold(s9, "000009"))
 check("사유가 손절",
       any("손절" in (r.get("exit_reason") or "") for r in _Repo.sells),
@@ -309,7 +310,12 @@ check("워밍업 중엔 본전스톱 무장 안 함(강도류 판단 보류 유�
       not p9b.get("breakeven_armed") and not sold(s9b, "000010"))
 
 # 손절선 자체는 그대로
-check("손절선 -3% 유지", abs(SM.STOP_LOSS_RATE - (-0.03)) < 1e-9, f"{SM.STOP_LOSS_RATE}")
+# (2026-08-11) 손절 -3% -> **-4.5%** (사용자 지정). 08-11 손절 9건 중 6건이
+# 5분 이내였고 손절된 5종목이 전부 22~26분 안에 재무장했다(노이즈에 털림).
+check("손절선 -4.5%", abs(SM.STOP_LOSS_RATE - (-0.045)) < 1e-9, f"{SM.STOP_LOSS_RATE}")
+check("손절선 < 추가매수 관찰바닥 (관찰 창이 존재)",
+      SM.RESCUE_ADD_OBSERVE_FLOOR > abs(SM.STOP_LOSS_RATE),
+      f"{SM.RESCUE_ADD_OBSERVE_FLOOR} > {abs(SM.STOP_LOSS_RATE)}")
 
 print("\n[10] 시간대 계수 — 점심 완화 제거 (08-03 실측: 완화 구간 전부 손실)")
 mult = dict(SM.TICK_BURST_TIME_MULT)
@@ -436,7 +442,7 @@ check("사유가 '지수 가드 강제청산'",
 # --- 우선순위: 손절이 가드보다 먼저 ---
 sP = guard_strat(11, 10, -5.5, -1.0)
 put_pos(sP, code="G005", buy_price=10_000, now_dt=sP._now())
-sP.on_price_update("G005", 9_600)     # -4%
+sP.on_price_update("G005", int(10_000 * (1 + SM.STOP_LOSS_RATE)) - 1)  # 손절선 아래
 check("가드 발동 중에도 급락은 손절로 청산", sold(sP, "G005"))
 check("사유가 손절(가드 아님)",
       any("손절" in (r.get("exit_reason") or "") for r in _Repo.sells),
@@ -538,7 +544,8 @@ sG2.check_timeouts()
 check("13:00에도 계속 보유(손절선/14:50까지)", "H0" in sG2.holdings)
 
 sG3 = full_strat(13, 0, SM.MAX_HOLDINGS, kospi=-5.2, kosdaq=-1.0)
-sG3.on_price_update("H0", netpx(-3.5))
+# 손절선보다 1%p 더 깊게 — 상수가 바뀌어도 따라온다.
+sG3.on_price_update("H0", netpx(SM.STOP_LOSS_RATE * 100 - 1.0))
 check("가드 중에도 손절선 이탈은 손절", "H0" not in sG3.holdings)
 check("사유가 손절",
       any("손절" in (r.get("exit_reason") or "") for r in _Repo.sells))

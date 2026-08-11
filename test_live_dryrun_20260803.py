@@ -205,7 +205,7 @@ clock.set(9, 0, 5)
 check("09:00부터 phase 활성", s.get_current_phase() is not None)
 
 # 장중 실시간 편입 (08-01에 고친 type='02' 경로로 들어오는 종목)
-s.on_condition_hit("A003", "장중편입", cond_name="돌파자동매매용")
+s.on_condition_hit("A003", "장중편입", cond_name="돌파전")
 check("장중 실시간 편입도 pre-arm 됨", s.phase1b.is_watching("A003"))
 
 clock.set(9, 3, 0)
@@ -970,7 +970,7 @@ sS.holdings["ST1"] = {
     "warmup_until": cS.dt + timedelta(seconds=60),   # 워밍업 진행 중
     "entry_strength": 150.0, "highest_price": 10_000, "lowest_price": 10_000,
 }
-sS.on_price_update("ST1", 9_600)   # -4%
+sS.on_price_update("ST1", int(10_000 * (1 + SM.STOP_LOSS_RATE)) - 1)   # 손절선 아래
 check("워밍업 중에도 손절 발동", "ST1" not in sS.holdings)
 
 # (5) 점심 시간대 문턱이 원기준(3천만원) 유지
