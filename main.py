@@ -657,6 +657,71 @@ class TradingBot:
                 continue
             server_qty = server_info.get("qty", 0)
             tracked_qty = pos.get("qty", pos.get("buy_quantity", 0))
+
+            # (2026-08-11) 서버에서 실물을 **한 번이라도 확인**했다는 표식.
+            # `_release_ghost_position`이 '진짜 미체결'과 '사용자 수동매도'를
+            # 가르는 유일한 근거다 — 08-11에 사용자 매도 6건이 전부
+            # "미체결 포지션 정리"로 기록돼 실현손익 통계가 오염됐다.
+            if server_qty > 0:
+                pos["seen_on_server"] = True
+
+            # ── 수동 추가매수 합산 (2026-08-11 사용자 지정) ──────────────
+            # 서버 수량이 **늘었으면** 사용자가 HTS에서 직접 더 산 것이다.
+            # 예전엔 이 방향을 통째로 무시해서, 봇은 자기 수량만 팔고
+            # 추가분은 계좌에 남아 아무도 관리하지 않았다(손절·15:10 대상 밖).
+            # 평단은 키움이 이미 계산해 준 값(avg_price = pur_pric)을 쓴다 —
+            # 수동 체결가를 몰라도 된다.
+            elif server_qty > tracked_qty:
+                # ⚠️ 봇 자신의 분할 2차/추가매수가 체결됐는데 아직 기록 전인
+                #    15초 틈을 '수동매수'로 오인하면 안 된다. 두 가지로 막는다:
+                #    ① 되돌림 계획이 살아있으면(봇이 더 살 수 있는 상태) 보류
+                #    ② **2회 연속 같은 값**으로 관측될 때만 반영
+                if code in getattr(strat, "_entry_plans", {}):
+                    continue
+                prev = pos.get("_pending_qty_up")
+                if prev != server_qty:
+                    pos["_pending_qty_up"] = server_qty
+                    continue
+                pos.pop("_pending_qty_up", None)
+
+                avg = float(server_info.get("avg_price") or 0)
+                old_qty, old_avg = tracked_qty, pos.get("buy_price")
+                pos["qty"] = server_qty
+                if avg > 0:
+                    pos["buy_price"] = avg
+                    # 기준가가 바뀌면 본전스톱 상태를 재설정한다. 안 하면 옛
+                    # 평단 기준 고점이 남아, 평단이 **올라간** 경우 순손익이
+                    # 뚝 떨어져 본전스톱이 즉시 오발동한다.
+                    pos["breakeven_armed"] = False
+                    pos["breakeven_peak"] = 0.0
+                # ⚠️ origin_price는 **유지**한다 — 추가매수 최종손절(-6%)의
+                #    기준이 '원가'이기 때문이다(평단이 아니다).
+                name = pos.get("stock_name", code)
+                logger.warning(
+                    "[%s] %s 💰 수동 추가매수 감지 — %d주 -> %d주 / 평단 %s -> %s",
+                    code, name, old_qty, server_qty,
+                    f"{old_avg:,.0f}" if old_avg else "?",
+                    f"{avg:,.0f}" if avg else "(평단 미상, 유지)",
+                )
+                trade_id = pos.get("trade_id")
+                if trade_id and avg > 0:
+                    try:
+                        TradeRepository.update(trade_id, {
+                            "buy_price": avg,
+                            "buy_quantity": server_qty,
+                            "buy_amount": avg * server_qty,
+                        })
+                    except Exception:
+                        logger.warning("[%s] 수동 추가매수 DB 갱신 실패", code)
+                if send_telegram:
+                    send_telegram(
+                        f"💰 수동 추가매수 반영\n{name} ({code})\n"
+                        f"{old_qty}주 -> {server_qty}주 / 평단 "
+                        f"{avg:,.0f}원\n봇이 합산 수량으로 청산합니다.",
+                        target="order",
+                    )
+                continue
+
             if 0 < server_qty < tracked_qty:
                 pos["qty"] = server_qty
                 name = pos.get("stock_name", code)
