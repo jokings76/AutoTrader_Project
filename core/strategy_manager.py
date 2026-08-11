@@ -1071,6 +1071,14 @@ INDEX_GUARD_THRESHOLD = -5.0            # 코스피/코스닥 중 하나라도 �
 INDEX_GUARD_FROM = time(11, 0)          # 이 시각부터 감시(그 전 급락은 무시)
 INDEX_GUARD_BREAKEVEN_UNTIL = time(11, 30)  # 이때까지 본전 이상이면 청산
 INDEX_GUARD_FORCE_CLOSE = time(14, 50)  # 남은 보유분(본전 미만) 강제청산
+# (2026-08-12 사용자 지정) 위 14:50 강제청산을 **끈다** — 15:10 강제청산 폐지와
+# 세트다("어떤 경우도 시간 기반 자동청산 없음"). 지수가 무너진 날에도 손실
+# 확정은 사용자가 판단한다.
+# ⚠️ 11:30까지의 **본전 이상 청산(1단계)은 그대로 살아 있다** — 그건 이익
+#    구간에서만 도는 익절 계열이라 손실을 확정하지 않는다. 그것까지 끄려면
+#    아래 on_price_update의 `now_t < INDEX_GUARD_BREAKEVEN_UNTIL` 블록을 볼 것.
+# 롤백: True (그러면 order_manager.FORCE_CLOSE_ENABLED도 같이 볼 것)
+INDEX_GUARD_FORCE_CLOSE_ENABLED = False
 
 # 청산 정책 (EXIT_POLICY 딕셔너리에서 가져옴)
 TAKE_PROFIT_CAP = EXIT_POLICY["default"]["take_profit_cap"]
@@ -1420,6 +1428,26 @@ AVG_DOWN_TRIGGER = 0.03            # 원가 대비 이만큼 하락하면 발동
 AVG_DOWN_MAX_AMOUNT = 2_000_000    # 종목당 총 매수금액 상한(원)
 AVG_DOWN_BLOCK_ON_INDEX_GUARD = True   # 지수 가드 발동 중 금지
 
+# ── 물타기 마감 시각 (2026-08-12 사용자 지정) ──────────────────────────
+# 🔴 08-12 실측: 컷오프가 없어서 **15:09:59에도 물타기가 발동**했다.
+#    그 시점의 물타기는 반등할 시간이 원리적으로 없어 왕복 수수료(0.23%)만
+#    확정하고, 15:10 강제청산이 살아 있던 시절엔 1분 뒤 그대로 팔렸다.
+#    -> 사용자 지정으로 **11:00까지만** 물타기한다.
+# ⚠️ 이 값은 '판정 시각'이다. 11:00 이전에 -3%를 찍었더라도 그 순간 다른
+#    안전게이트(MDD/지수가드)에 막혀 못 샀으면, 11:00을 넘긴 뒤엔 안 산다.
+# 롤백: time(15, 10) 으로 두면 08-11까지의 '시간 제한 없음'과 같아진다.
+AVG_DOWN_CUTOFF = time(11, 0)
+
+# 물타기 주문이 **거부**됐을 때의 재시도 상한 (2026-08-12 결함 수정).
+# 🔴 실측: 상한이 없어서 50틱을 흘리면 주문을 **50회** 냈다. 예수금 부족처럼
+#    지속되는 거부에서는 이 경로가 매 체결틱마다 주문을 내보내 키움 REST가
+#    429로 막히고, 그러면 **매도 주문까지 밀린다**(매수 실패가 매도 사고로
+#    번지는 형태). 되돌림 계획엔 120초 타임아웃이, rescue-add엔 '실패 시
+#    손절로 수렴'이 있는데 물타기만 빠져나갈 구멍이 없었다.
+# 포기해도 안전하다 — 물타기를 못 할 뿐, 손절·최종선은 그대로 받는다.
+AVG_DOWN_MAX_RETRY = 3
+AVG_DOWN_RETRY_COOLDOWN_SEC = 5.0   # 재시도 사이 최소 간격(초)
+
 # ── 손실청산 종목의 조건부 재진입 (2026-08-05 사용자 지정) ──────────────
 # 07-29에 '손실청산 = 당일 영구차단'을 만든 건 스피어가 3연속 재진입으로
 # -199,290원을 낸 사고 때문이었다. 그 규칙은 유지하되, **훨씬 큰 대금이
@@ -1566,6 +1594,25 @@ MAX_SELL_FAIL = 3
 REBUY_COOLDOWN = timedelta(minutes=COMMON["rebuy_cooldown_min"])
 RESTART_WARMUP = timedelta(seconds=60)
 BUY_WARMUP = timedelta(seconds=COMMON["buy_warmup_sec"])
+
+# ── 오버나이트 보유분 격리 (2026-08-12 사용자 지정) ─────────────────────
+# 15:10 강제청산을 폐지하면서(order_manager.FORCE_CLOSE_ENABLED=False) 보유분이
+# 장을 넘긴다. 그 종목을 **다음 기동 때 봇이 다시 관리하면 안 된다**는 것이
+# 사용자 지정이다("manual로 격리 — 내가 직접 처리").
+#
+# 🔴 판별 기준은 **buy_time의 날짜**다. 장중 재시작(08-10에 실제로 있었다)에는
+#    당일 매수분을 그대로 복원해야 하므로, '전일 이전'만 격리한다.
+# 🔴 격리는 DB status를 'manual'로 바꾸는 것이다 — `find_holdings()`가
+#    'holding'만 조회하므로 이후 어떤 경로로도 복원되지 않고, 손절·익절·
+#    슬롯 계산 어디에도 안 걸린다(주성/다스코/금호타이어와 같은 취급).
+# 🔴 격리분은 **슬롯을 쓰지 않는다** — 당일 신규 매매에 영향이 없다. 대신
+#    실계좌엔 남아 있으므로 '⚠️ 미관리 잔고 감지' 알림이 종목당 1회 온다(정상).
+#
+# ⚠️ 사용자가 정리하지 않으면 **매일 쌓인다**. 예수금이 잠겨 신규 매수가
+#    막히는 것이 첫 증상이다. 현황은 `python manual_position_tool.py list`,
+#    매도 후 기록은 `manual_position_tool.py close <코드> <체결가>`.
+# 롤백: False -> 08-11까지처럼 전일 보유분도 봇이 그대로 이어받는다.
+OVERNIGHT_RESTORE_AS_MANUAL = True
 
 # 금액 + 슬롯 (1A/Pullback/1L/1B 각각 자체 상한 3 + 전체 합산 MAX_HOLDINGS=6 공유)
 POSITION_AMOUNT = COMMON["position_amount"]
@@ -2506,7 +2553,30 @@ class StrategyManager:
     # ========================================
     def _restore_from_db(self):
         warmup_until = self._now() + RESTART_WARMUP
+        today = self._now().date()
+        carried = []            # 오버나이트 -> manual 격리분
         for h in TradeRepository.find_holdings():
+            # ── 오버나이트 보유분은 봇 관리에서 뺀다 (2026-08-12 사용자 지정) ──
+            # 15:10 강제청산 폐지의 짝. 판별은 buy_time의 **날짜**라
+            # 장중 재시작(당일분)은 종전대로 정상 복원된다.
+            _bt = h.get("buy_time")
+            if OVERNIGHT_RESTORE_AS_MANUAL and _bt and _bt.date() < today:
+                try:
+                    TradeRepository.update(h["id"], {"status": "manual"})
+                    carried.append(
+                        f"{h['stock_name']}({h['stock_code']}) "
+                        f"{int(h['buy_quantity'])}주 @{float(h['buy_price']):,.0f}"
+                    )
+                except Exception:
+                    # 격리에 실패해도 **복원하지 않는다** — 봇이 건드리지 않는
+                    # 쪽이 안전하고, DB가 'holding'으로 남으면 다음 기동에
+                    # 다시 시도한다(중복매수 가드에도 계속 걸린다).
+                    logger.exception(
+                        "[%s] 오버나이트 격리 실패 — 복원하지 않고 넘어간다",
+                        h.get("stock_code"),
+                    )
+                continue
+
             buy_price = float(h["buy_price"])
             self.holdings[h["stock_code"]] = {
                 "trade_id": h["id"],
@@ -2541,6 +2611,22 @@ class StrategyManager:
             int(RESTART_WARMUP.total_seconds()),
             blocked, cooldowns, counts,
         )
+
+        # 오버나이트 격리분 보고 (2026-08-12) — 조용히 빠지면 사용자가
+        # "봇이 내 종목을 왜 안 파나"를 알 수 없다.
+        if carried:
+            logger.warning(
+                "🌙 오버나이트 보유 %d종목을 manual로 격리 "
+                "(봇 관리 제외 — 손절·익절 대상 아님): %s",
+                len(carried), " / ".join(carried),
+            )
+            _notify(
+                f"🌙 오버나이트 보유 {len(carried)}종목 격리\n"
+                + "\n".join(carried)
+                + "\n\n봇 관리에서 제외했습니다(손절·익절 안 함).\n"
+                  "직접 매도하신 뒤 manual_position_tool.py close 로 기록하세요.",
+                target="signal",
+            )
 
     def _restore_daily_risk_state(self) -> tuple[int, int, int]:
         """당일 리스크 상태(손절차단/쿨다운/재매수횟수) DB 재구성 (2026-07-31).
@@ -6304,10 +6390,12 @@ class StrategyManager:
                         f"{INDEX_GUARD_BREAKEVEN_UNTIL.strftime('%H:%M')} 이전)",
                     )
                     return
-            elif now_t >= INDEX_GUARD_FORCE_CLOSE:
+            elif INDEX_GUARD_FORCE_CLOSE_ENABLED and now_t >= INDEX_GUARD_FORCE_CLOSE:
                 # 2단계: 회복 기회를 다 주고도 남은 보유분은 손익 무관 강제청산.
                 # 정규 강제청산(15:10)보다 앞당겨 지수 약세일 때 오버나이트
                 # 리스크를 줄인다.
+                # 🔴 (2026-08-12) 사용자 지정으로 **OFF**. 시간 기반 자동청산을
+                #    전면 제거했으므로 이 경로도 함께 닫는다.
                 self._execute_sell(
                     stock_code, current_price,
                     f"지수 가드 강제청산 "
@@ -6600,6 +6688,21 @@ class StrategyManager:
             if current_price > origin * (1.0 - AVG_DOWN_TRIGGER):
                 return          # 아직 -3%까지 안 밀렸다
 
+            # 주문 거부 후 쿨다운 (2026-08-12) — 아래 미체결 분기가 세운다.
+            _retry_at = pos.get("avg_down_retry_at")
+            if _retry_at and self._now() < _retry_at:
+                return
+
+            # 🔴 물타기 마감 시각 (2026-08-12 사용자 지정, 11:00).
+            #    늦게 물타면 반등할 시간이 없어 수수료만 확정된다.
+            if self._now().time() >= AVG_DOWN_CUTOFF:
+                pos["avg_down_done"] = True     # 다시 판정하지 않는다
+                logger.info(
+                    "[%s] 물타기 생략: 마감 시각(%s) 경과",
+                    stock_code, AVG_DOWN_CUTOFF.strftime("%H:%M"),
+                )
+                return
+
             # 🔴 당일 매수분에만 — 재시작 복원분은 origin이 옛 값이라 무의미하고,
             #    사용자가 수동 처리하려던 종목을 봇이 2배로 불릴 수 있다.
             bt = pos.get("buy_time")
@@ -6649,7 +6752,25 @@ class StrategyManager:
 
             after_qty = int(pos.get("qty", pos.get("buy_quantity")) or 0)
             if after_qty <= before_qty:
-                logger.warning("[%s] 물타기 미체결(수량 불변) — 다음 틱에 재시도", stock_code)
+                # 🔴 (2026-08-12) 재시도에 상한·쿨다운을 둔다. 예전엔 조건 없이
+                #    return했는데, 예수금 부족처럼 **지속되는 거부**에서 이 경로가
+                #    매 체결틱마다 주문을 내보냈다(실측 50틱 -> 50회).
+                n = int(pos.get("avg_down_fail", 0)) + 1
+                pos["avg_down_fail"] = n
+                if n >= AVG_DOWN_MAX_RETRY:
+                    pos["avg_down_done"] = True     # 포기 — 손절 경로가 받는다
+                    logger.warning(
+                        "[%s] 물타기 %d회 연속 미체결 -> 포기 "
+                        "(이후 손절/최종선이 정상 작동)", stock_code, n,
+                    )
+                else:
+                    pos["avg_down_retry_at"] = (
+                        self._now() + timedelta(seconds=AVG_DOWN_RETRY_COOLDOWN_SEC)
+                    )
+                    logger.warning(
+                        "[%s] 물타기 미체결(수량 불변) — %.0f초 후 재시도 %d/%d",
+                        stock_code, AVG_DOWN_RETRY_COOLDOWN_SEC, n, AVG_DOWN_MAX_RETRY,
+                    )
                 return
 
             # 1회로 못박고, 기준이 바뀌었으니 본전스톱 상태를 재설정한다.

@@ -56,7 +56,9 @@ SM.AVG_DOWN_ENABLED = False
 import core.daily_backtest as DB                # noqa: E402
 import core.slot_replacement as SR              # noqa: E402
 from core.strategy.portfolio_optimizer import DEFAULT_BASE_AMOUNT   # noqa: E402
-from core.order_manager import BUY_AMOUNT_PER_STOCK, FORCE_CLOSE_TIME  # noqa: E402
+from core.order_manager import (  # noqa: E402
+    BUY_AMOUNT_PER_STOCK, FORCE_CLOSE_TIME, FORCE_CLOSE_ENABLED,
+)
 from utils.price_helper import add_ticks, get_tick_size             # noqa: E402
 
 check("import main 성공", True)
@@ -637,6 +639,22 @@ if _doc:
                    f"{SM.AVG_DOWN_MAX_AMOUNT} {SM.AVG_DOWN_BLOCK_ON_INDEX_GUARD}")
     doc_has("확인전용", f"확인전용 {tuple(SM.CONFIRM_ONLY_CONDITIONS)}")
     doc_has("숙성조건식별", f"숙성조건식별 {SM.MIN_ENTRY_DELAY_SEC_BY_COND}")
+
+    # (2026-08-12 신규) 🔴 **시간 기반 자동청산 전면 폐지**와 물타기 컷오프.
+    #    이 셋은 "봇이 언제 파는가"를 통째로 바꾼 축이라, 문서와 어긋나면
+    #    장 마감 후 "왜 안 팔렸지?"를 판단할 수 없다.
+    doc_has("물타기컷오프", f"물타기컷오프 {SM.AVG_DOWN_CUTOFF} "
+                        f"{SM.AVG_DOWN_MAX_RETRY} {SM.AVG_DOWN_RETRY_COOLDOWN_SEC}")
+    doc_has("강제청산", f"강제청산 {FORCE_CLOSE_ENABLED} {FORCE_CLOSE_TIME}")
+    doc_has("지수가드강제청산", f"지수가드강제청산 {SM.INDEX_GUARD_FORCE_CLOSE_ENABLED}")
+    doc_has("오버나이트격리", f"오버나이트격리 {SM.OVERNIGHT_RESTORE_AS_MANUAL}")
+
+    # 🔴 불변식 — 시간 기반 청산이 전부 닫혔다면, 문서의 청산표도 그렇게
+    #    말해야 한다. 하나만 되살리고 문서를 안 고치면 여기서 잡힌다.
+    if not (FORCE_CLOSE_ENABLED or SM.INDEX_GUARD_FORCE_CLOSE_ENABLED):
+        check("문서가 '시간 기반 자동청산 없음'을 명시",
+              "시간 기반 자동청산" in _doc,
+              "❌ 강제청산을 껐으면 문서 청산표/요약도 갱신할 것")
 
     # (2026-08-06 신규) [B][C][D]
     doc_has("등락률하한", f"등락률하한 {SM.MIN_ENTRY_CHANGE_PCT}")

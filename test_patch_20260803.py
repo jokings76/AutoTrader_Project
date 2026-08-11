@@ -431,13 +431,28 @@ put_pos(sM, code="G003", buy_price=10_000, now_dt=sM._now())
 sM.on_price_update("G003", 9_900)
 check("13:00 손실분은 아직 보유(14:50까지 회복 대기)", not sold(sM, "G003"))
 
+# (2026-08-12 사양 변경) 시간 기반 자동청산 전면 OFF — 14:50 강제청산도 껐다.
+# 손실 확정은 사용자가 판단한다(오버나이트 허용).
 sF = guard_strat(14, 50, -5.5, -1.0)
 put_pos(sF, code="G004", buy_price=10_000, now_dt=sF._now())
 sF.on_price_update("G004", 9_900)
-check("14:50 강제청산 발동", sold(sF, "G004"))
-check("사유가 '지수 가드 강제청산'",
-      any("지수 가드 강제청산" in (r.get("exit_reason") or "") for r in _Repo.sells),
-      str([r.get("exit_reason") for r in _Repo.sells])[:60])
+check("🆕 14:50 강제청산 **안 함** (08-12 OFF, 오버나이트로 간다)",
+      not sold(sF, "G004"))
+
+# 🔴 롤백 경로 — 상수를 되살리면 그대로 동작해야 한다. 끈 기능의 배선
+#    테스트를 지우면 되살릴 때 검증이 없어 그대로 사고가 난다(08-10 교훈).
+_sv_gfc = SM.INDEX_GUARD_FORCE_CLOSE_ENABLED
+SM.INDEX_GUARD_FORCE_CLOSE_ENABLED = True
+try:
+    sF2 = guard_strat(14, 50, -5.5, -1.0)
+    put_pos(sF2, code="G004", buy_price=10_000, now_dt=sF2._now())
+    sF2.on_price_update("G004", 9_900)
+    check("롤백(True): 14:50 강제청산 발동", sold(sF2, "G004"))
+    check("롤백(True): 사유가 '지수 가드 강제청산'",
+          any("지수 가드 강제청산" in (r.get("exit_reason") or "") for r in _Repo.sells),
+          str([r.get("exit_reason") for r in _Repo.sells])[:60])
+finally:
+    SM.INDEX_GUARD_FORCE_CLOSE_ENABLED = _sv_gfc
 
 # --- 우선순위: 손절이 가드보다 먼저 ---
 sP = guard_strat(11, 10, -5.5, -1.0)
@@ -552,7 +567,7 @@ check("사유가 손절",
 
 sG4 = full_strat(14, 50, SM.MAX_HOLDINGS, kospi=-5.2, kosdaq=-1.0)
 sG4.on_price_update("H0", netpx(-1.0))
-check("14:50 강제청산", "H0" not in sG4.holdings)
+check("🆕 14:50에도 보유 유지 — 시간 기반 청산 폐지 (08-12)", "H0" in sG4.holdings)
 
 # 임계 미달이면 일반장과 동일 — 정체·시간정리가 꺼졌으므로(08-10) 이 블록에서만 켠다.
 # 여기서 보려는 건 '가드 임계 미달이면 일반장 규칙을 그대로 탄다'는 배선이다.

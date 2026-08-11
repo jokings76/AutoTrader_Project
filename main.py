@@ -12,7 +12,9 @@ from datetime import datetime, timedelta
 from api.auth import get_access_token, send_telegram
 from api.kiwoom_rest import KiwoomREST
 from api.kiwoom_ws import KiwoomWS
-from core.order_manager import OrderManager, FORCE_CLOSE_TIME, MAX_POSITIONS
+from core.order_manager import (
+    OrderManager, FORCE_CLOSE_TIME, FORCE_CLOSE_ENABLED, MAX_POSITIONS,
+)
 from core.condition_manager import ConditionManager
 from core.phase1b_controller import Phase1BController
 from core.strategy_manager import StrategyManager
@@ -884,6 +886,20 @@ class TradingBot:
                 logger.exception("토큰 갱신 예외")
 
     async def task_force_close_watcher(self):
+        # ── 시간 기반 자동청산 전면 OFF (2026-08-12 사용자 지정) ──────────
+        # 🔴 완료 플래그를 **즉시** 세운다. task_auto_shutdown이
+        #    `_force_close_done`을 종료 조건으로 보기 때문에, 그냥 return만
+        #    하면 이 값이 영영 False로 남아 봇이 15:40 하드 폴백까지 살아
+        #    있는다(정기보고·WS재연결이 그때까지 계속 돈다).
+        if not FORCE_CLOSE_ENABLED:
+            self._force_close_done = True
+            logger.info(
+                "⏸ 15:10 강제청산 **비활성** (FORCE_CLOSE_ENABLED=False) — "
+                "보유분은 가격 기반 청산(손절/익절/본전스톱/VI)에만 반응하고, "
+                "남은 종목은 오버나이트로 넘어간다. 다음 기동 때 manual로 격리된다."
+            )
+            return
+
         initial_skip = datetime.now().strftime("%H:%M") >= FORCE_CLOSE_TIME
         if initial_skip:
             logger.info(
