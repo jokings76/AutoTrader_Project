@@ -753,11 +753,34 @@ MIN_ENTRY_DELAY_SEC = 60.0
 #    원익홀딩스 -3.23% / 후성 +2.27%로 **합계 -0.96%라 오히려 도움**이었다
 #    (즉 이 완화가 손해일 수도 있다). 되돌리려면 이 dict를 비우면 된다.
 #
-# ⚠️ 복합 편입(예: "돌파자동매매용+주도주상위")이면 **가장 짧은 값**을 쓴다.
+# ⚠️ 복합 편입(예: "돌파전+주도주상위")이면 **가장 짧은 값**을 쓴다.
 #    돌파가 섞여 있으면 그 종목도 개장 직후에 움직인다고 보는 것이다.
+#
+# (2026-08-11) 조건식 이름이 `돌파자동매매용` -> `돌파전`으로 바뀌어 키만 갱신했다.
+#   ⚠️ 30초는 **유지**다(사용자 지정 "돌파전후 비교 매수 전략으로 바꿨으니 두고보자").
+#      08-11에 5일 실측으로 "숙성이 길수록 낫다"(0초 -0.804%p / 60초 -0.421%p /
+#      180초 +0.012%p, 단조)가 나왔지만, 그 데이터는 **옛 조건식** 기준이다.
+#      새 `돌파전`은 더 일찍 터지도록 설계했으므로 30초가 맞을 수도 있다.
+#      새 조건식의 편입 시각 분포를 하루 본 뒤 재판단할 것.
 MIN_ENTRY_DELAY_SEC_BY_COND = {
-    "돌파자동매매용": 30.0,
+    "돌파전": 30.0,
 }
+
+# ══════════════════════════════════════════════════════════════════
+# 확인 전용 조건식 (2026-08-11 신설, 사용자 지정)
+# ══════════════════════════════════════════════════════════════════
+# `돌파후`는 "고가 돌파가 이미 일어난 뒤"를 잡는 식이라 **단독으로는 사면
+# 안 된다**(정의상 고점 이후). 대신 다른 식과 겹치면 '확인'으로 쓴다.
+#
+# [근거] 08-11 실거래(수동매도 제외):
+#     돌파 단독      4건 · 손절 3 · -35,802원
+#     돌파+주도      2건 · 손절 0 · +26,180원
+#   n이 작지만 방향이 08-06 이후 누적 관찰과 일치한다.
+#
+# 🔴 **`source_flags`에서 빼는 것만으로는 못 막는다.** `resolve_strategy`가
+#    "둘 다 아님"을 **"1A"로 폴백**하기 때문에, 확인전용 단독 종목이 그대로
+#    1A 매수 후보가 된다. 반드시 `_confirm_only_reject`로 명시 차단할 것.
+CONFIRM_ONLY_CONDITIONS = ("돌파후",)
 
 # ══════════════════════════════════════════════════════════════════
 # 일봉 눌림 태그 (2026-08-07 신설) — 🔴 **관측 전용. 매매 판정에 쓰지 않는다.**
@@ -1350,10 +1373,52 @@ RESCUE_ADD_MAX_PER_DAY = 2
 # 정확한 구현이다.
 #
 # **추가되는 리스크는 정확히 이만큼이다**: 구조받지 못한 포지션의 손절이
-# -3%가 아니라 최대 -RESCUE_ADD_OBSERVE_FLOOR(-4.5%)에서 난다. 관찰은
+# 손절선이 아니라 최대 -RESCUE_ADD_OBSERVE_FLOOR에서 난다. 관찰은
 # ①②가 이미 성립한 경우에만 시작하므로 아무 종목에나 걸리지 않는다.
+#
+# 🔴 (2026-08-11) 손절선이 -3% -> -4.5%로 깊어지면서 이 값도 같이 내렸다
+#    (0.045 -> 0.055). **안 내리면 관찰 창이 0이 되어 기능이 죽는다** —
+#    손절선에 닿는 순간이 곧 관찰 바닥이라 `_rescue_gate`가 시작하자마자
+#    "sell"로 떨어진다. 위 주석이 경고하는 바로 그 실패 모드다.
+#    ⚠️ 대가: 미구조분 최대손실이 -4.5%가 아니라 **-5.5%**가 된다.
+#       사용자가 이 대가를 알고 선택했다("리스크는 수동으로 관리").
+#    ⚠️ 불변식: 손절선(4.5%) < 이 값(5.5%) < RESCUE_ADD_FINAL_STOP(6.0%).
+#       최종선과의 여유가 1.5%p -> **0.5%p**로 좁아졌다.
 RESCUE_ADD_OBSERVE_SEC = 15.0
-RESCUE_ADD_OBSERVE_FLOOR = 0.045
+RESCUE_ADD_OBSERVE_FLOOR = 0.055
+
+# ══════════════════════════════════════════════════════════════════
+# -3% 물타기 (2026-08-11 신설, 사용자 지정)
+# ══════════════════════════════════════════════════════════════════
+# "매수 -3% 오면 무조건 동일주식수 매수". 위 rescue와 달리 **조건이 없다** —
+# 거래대금·강도·반등확증을 보지 않고 가격만 본다.
+#
+# 🔴 **백테스트는 판정 불가로 나왔다. 사용자 지시로 적용한다.**
+#   실전 5일 133건(수동매도 제외) 금액 기준:
+#     비관(분 안 저가 우선): OFF +25,313원 -> ON +54,519원  (차이 +29,206)
+#     낙관(분 안 고가 우선): OFF -203,306원 -> ON -296,875원 (차이 -93,569)
+#     -> **가정만 바꿔도 부호가 뒤집힌다.**
+#   그 외 부정 신호 3가지:
+#     · 날짜별 자본효율 우세 ON 3일 / OFF 2일 (동전던지기)
+#     · 이익이 상위 3건에 의존 — 그 3건 빼면 **-249,832원**
+#     · 08-06형 하락일엔 손실이 정확히 2배 (-84,284원 추가)
+#   -> `[물타기]` 태그와 카운터를 남겨 **실거래로 채점**할 것.
+#
+# [설계 이유]
+#  · 기준은 **origin_price**(최초 진입가)다. 평단 기준이면 물타서 평단이
+#    내려가고 또 -3%가 되어 **무한 반복**한다.
+#  · 포지션당 1회. 총 매수금액은 AVG_DOWN_MAX_AMOUNT로 하드캡.
+#  · 진입 게이트(등락률·VWAP·VI·숙성·확인전용)는 우회한다 — "무조건"이므로.
+#  · 🔴 다만 **MDD 일손실 차단과 지수 가드는 존중**한다(사용자 지정).
+#    서킷브레이커를 우회하면 나쁜 날 손실이 무제한으로 커진다.
+#  · 🔴 **당일 매수분에만** 적용한다. 재시작으로 DB에서 복원된 포지션은
+#    origin_price가 옛날 값이라 -3% 판정이 무의미하고, 사용자가 수동으로
+#    처리하려던 종목을 봇이 멋대로 2배로 불릴 수 있다.
+# 롤백: AVG_DOWN_ENABLED = False
+AVG_DOWN_ENABLED = True
+AVG_DOWN_TRIGGER = 0.03            # 원가 대비 이만큼 하락하면 발동
+AVG_DOWN_MAX_AMOUNT = 2_000_000    # 종목당 총 매수금액 상한(원)
+AVG_DOWN_BLOCK_ON_INDEX_GUARD = True   # 지수 가드 발동 중 금지
 
 # ── 손실청산 종목의 조건부 재진입 (2026-08-05 사용자 지정) ──────────────
 # 07-29에 '손실청산 = 당일 영구차단'을 만든 건 스피어가 3연속 재진입으로
@@ -1472,12 +1537,24 @@ STAGNANT_EXIT_ENABLED = False
 #    매 틱 다시 재면 손절선이 살아 움직여 판정이 흔들리고, on_price_update가
 #    핫패스라 비용도 든다. 재시작으로 복원된 포지션은 값이 없으므로 고정값.
 # ⚠️ 틱이 MIN_TICKS 미만이면 고정 STOP_LOSS_RATE — '모름'이 손절을 넓히면 안 된다.
-# 롤백: STOP_LOSS_VOL_ENABLED = False -> 전 종목 고정 -3%.
+# 롤백: STOP_LOSS_VOL_ENABLED = False -> 전 종목 고정 STOP_LOSS_RATE.
+#
+# 🔴 (2026-08-11 사용자 지정) 하한을 -2.5% -> **-4.5%**로 넓혔다.
+#    근거: 08-11 손절 9건 중 **6건이 5분 이내**(중앙값 2.6분, 최단 30초)였고,
+#    손절된 5종목(에스피지·대원전선·KBI메탈·제이아이테크·금강철강)이 **전부
+#    22~26분 안에 다시 무장**했다 = 노이즈에 털리고 되돌아온 것이다.
+#    그날 손절 9건 중 -4.5%를 넘긴 건 STX그린로지스(-5.65%) 하나뿐이라,
+#    이 값이면 8건이 살아남았다.
+#    ⚠️ 실측상 **74%가 하한(-4.5%)에 붙는다**(아카이브 11일 2,996 시점).
+#       즉 종목별 차등이 대부분 사라지고 사실상 '고정 -4.5% + 변동성 큰 종목만
+#       -5.5%'로 수렴한다. 평균 손절폭 -3.54% -> -4.71%.
+#    ⚠️ **RESCUE_ADD_OBSERVE_FLOOR(0.055)와 세트다.** 손절선이 관찰 바닥과
+#       같아지면 관찰 창이 0이 되어 '손절 대신 추가매수'가 죽는다.
 STOP_LOSS_VOL_ENABLED = True
 STOP_LOSS_VOL_WINDOW_SEC = 120.0   # 고저폭을 재는 창(TradeFlowTracker 버퍼와 동일)
 STOP_LOSS_VOL_MIN_TICKS = 20       # 이보다 적으면 판단 불가 -> 고정값
 STOP_LOSS_VOL_MULT = 1.5           # 손절폭 = 고저폭% x 이 배수
-STOP_LOSS_VOL_MIN = -0.025         # 가장 타이트해도 -2.5%
+STOP_LOSS_VOL_MIN = -0.045         # 가장 타이트해도 -4.5% (08-11: -2.5%에서 확대)
 STOP_LOSS_VOL_MAX = -0.055         # 가장 넓어도 -5.5%
 
 # 익절 후 재매수 상한 (2026-07-30 사용자 지정) — 손절 종목은 이미 당일 전면
@@ -1714,6 +1791,9 @@ class StrategyManager:
         self._buy_success_count = 0
         # 손절 대신 추가매수(Rescue Add) 당일 발동 횟수 (2026-08-05)
         self._rescue_count_today = 0
+        # -3% 물타기 당일 발동 횟수 (2026-08-11). 한도는 없고 **관측용**이다 —
+        # 백테스트가 판정 불가라 실거래로 채점해야 한다.
+        self._avg_down_count_today = 0
         # 손실청산 후 재진입을 이미 쓴 종목 (종목당 1회, 2026-08-05)
         self._rebuy_after_loss_used: dict[str, bool] = {}
         # MDD 일손실 차단 (실현손익 기준 -3%)
@@ -1808,11 +1888,42 @@ class StrategyManager:
         (2026-08-01) 중복 편입 종목의 시간대별 전략 전환을 위해 분리했다.
         기존엔 "눌림목자동 in cond_name" 하나로만 봤는데, 그러면 중복 종목이
         시각과 무관하게 항상 Pullback으로 가버려 오전 모멘텀 구간을 못 쓴다.
+
+        (2026-08-11) `돌파자동매매용` -> `돌파전`. `돌파후`는 **여기에 넣지
+        않는다** — 확인 전용이라 단독으로는 매수 소스가 아니다. 다만 그것만으로는
+        차단되지 않으므로(resolve_strategy가 "1A"로 폴백) `_confirm_only_reject`가
+        따로 막는다. 두 곳을 같이 봐야 한다.
         """
         cn = cond_name or ""
-        has_1a = ("주도주상위" in cn) or ("돌파자동매매용" in cn)
+        has_1a = ("주도주상위" in cn) or ("돌파전" in cn)
         has_pb = "눌림목자동" in cn
         return has_1a, has_pb
+
+    @staticmethod
+    def _confirm_only_reject(cond_name: str) -> Optional[str]:
+        """확인 전용 조건식**만**으로 편입된 종목인가 (2026-08-11 신설).
+
+        None이면 통과, 문자열이면 탈락 사유. `_entry_change_reject`와 같은
+        규약이고, 같은 자리에서 불린다.
+
+        🔴 왜 필요한가: `resolve_strategy`는 1A·눌림 어느 쪽도 아니면 **"1A"로
+        폴백**한다(기존 규약). 그래서 `돌파후` 단독 종목은 source_flags가 전부
+        False여도 그대로 1A 매수 후보가 된다. 이 함수가 유일한 차단점이다.
+
+        복합이면 통과한다 — "돌파전+돌파후", "주도주상위+돌파후"는 정상 매수다.
+        조건명을 모르면(빈 문자열) 통과 — 기존 '모름은 매수를 막지 않는다' 규약.
+        """
+        cn = (cond_name or "").strip()
+        if not cn:
+            return None
+        parts = [p.strip() for p in cn.replace("+", ",").split(",") if p.strip()]
+        if not parts:
+            return None
+        if all(any(c in p for c in CONFIRM_ONLY_CONDITIONS) for p in parts):
+            return (
+                f"확인 전용 조건식 단독 편입 ({cn}) — 다른 검색식과 겹칠 때만 매수"
+            )
+        return None
 
     @classmethod
     def resolve_strategy(cls, cond_name: str, now_t) -> str:
@@ -1940,29 +2051,41 @@ class StrategyManager:
         self._entry_plans.pop(stock_code, None)
         name = pos.get("stock_name", stock_code)
 
+        # ── 수동매도 vs 진짜 미체결 (2026-08-11 신설) ──────────────────
+        # 서버 잔고에서 이 종목을 **qty>0으로 본 적이 있으면** 체결은 됐고
+        # 그 뒤 사용자가 HTS에서 판 것이다. 한 번도 못 봤으면 진짜 미체결.
+        # 08-11에 사용자 매도 6건이 전부 "미체결"로 기록돼 실현손익 통계와
+        # MDD 일손실 계산이 오염됐다(전부 손익 0으로 기록됨).
+        was_filled = bool(pos.get("seen_on_server"))
+        kind = "수동 매도 정리" if was_filled else "미체결 포지션 정리"
+        icon = "🧾" if was_filled else "🧹"
+        tail = ("사용자가 직접 매도한 것으로 보입니다(체결 이력 확인됨). "
+                "실제 손익은 HTS 기준입니다."
+                if was_filled else "계좌에 실물이 없어 슬롯을 반환했습니다.")
+
         trade_id = pos.get("trade_id")
         if trade_id:
             try:
-                # 실제 체결이 없었으므로 손익 0으로 닫는다(매수가 = 매도가).
+                # ⚠️ 어느 쪽이든 실제 체결가를 모르므로 매수가로 닫는다(손익 0).
+                #    사유 문구만 갈라 사후 분석에서 구분되게 한다.
                 TradeRepository.update_sell(
                     trade_id,
                     sell_price=pos.get("buy_price", 0),
                     sell_quantity=pos.get("buy_quantity", 0),
-                    exit_reason=f"미체결 포지션 정리 ({why})",
+                    exit_reason=f"{kind} ({why})",
                 )
             except Exception:
-                logger.exception("[%s] 유령 포지션 DB 정리 실패", stock_code)
+                logger.exception("[%s] 포지션 DB 정리 실패", stock_code)
 
         logger.warning(
-            "[%s] %s 🧹 미체결 포지션 정리 — %s (슬롯 반환, DB 종료)",
-            stock_code, name, why,
+            "[%s] %s %s %s — %s (슬롯 반환, DB 종료)",
+            stock_code, name, icon, kind, why,
         )
         SystemEventRepository.log(
-            "GHOST_POSITION", f"{stock_code} 미체결 포지션 정리: {why}", "WARNING"
+            "GHOST_POSITION", f"{stock_code} {kind}: {why}", "WARNING"
         )
         _notify(
-            f"🧹 미체결 포지션 정리\n{name} ({stock_code})\n"
-            f"사유: {why}\n계좌에 실물이 없어 슬롯을 반환했습니다."
+            f"{icon} {kind}\n{name} ({stock_code})\n사유: {why}\n{tail}"
         )
 
     def _burst_wave_count(self, stock_code: str) -> int:
@@ -2269,7 +2392,10 @@ class StrategyManager:
         (주도주상위가 1A의 주 소스이므로 먼저 확인)
         """
         cn = cond_name or ""
-        for name in ("주도주상위", "돌파자동매매용", "눌림목자동"):
+        # (2026-08-11) 돌파자동매매용 -> 돌파전. `돌파후`도 키 후보에 넣되
+        # **순서상 마지막**이다 — 확인 전용이라 단독 매수는 없고, 복합이면
+        # 앞의 주 소스가 대표값이 되는 게 맞다.
+        for name in ("주도주상위", "돌파전", "눌림목자동", "돌파후"):
             if name in cn:
                 return COND_PERF_PREFIX + name
         return COND_PERF_PREFIX + "기타"
@@ -2565,6 +2691,7 @@ class StrategyManager:
             # (매수를 덜 하는 보수적 방향이라 사고는 아니었다).
             self._priority_upgrades_today = 0   # 우선순위 교체 일일 한도
             self._rescue_count_today = 0        # 손절대신 추가매수 일일 한도
+            self._avg_down_count_today = 0      # -3% 물타기 발동 횟수(관측용)
             self._burst_waves.clear()           # 파동 순번도 '그날' 기준이다
 
     def risk_can_trade(self) -> bool:
@@ -3140,7 +3267,7 @@ class StrategyManager:
             t = self.perf.tier(key)
             if t != "NEUTRAL":
                 tiers.append(f"{key}={t}")
-        for name in ("주도주상위", "돌파자동매매용", "눌림목자동"):
+        for name in ("주도주상위", "돌파전", "눌림목자동", "돌파후"):
             t = self.perf.tier(COND_PERF_PREFIX + name)
             if t != "NEUTRAL":
                 tiers.append(f"{name}={t}")
@@ -4658,7 +4785,9 @@ class StrategyManager:
         # 동안 묶인다(구버전은 _execute_buy 안에서 즉시 걸러져 pending이 바로
         # 회수됐다). 진입 자체를 막는 값싼 게이트는 **계획 생성 전에** 본다.
         chg_reject = (self._entry_change_reject(stock_code, sub_strategy, trigger_price)
-                      or self._entry_delay_reject(stock_code, now))
+                      or self._entry_delay_reject(stock_code, now)
+                      # (2026-08-11) 확인 전용 조건식 단독은 계획도 열지 않는다.
+                      or self._confirm_only_reject(cond_name))
         if chg_reject:
             self._note_reject(stock_code, chg_reject)
             logger.info(
@@ -5493,7 +5622,8 @@ class StrategyManager:
             return None
 
     def _execute_buy(self, stock_code, stock_name, phase, info, sub_strategy,
-                     size_frac: float = 1.0, add_to_position: bool = False):
+                     size_frac: float = 1.0, add_to_position: bool = False,
+                     bypass_entry_gates: bool = False, exact_quantity: int = 0):
         """매수 실행.
 
         size_frac: 이번에 살 비중(분할매수 트랜치). 1.0이면 기존과 동일.
@@ -5501,6 +5631,16 @@ class StrategyManager:
             갱신한다(분할매수 2차). False인데 이미 보유 중이면 호출부 실수이므로
             아무것도 하지 않는다 — 예전 코드는 holdings[code]를 통째로 덮어써서
             1차 매수분의 수량·평단가가 조용히 사라졌다.
+
+        bypass_entry_gates: (2026-08-11 신설) **진입 품질 게이트만** 건너뛴다 —
+            등락률 상·하한 / 진입 숙성 / 확인전용 조건식 / VI 상단 근접 / VWAP.
+            -3% 물타기가 "무조건"이어야 하기 때문이다.
+            🔴 **안전 게이트는 절대 안 건너뛴다**: 15:10 하드컷오프, 지수 급락
+            컷오프, 지수 하락 가드, 기준가 유효성. MDD 일손실 차단은 호출부가
+            본다(이 함수엔 없다). 이 구분이 무너지면 서킷브레이커가 무력해진다.
+        exact_quantity: >0이면 수량 계산을 건너뛰고 **이 수량 그대로** 산다.
+            물타기의 "동일 주식수"를 정확히 맞추기 위한 것으로, size_frac으로
+            역산하면 반올림 때문에 수량이 어긋난다.
         """
         current_price = info["current_price"]
         # 실시간 체결가가 있으면 그걸 기준가로 쓴다 (2026-08-01) — info의
@@ -5580,8 +5720,14 @@ class StrategyManager:
         # 되돌림 트랜치(_try_fill_entry_plan) / 손절대신 추가매수(_do_rescue_add) /
         # 즉시매수 폴백(_maybe_tick_entry, ENTRY_PULLBACK_ENABLED=False일 때만).
         # (2026-08-09: 오래 "3곳"으로 적혀 있었다. audit_deep [2]가 이제 수를 센다.)
-        chg_reject = (self._entry_change_reject(stock_code, sub_strategy, current_price)
-                      or self._entry_delay_reject(stock_code))
+        chg_reject = None if bypass_entry_gates else (
+            self._entry_change_reject(stock_code, sub_strategy, current_price)
+            or self._entry_delay_reject(stock_code)
+            # (2026-08-11) 확인 전용 조건식 단독 편입 차단 — 하드가드.
+            # resolve_strategy가 미분류를 "1A"로 폴백하므로, 이 한 줄이
+            # 없으면 `돌파후` 단독 종목이 그대로 매수된다.
+            or self._confirm_only_reject(cond_name_now)
+        )
         if chg_reject:
             logger.info(
                 "[%s] %s 매수 차단: %s [%s]",
@@ -5595,7 +5741,8 @@ class StrategyManager:
         # 호출부가 3곳(폴링 진입 / 되돌림·상승이탈 체결 / 손절대신 추가매수)이고,
         # 계획을 건 뒤 상승 이탈로 가격이 VI 쪽으로 붙는 경우가 있다.
         # (되돌림 체결은 가격이 내려간 것이라 VI에서 멀어지므로 걸리지 않는다.)
-        vi_block = self.vi_entry_block_reason(stock_code, current_price)
+        vi_block = (None if bypass_entry_gates
+                    else self.vi_entry_block_reason(stock_code, current_price))
         if vi_block:
             logger.info("[%s] %s 매수 차단: %s [%s]",
                         stock_code, stock_name, vi_block, sub_strategy)
@@ -5605,7 +5752,8 @@ class StrategyManager:
         # 세션 VWAP 필터 (2026-08-07, 기본 OFF) — 주문 직전 하드가드.
         # `_open_entry_plan`에서 이미 보지만 여기도 두는 이유는 `_execute_buy`
         # 호출부가 3곳이기 때문이다(폴링 / 되돌림·상승이탈 체결 / 손절대신 추가매수).
-        vwap_block = self.vwap_entry_reject(stock_code, current_price)
+        vwap_block = (None if bypass_entry_gates
+                      else self.vwap_entry_reject(stock_code, current_price))
         if vwap_block:
             logger.info("[%s] %s 매수 차단: %s [%s]",
                         stock_code, stock_name, vwap_block, sub_strategy)
@@ -5633,7 +5781,13 @@ class StrategyManager:
         # 분할매수 트랜치 — 전체 금액의 일부만 집행한다 (2026-08-04).
         if size_frac != 1.0:
             position_amount = position_amount * size_frac
-        quantity = int(position_amount // current_price)
+        if exact_quantity and exact_quantity > 0:
+            # (2026-08-11) 물타기 "동일 주식수" — size_frac 역산은 반올림으로
+            # 수량이 어긋나므로 수량을 직접 받는다.
+            quantity = int(exact_quantity)
+            position_amount = quantity * current_price
+        else:
+            quantity = int(position_amount // current_price)
         if quantity < 1:
             logger.warning("[%s] %s 수량 0 -> skip", stock_code, stock_name)
             return
@@ -6070,6 +6224,38 @@ class StrategyManager:
         # '체결강도·거래량처럼 매수 직후 흔들리는 지표로 성급히 판단하지
         # 않는 것'이지, **가격 기반 하드 손절까지 멈추는 것이 아니다.**
         # 급락은 매수 직후일수록 위험한데 정확히 그 구간이 무방비였다.
+        # ── -3% 물타기 (2026-08-11 사용자 지정) ────────────────────────
+        # 🔴 **손절 판정보다 먼저** 본다. 손절선(-4.5%)이 물타기 문턱(-3%)보다
+        #    깊으므로 순서가 뒤집히면 물타기가 영원히 안 돈다.
+        #    물타기가 체결되면 buy_price가 평단으로 바뀌므로, 아래 손절·익절
+        #    판정이 **새 평단 기준**으로 돌도록 값을 다시 읽는다.
+        if AVG_DOWN_ENABLED and not pos.get("avg_down_done"):
+            self._maybe_average_down(stock_code, pos, current_price)
+            if pos.get("avg_down_done") and pos.get("buy_price"):
+                buy_price = pos["buy_price"]
+                gross_rate = (current_price - buy_price) / buy_price
+                net_rate = gross_rate - ROUND_TRIP_COST
+
+        # ── 구조된 포지션의 최종 방어선 (원가 기준, 2026-08-11 위치 이동) ──
+        # 🔴 이 검사는 원래 `if gross_rate <= stop_rate:` **안**에 있었다.
+        #    손절선이 -3% -> -4.5%로 깊어지자 문제가 드러났다:
+        #      원가 10,000 -> -3% 물타기(9,700) -> 평단 9,850
+        #      평단 기준 손절선 = 9,850 x 0.955 = 9,407 = **원가 -5.93%**
+        #    즉 평단 손절선이 원가 -6%(9,400)보다 **아래**라, 안쪽에 있으면
+        #    최종 방어선이 영영 도달되지 않는다(수량이 2배인 채로 더 흘러내린다).
+        #    -> 밖으로 꺼내 **원가 -6%를 진짜 하드 백스톱**으로 만든다.
+        # 대상은 추가매수(rescue) **또는 물타기(avg_down)로 평단이 내려간** 포지션이다.
+        if pos.get("rescue_added") or pos.get("avg_down_done"):
+            _origin = float(pos.get("origin_price") or buy_price or 0)
+            if _origin > 0 and current_price <= _origin * (1.0 - RESCUE_ADD_FINAL_STOP):
+                self._execute_sell(
+                    stock_code, current_price,
+                    f"구조 후 최종손절 "
+                    f"(원가대비 {(current_price - _origin) / _origin * 100:.2f}%, "
+                    f"평단대비 {gross_rate*100:.2f}%)",
+                )
+                return
+
         # (2026-08-10) 손절선을 종목 변동성에 비례시킨다. 캐시만 읽고(REST 0콜),
         # 계산이 안 되면 고정 STOP_LOSS_RATE로 수렴한다.
         stop_rate = self.stop_loss_rate_for(stock_code)
@@ -6079,18 +6265,12 @@ class StrategyManager:
             # 기준이기 때문이다. buy_price는 add_to_position이 평단으로 덮는다.
             origin = float(pos.get("origin_price") or buy_price or 0)
             if pos.get("rescue_added"):
-                # 이미 한 번 구조한 포지션 — 원가 -6%가 무조건 청산선이다.
-                if origin > 0 and current_price <= origin * (1.0 - RESCUE_ADD_FINAL_STOP):
-                    self._execute_sell(
-                        stock_code, current_price,
-                        f"추가매수 후 최종손절 "
-                        f"(원가대비 {(current_price - origin) / origin * 100:.2f}%, "
-                        f"평단대비 {gross_rate*100:.2f}%)",
-                    )
-                    return
-                # -6% 전이면 손절을 보류한다. **return 하지 않고** 아래
-                # 지수가드/강제청산 등 나머지 청산 경로는 그대로 태운다 —
-                # 여기서 빠져나가면 가드가 켜진 날 이 포지션만 무방비가 된다.
+                # 원가 -6% 최종선은 위에서 **이미 확인했다**(2026-08-11에 밖으로
+                # 꺼냈다). 여기까지 왔다는 건 아직 -6% 전이라는 뜻이므로 손절을
+                # 보류한다. **return 하지 않고** 아래 지수가드/강제청산 등
+                # 나머지 청산 경로는 그대로 태운다 — 여기서 빠져나가면 가드가
+                # 켜진 날 이 포지션만 무방비가 된다.
+                pass
             else:
                 decision = self._rescue_gate(stock_code, pos, current_price, origin)
                 if decision == "added":
@@ -6403,6 +6583,91 @@ class StrategyManager:
         why = f"{why}, 저점 {low:,.0f} 대비 +{rebound*100:.2f}%"
         return "added" if self._do_rescue_add(stock_code, pos, current_price,
                                               origin, why) else "sell"
+
+    def _maybe_average_down(self, stock_code: str, pos: dict,
+                            current_price: float) -> None:
+        """-3% 물타기 (2026-08-11 신설, 사용자 지정). 조건 없이 가격만 본다.
+
+        근거·한계는 AVG_DOWN_ENABLED 상수 주석 참고 — **백테스트는 판정 불가**다.
+        어떤 예외도 밖으로 던지지 않는다(청산 핫패스에서 불리므로).
+        """
+        if not AVG_DOWN_ENABLED or pos.get("avg_down_done"):
+            return
+        try:
+            origin = float(pos.get("origin_price") or pos.get("buy_price") or 0)
+            if origin <= 0:
+                return
+            if current_price > origin * (1.0 - AVG_DOWN_TRIGGER):
+                return          # 아직 -3%까지 안 밀렸다
+
+            # 🔴 당일 매수분에만 — 재시작 복원분은 origin이 옛 값이라 무의미하고,
+            #    사용자가 수동 처리하려던 종목을 봇이 2배로 불릴 수 있다.
+            bt = pos.get("buy_time")
+            if not bt or bt.date() != self._now().date():
+                pos["avg_down_done"] = True     # 다시 판정하지 않는다
+                logger.info("[%s] 물타기 생략: 당일 매수분 아님(복원 포지션)", stock_code)
+                return
+
+            # 🔴 안전 게이트 — 여기만은 우회하지 않는다(사용자 지정).
+            if not self.risk_can_trade():
+                logger.info("[%s] 물타기 보류: 일손실 차단(MDD) 발동 중", stock_code)
+                return
+            if AVG_DOWN_BLOCK_ON_INDEX_GUARD and self._is_index_guard_active():
+                logger.info("[%s] 물타기 보류: 지수 하락 가드 발동 중", stock_code)
+                return
+
+            qty = int(pos.get("qty", pos.get("buy_quantity")) or 0)
+            if qty < 1:
+                return
+            spent = float(origin) * qty
+            add_cost = current_price * qty
+            if spent + add_cost > AVG_DOWN_MAX_AMOUNT:
+                # 캡 안에서 살 수 있는 만큼만 — 0주면 포기하고 다시 안 본다.
+                qty = int(max(0, AVG_DOWN_MAX_AMOUNT - spent) // current_price)
+                if qty < 1:
+                    pos["avg_down_done"] = True
+                    logger.info(
+                        "[%s] 물타기 생략: 종목당 상한 %s원 초과",
+                        stock_code, f"{AVG_DOWN_MAX_AMOUNT:,}",
+                    )
+                    return
+
+            before_qty = int(pos.get("qty", pos.get("buy_quantity")) or 0)
+            name = pos.get("stock_name", stock_code)
+            logger.warning(
+                "[%s] %s 💧 물타기 — 원가 %s원 대비 %.2f%% (현재 %s원) / %d주 추가",
+                stock_code, name, f"{origin:,.0f}",
+                (current_price - origin) / origin * 100, f"{current_price:,.0f}", qty,
+            )
+            self._execute_buy(
+                stock_code, name, pos.get("strategy_phase", "1A"),
+                {"current_price": current_price,
+                 "entry_note": f"[물타기] 원가 -{AVG_DOWN_TRIGGER*100:.0f}% 도달"},
+                sub_strategy=pos.get("sub_strategy", "1A"),
+                add_to_position=True, bypass_entry_gates=True, exact_quantity=qty,
+            )
+
+            after_qty = int(pos.get("qty", pos.get("buy_quantity")) or 0)
+            if after_qty <= before_qty:
+                logger.warning("[%s] 물타기 미체결(수량 불변) — 다음 틱에 재시도", stock_code)
+                return
+
+            # 1회로 못박고, 기준이 바뀌었으니 본전스톱 상태를 재설정한다.
+            # (안 하면 옛 평단 기준 고점이 남아 본전스톱이 즉시 오발동한다.)
+            pos["avg_down_done"] = True
+            pos["breakeven_armed"] = False
+            pos["breakeven_peak"] = 0.0
+            self._avg_down_count_today += 1
+            _notify(
+                f"💧 물타기 (-{AVG_DOWN_TRIGGER*100:.0f}%)\n"
+                f"{name} ({stock_code})\n"
+                f"{qty}주 추가 -> 총 {after_qty}주 / 평단 {pos.get('buy_price', 0):,.0f}원\n"
+                f"최종손절 {origin * (1 - RESCUE_ADD_FINAL_STOP):,.0f}원 "
+                f"(원가 -{RESCUE_ADD_FINAL_STOP*100:.0f}%)\n"
+                f"오늘 {self._avg_down_count_today}회"
+            )
+        except Exception:
+            logger.exception("[%s] 물타기 처리 실패 — 무시하고 계속", stock_code)
 
     def _do_rescue_add(self, stock_code: str, pos: dict, current_price: float,
                        origin: float, why: str) -> bool:
