@@ -330,7 +330,11 @@ check("🔴 잔량도 손절은 정상 발동", len(sells_of(s)) == 1, f"매도 
 # ══════════════════════════════════════════════════════════
 section("[5] 편입가 앵커 — 되돌림 2차 트랜치")
 # ══════════════════════════════════════════════════════════
-check("ENTRY_ANCHOR_SECOND_TRANCHE is True", SM.ENTRY_ANCHOR_SECOND_TRANCHE is True)
+# 🔴 08-12 저녁에 **OFF로 되돌렸다** — 시뮬레이션 결함(2차 미체결 시 1차만
+#    체결되어 평단이 오르는 효과를 빠뜨림) + 실측에서 구간마다 방향이 뒤집힘.
+#    끈 기능이라도 **배선 테스트는 남긴다**(되살릴 때 검증이 없으면 사고가 난다).
+check("🔴 ENTRY_ANCHOR_SECOND_TRANCHE 기본 OFF",
+      SM.ENTRY_ANCHOR_SECOND_TRANCHE is False)
 
 TRIG = 10_000
 cur_t2 = TRIG * (1 - SM.ENTRY_PULLBACK_TRANCHES[-1][0])     # 현행 2차 = 9,930
@@ -351,43 +355,59 @@ def plan_with(anchor):
     return (pl["targets"][-1]["price"] if pl else None)
 
 
-t_low = plan_with(cur_t2 - 50)      # 편입가가 현행 2차보다 낮다 -> 적용
-t_high = plan_with(cur_t2 + 50)     # 편입가가 더 높다 -> 현행 유지 (downside 0)
-t_none = plan_with(None)            # 편입가를 모른다 -> 현행 유지
+# OFF 상태(기본)에서는 편입가가 아무리 낮아도 현행 2차를 쓴다.
+check("🔴 OFF: 편입가가 낮아도 현행 2차를 쓴다",
+      abs(plan_with(cur_t2 - 500) - cur_t2) < 1, f"{plan_with(cur_t2 - 500)}")
 
-check("편입가가 현행 2차보다 낮으면 그 값을 쓴다",
-      t_low is not None and abs(t_low - (cur_t2 - 50)) < 1, f"{t_low}")
-check("🔴 편입가가 더 높으면 현행 유지 (평단이 나빠지지 않는다)",
-      t_high is not None and abs(t_high - cur_t2) < 1, f"{t_high} vs 현행 {cur_t2}")
-check("편입가를 모르면 현행 유지('모름'이 매수를 막지 않는다)",
-      t_none is not None and abs(t_none - cur_t2) < 1, f"{t_none}")
-check("🔴 2차 가격은 언제나 현행보다 같거나 낮다(불변식)",
-      all(v is not None and v <= cur_t2 + 1e-6 for v in (t_low, t_high, t_none)))
-
-# 1차는 손대지 않는다 — 기회 손실 0의 근거
-st = build()
-st._cond_names["X"] = "주도주상위"
-st._prev_closes["X"] = TRIG * 0.9
-st._opening_prices["X"] = TRIG
-st._first_seen["X"] = _t.time() - 60
-st._cond_hit_prices["X"] = cur_t2 - 500
-st._open_entry_plan("X", "X", "1A", {"current_price": TRIG,
-                                     "entry_mode": "tick_driven"},
-                    "1A", "주도주상위", TRIG)
-pl = st._entry_plans.get("X")
-if pl:
-    t1 = pl["targets"][0]["price"]
-    check("🔴 1차 트랜치는 현행 그대로 (기회 손실 0)",
-          abs(t1 - TRIG * (1 - SM.ENTRY_PULLBACK_TRANCHES[0][0])) < 1, f"{t1:,.0f}")
-
-# 롤백
-_sv = SM.ENTRY_ANCHOR_SECOND_TRANCHE
-SM.ENTRY_ANCHOR_SECOND_TRANCHE = False
+# ── 켰을 때의 배선 (되살릴 때를 위해 남겨 둔다) ──────────────────────
+_sv_anchor = SM.ENTRY_ANCHOR_SECOND_TRANCHE
+SM.ENTRY_ANCHOR_SECOND_TRANCHE = True
 try:
-    check("롤백(False): 편입가가 낮아도 현행 2차를 쓴다",
-          abs(plan_with(cur_t2 - 500) - cur_t2) < 1)
+    t_low = plan_with(cur_t2 - 50)      # 편입가가 현행 2차보다 낮다 -> 적용
+    t_high = plan_with(cur_t2 + 50)     # 편입가가 더 높다 -> 현행 유지
+    t_none = plan_with(None)            # 편입가를 모른다 -> 현행 유지
+    check("ON: 편입가가 현행 2차보다 낮으면 그 값을 쓴다",
+          t_low is not None and abs(t_low - (cur_t2 - 50)) < 1, f"{t_low}")
+    check("ON: 편입가가 더 높으면 현행 유지",
+          t_high is not None and abs(t_high - cur_t2) < 1, f"{t_high} vs {cur_t2}")
+    check("ON: 편입가를 모르면 현행 유지('모름'이 매수를 막지 않는다)",
+          t_none is not None and abs(t_none - cur_t2) < 1, f"{t_none}")
+    check("ON: 2차 **가격**은 언제나 현행 이하 (단, 평단은 별개 — 아래 주석)",
+          all(v is not None and v <= cur_t2 + 1e-6 for v in (t_low, t_high, t_none)))
+    # 🔴 이 불변식이 'downside 0'을 뜻하지 않는다는 것이 08-12 저녁의 교훈이다.
+    #    2차가 깊어지면 **미체결 -> 1차만 체결 -> 평단 상승**이 일어난다.
+    #    실측: 09:00~09:10 트랜치 13->11개, 평단 +0.008%(남화토건 +12.5원).
 finally:
-    SM.ENTRY_ANCHOR_SECOND_TRANCHE = _sv
+    SM.ENTRY_ANCHOR_SECOND_TRANCHE = _sv_anchor
+
+# 1차는 어느 설정에서도 손대지 않는다
+_sv_anchor = SM.ENTRY_ANCHOR_SECOND_TRANCHE
+SM.ENTRY_ANCHOR_SECOND_TRANCHE = True
+try:
+    st = build()
+    st._cond_names["X"] = "주도주상위"
+    st._prev_closes["X"] = TRIG * 0.9
+    st._opening_prices["X"] = TRIG
+    st._first_seen["X"] = _t.time() - 60
+    st._cond_hit_prices["X"] = cur_t2 - 500
+    st._open_entry_plan("X", "X", "1A", {"current_price": TRIG,
+                                         "entry_mode": "tick_driven"},
+                        "1A", "주도주상위", TRIG)
+    pl = st._entry_plans.get("X")
+    if pl:
+        t1 = pl["targets"][0]["price"]
+        check("ON이어도 1차 트랜치는 현행 그대로",
+              abs(t1 - TRIG * (1 - SM.ENTRY_PULLBACK_TRANCHES[0][0])) < 1,
+              f"{t1:,.0f}")
+finally:
+    SM.ENTRY_ANCHOR_SECOND_TRANCHE = _sv_anchor
+
+# 앵커 캐시는 OFF여도 계속 쌓인다 — 재검증 재료를 잃지 않기 위해.
+_stc = build()
+_stc.prearm_candidate("Q", 1234.0)
+check("OFF여도 편입가 캐시는 남는다(재검증 재료 보존)",
+      abs(_stc._cond_hit_prices.get("Q", 0) - 1234.0) < 1e-6,
+      str(_stc._cond_hit_prices.get("Q")))
 
 
 # ══════════════════════════════════════════════════════════
