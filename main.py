@@ -30,6 +30,20 @@ STATUS_REPORT_INTERVAL = 1800
 # 매수 직후 서버 잔고 반영 지연으로 인한 오탐(수동매도로 착각) 방지 유예시간.
 # SYNC_INTERVAL(15초)보다 넉넉히 커야 최소 1회 이상의 정상 동기화 주기를 보장함. (2026-07-28)
 RECONCILE_GRACE_SECONDS = 45
+# 🔴 (2026-08-12 장중 결함수정) 45초로는 부족했다.
+#   실측: 알트(459550) 09:01:06 매수 -> 09:02:07 "수동 매도 감지"로 슬롯 해제
+#         -> **09:02:45에 서버 잔고 246주가 그대로 있음**(반영에 99초).
+#   개장 직후엔 키움 잔고 반영이 45초를 넘는다. 그걸 '사용자가 팔았다'로 오판하면
+#   ① DB가 손익 0으로 닫혀 통계가 오염되고(08-11에 고치려던 바로 그 문제)
+#   ② 슬롯이 풀렸다 다시 잡히며 **같은 종목을 재매수해 왕복 수수료를 반복 지출**한다.
+#   실제로 08-12 오전에 10건이 이렇게 처리됐고 동양파일·코칩이 두 번씩 매수됐다.
+#
+#   -> 판별을 시간만이 아니라 **`seen_on_server`(서버에서 한 번이라도 확인됐는가)**와
+#      묶는다. 한 번도 안 보인 종목은 '아직 반영 전'일 수 있으므로 더 기다린다.
+#      ⚠️ 무한정 기다리지는 않는다 — 진짜 미체결이면 holdings에 영원히 남아
+#      슬롯을 점유하기 때문이다. 상한을 넘으면 종전대로 정리한다.
+#      (그 뒤에도 안전망이 있다: 매도 시 800033이면 `_release_ghost_position`.)
+RECONCILE_UNSEEN_GRACE_SECONDS = 300
 TOKEN_REFRESH_INTERVAL = 23 * 3600
 SIGNAL_WATCHDOG_INTERVAL = 300
 SIGNAL_TIMEOUT = 1800
@@ -612,10 +626,18 @@ class TradingBot:
 
         def _in_grace(pos: dict) -> bool:
             buy_time = pos.get("buy_time")
-            return bool(
-                buy_time
-                and (now - buy_time).total_seconds() < RECONCILE_GRACE_SECONDS
-            )
+            if not buy_time:
+                return False
+            elapsed = (now - buy_time).total_seconds()
+            if elapsed < RECONCILE_GRACE_SECONDS:
+                return True
+            # (2026-08-12) 서버에서 **한 번도 확인된 적 없는** 포지션은 아직
+            # 잔고 반영 전일 수 있다(실측 99초). 상한까지는 더 기다린다.
+            # `seen_on_server`는 아래 루프가 server_qty>0을 볼 때 찍는다.
+            if (not pos.get("seen_on_server")
+                    and elapsed < RECONCILE_UNSEEN_GRACE_SECONDS):
+                return True
+            return False
 
         manually_sold = [
             code
