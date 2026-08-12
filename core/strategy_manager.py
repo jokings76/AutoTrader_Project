@@ -2493,26 +2493,38 @@ class StrategyManager:
                 best = v
         return best
 
-    def _entry_delay_reject(self, stock_code: str, now: float = None) -> Optional[str]:
+    def _entry_delay_reject(self, stock_code: str, now: float = None,
+                            initiating: bool = True) -> Optional[str]:
         """[F] 진입 숙성 판정 — 편입 직후 일정 시간 안에는 사지 않는다.
 
         (2026-08-06 신설) 반환값이 None이면 통과, 문자열이면 탈락 사유다.
         근거는 MIN_ENTRY_DELAY_SEC 주석 참고(0~1분 진입이 4일 실측 최악).
         (2026-08-07) 요구시간이 **조건식별로 다르다** — entry_delay_sec() 참고.
 
+        initiating: (2026-08-12 결함수정) **새 포지션을 여는 매수인가.**
+            False면 유효창 **상한**을 보지 않는다. 상한의 근거(8일 104건)는
+            '편입 후 언제 *진입*하는가'를 잰 것이라, 이미 연 포지션을 채우거나
+            (되돌림 2차 트랜치) 보유분에 더 사는(rescue-add) 경우에는 적용
+            대상이 아니다. 그대로 두면 두 가지가 조용히 깨진다:
+              ① 29분에 계획이 열리고 2차가 31분에 도달하면 **반쪽 포지션**이
+                 된다(08-08 VWAP 사각지대와 같은 계열 — 실측 재현).
+              ② '손절 대신 추가매수'가 편입 30분 뒤엔 **원리적으로 발동
+                 불가**가 된다(08-07의 `[C] x rescue`, 08-08의 `VWAP x rescue`와
+                 정확히 같은 실패 모드).
+            🔴 숙성(하한)은 initiating과 무관하게 그대로 본다 — 시간은 늘기만
+               하므로 추가매수를 막지 않고, 하드가드 성격은 유지된다.
+
         **최초 관측 시각을 모르면 통과**시킨다 — 이 코드베이스의 기존 규약
         ('모름'이 매수를 막지 않는다)을 그대로 따른다. pre-arm이 어떤 이유로
         누락돼도 매매가 통째로 멈추지 않게 하기 위함이다.
         """
-        need = self.entry_delay_sec(stock_code)
-        if need <= 0:
-            return None
         seen = self._first_seen.get(stock_code)
         if seen is None:
             return None
         now = now if now is not None else _time_mod.time()
         waited = now - seen
-        if waited < need:
+        need = self.entry_delay_sec(stock_code)
+        if need > 0 and waited < need:
             return (
                 f"진입 숙성 미달 (편입 후 {waited:.0f}초 < {need:.0f}초)"
             )
@@ -2520,7 +2532,11 @@ class StrategyManager:
         # 편입 후 너무 오래 지나서 잡는 신호는 실측상 우위가 없다
         # (30분 초과 14건 MFE +1.79%, 절반이 1% 미만). 사유를 숙성과
         # **분리**해 진단에서 구분되게 한다(뭉치면 어느 쪽인지 못 본다).
-        if MAX_ENTRY_AGE_SEC > 0 and waited > MAX_ENTRY_AGE_SEC:
+        # 🔴 (2026-08-12 결함수정) 이 검사는 `need <= 0`의 조기 return **뒤**에
+        #    있었다. 그래서 숙성을 되돌리면(MIN_ENTRY_DELAY_SEC = 0) 유효창
+        #    상한까지 **조용히 같이 죽었다** — 롤백표는 두 항목을 별개로
+        #    적고 있으므로 문서와 코드가 어긋나는 종류의 결합이었다.
+        if initiating and MAX_ENTRY_AGE_SEC > 0 and waited > MAX_ENTRY_AGE_SEC:
             return (
                 f"진입 유효창 만료 (편입 후 {waited / 60:.0f}분 > "
                 f"{MAX_ENTRY_AGE_SEC / 60:.0f}분)"
@@ -3227,6 +3243,11 @@ class StrategyManager:
         # 없으면 "기타"로 뭉개져 매수가 준 이유를 장중에 판단할 수 없다.
         # ⚠️ 라벨에 초 수를 박지 말 것(상수를 바꾸면 거짓말이 된다).
         ("진입 숙성 대기", ("진입 숙성",)),
+        # (2026-08-12) 유효창 **상한**(편입 후 30분 초과). 숙성(하한)과 정반대
+        # 상황이라 반드시 따로 센다 — 없으면 "기타"로 뭉개져 장중 체크리스트
+        # N1("진입 유효창 만료가 하루 2~3건인가")을 원리적으로 판정할 수 없다.
+        # ⚠️ 아래 "매수 컷오프"보다 먼저 와야 한다(성격이 완전히 다르다).
+        ("진입 유효창 만료(지연 진입)", ("진입 유효창",)),
         # (2026-08-06) 이미 여러 번 터진 자리 — 정상 필터링이다.
         # ⚠️ '상한'이라는 부분문자열을 아래 "매수 컷오프"가 잡으므로
         #    반드시 그보다 먼저 와야 한다.
@@ -5916,13 +5937,18 @@ class StrategyManager:
 
         # 등락률(상·하한) + 진입 숙성 — 주문 직전 하드가드.
         # `_open_entry_plan`에서 이미 보지만 여기도 두는 이유는 `_execute_buy`
-        # 호출부가 **4곳**이기 때문이다 — 폴링(_evaluate_1a_pullback_entry) /
-        # 되돌림 트랜치(_try_fill_entry_plan) / 손절대신 추가매수(_do_rescue_add) /
+        # 호출부가 **5곳**이기 때문이다 — 폴링(_evaluate_1a_pullback_entry) /
+        # 되돌림 트랜치(_try_fill_entry_plan, 한 함수에서 2번) /
+        # 손절대신 추가매수(_do_rescue_add) / **-3% 물타기(_maybe_average_down)** /
         # 즉시매수 폴백(_maybe_tick_entry, ENTRY_PULLBACK_ENABLED=False일 때만).
-        # (2026-08-09: 오래 "3곳"으로 적혀 있었다. audit_deep [2]가 이제 수를 센다.)
+        # (2026-08-09: 오래 "3곳"으로 적혀 있었다. audit_deep [2]가 이제 수를 센다.
+        #  2026-08-12: 물타기 신설 뒤에도 "4곳"에 머물러 있어 다시 정정했다.)
+        # 🔴 `initiating=not add_to_position` — 유효창 **상한**은 '새 포지션을
+        #    여는 매수'에만 건다. 안 그러면 되돌림 2차 트랜치와 rescue-add가
+        #    편입 30분 뒤에 조용히 죽는다(_entry_delay_reject 주석 참고).
         chg_reject = None if bypass_entry_gates else (
             self._entry_change_reject(stock_code, sub_strategy, current_price)
-            or self._entry_delay_reject(stock_code)
+            or self._entry_delay_reject(stock_code, initiating=not add_to_position)
             # (2026-08-11) 확인 전용 조건식 단독 편입 차단 — 하드가드.
             # resolve_strategy가 미분류를 "1A"로 폴백하므로, 이 한 줄이
             # 없으면 `돌파후` 단독 종목이 그대로 매수된다.
@@ -6554,14 +6580,28 @@ class StrategyManager:
                     )
                     # 잔량 트레일 기준 고점을 지금 시점으로 고정(동적캡 경로와 동일).
                     _p = self.holdings.get(stock_code)
-                    if _p is not None:
+                    # 🔴 표식은 **분할이 실제로 나갔을 때만** 찍는다. 주문이
+                    #    실패하면 partial_exited가 안 붙으므로 다음 틱에 정상
+                    #    재시도된다(실패를 '처리 완료'로 오인하지 않는다).
+                    if _p is not None and _p.get("partial_exited"):
+                        _p["vi_partial_done"] = True
                         _p["trail_peak"] = max(
                             float(_p.get("highest_price") or current_price),
                             float(current_price),
                         )
                     return
-                self._execute_sell(stock_code, current_price, _reason)
-                return
+                # ── 🔴 (2026-08-12 결함수정) 자기가 남긴 잔량을 다시 털지 않는다 ──
+                # 위 분할이 나가면 `partial_exited`가 True가 되므로, **바로 다음
+                # 틱**에 이 분기로 떨어져 잔량이 전량 청산됐다(실측 재현: 같은
+                # 가격 2틱이면 100% 청산 = '50% 분할'이 사실상 무효).
+                # VI 밴드는 0.5%/2호가라 상승 중 종목은 그 안에 여러 틱 머문다.
+                # -> VI가 스스로 분할한 포지션이면 여기서 팔지 않고 **아래 사다리
+                #    (본전스톱 / 익절캡 / 분할 잔량 트레일 / 손절)로 넘긴다.**
+                # ⚠️ 다른 규칙(동적캡·반등소진)이 이미 분할한 포지션은 종전대로
+                #    전량 정리한다 — 그건 상수 주석이 명시한 의도된 동작이다.
+                if not (VI_UPPER_EXIT_PARTIAL and pos.get("vi_partial_done")):
+                    self._execute_sell(stock_code, current_price, _reason)
+                    return
 
         warmup_until = pos.get("warmup_until")
         if warmup_until and self._now() < warmup_until:

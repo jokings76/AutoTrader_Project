@@ -256,6 +256,89 @@ try:
 finally:
     SM.MAX_ENTRY_AGE_SEC = _sv
 
+# ── 🔴 (2026-08-12 결함수정) 진단 분류가 숙성과 분리돼 있는가 ──────────
+# 라벨이 "기타"로 뭉개지면 장중 체크리스트 N1("유효창 만료가 하루 2~3건인가")을
+# **원리적으로 판정할 수 없다.** 사유 문자열만 다르고 분류가 같으면 소용없다.
+check("🔴 유효창 만료가 '기타'로 뭉개지지 않는다",
+      SM.StrategyManager._reject_category("진입 유효창 만료 (편입 후 45분 > 30분)")
+      not in ("기타", SM.StrategyManager._reject_category("진입 숙성 미달 (편입 후 1초 < 30초)")),
+      SM.StrategyManager._reject_category("진입 유효창 만료 (편입 후 45분 > 30분)"))
+check("  숙성 분류는 그대로",
+      SM.StrategyManager._reject_category("진입 숙성 미달 (편입 후 1초 < 30초)")
+      == "진입 숙성 대기")
+
+# ── 🔴 (2026-08-12 결함수정) 상한은 '새 포지션을 여는 매수'에만 건다 ────
+# 그대로 두면 ① 되돌림 2차 트랜치가 막혀 **반쪽 포지션**이 되고
+#            ② rescue-add가 편입 30분 뒤 **원리적으로 발동 불가**가 된다.
+s4 = build()
+s4._first_seen["Z"] = _t.time() - (SM.MAX_ENTRY_AGE_SEC + 60)
+check("🔴 initiating=True(신규 진입)면 상한 적용",
+      s4._entry_delay_reject("Z", initiating=True) is not None)
+check("🔴 initiating=False(추가매수/트랜치)면 상한 미적용",
+      s4._entry_delay_reject("Z", initiating=False) is None,
+      str(s4._entry_delay_reject("Z", initiating=False)))
+s4._first_seen["Z"] = _t.time() - 1     # 숙성 미달
+check("  단, 숙성(하한)은 initiating과 무관하게 유지",
+      s4._entry_delay_reject("Z", initiating=False) is not None)
+
+# 🔴 숙성을 롤백해도 유효창이 같이 죽지 않아야 한다.
+#    (결함: 검사가 `need <= 0`의 조기 return 뒤에 있어 함께 무효화됐다.
+#     롤백표는 두 항목을 **별개**로 적고 있으므로 문서와 코드가 어긋난다.)
+_a, _b = SM.MIN_ENTRY_DELAY_SEC, SM.MIN_ENTRY_DELAY_SEC_BY_COND
+SM.MIN_ENTRY_DELAY_SEC, SM.MIN_ENTRY_DELAY_SEC_BY_COND = 0.0, {}
+try:
+    s5 = build()
+    s5._first_seen["Z"] = _t.time() - (SM.MAX_ENTRY_AGE_SEC + 60)
+    check("🔴 숙성 롤백(0초)해도 유효창 상한은 살아 있다",
+          s5._entry_delay_reject("Z") is not None,
+          str(s5._entry_delay_reject("Z")))
+finally:
+    SM.MIN_ENTRY_DELAY_SEC, SM.MIN_ENTRY_DELAY_SEC_BY_COND = _a, _b
+
+# 실동작 — 29분 50초에 계획을 열고 2차가 30분 넘어 도달해도 2/2 체결
+s6 = build()
+s6._cond_names["T2"] = "주도주상위"
+s6._prev_closes["T2"] = 9_000
+s6._opening_prices["T2"] = 10_000
+s6._first_seen["T2"] = _t.time() - (SM.MAX_ENTRY_AGE_SEC - 10)
+s6._open_entry_plan("T2", "T2", "1A",
+                    {"current_price": 10_000, "entry_mode": "tick_driven"},
+                    "1A", "주도주상위", 10_000)
+_pl = s6._entry_plans.get("T2")
+check("계획이 열린다(유효창 안)", _pl is not None)
+if _pl:
+    _t1, _t2 = [t["price"] for t in _pl["targets"]]
+    s6._try_fill_entry_plan("T2", _t1)
+    s6._first_seen["T2"] = _t.time() - (SM.MAX_ENTRY_AGE_SEC + 60)   # 30분 경과
+    s6._try_fill_entry_plan("T2", _t2)
+    _bq = [o["qty"] for o in s6.order_manager.orders if o["side"] == "buy"]
+    check("🔴 2차 트랜치가 유효창 만료로 막히지 않는다(반쪽 포지션 방지)",
+          len(_bq) == 2, f"트랜치 {_bq}")
+
+# 실동작 — rescue-add가 편입 40분 뒤에도 집행된다
+def _rescue_at(age_sec):
+    st = build()
+    st.holdings["R9"] = {
+        "trade_id": 1, "buy_price": 10_000, "buy_quantity": 100, "qty": 100,
+        "buy_time": st._now() - timedelta(minutes=40), "stock_name": "R9",
+        "strategy_phase": 1, "sub_strategy": "1A", "highest_price": 10_000,
+        "lowest_price": 9_700, "warmup_until": st._now() - timedelta(seconds=1),
+        "origin_price": 10_000, "stop_rate": None, "tranches_filled": 2}
+    st._prev_closes["R9"] = 9_000
+    st._opening_prices["R9"] = 10_000
+    st._cond_names["R9"] = "주도주상위"
+    st._first_seen["R9"] = _t.time() - age_sec
+    st._volume_ratio = lambda c: 3.0
+    ok = st._do_rescue_add("R9", st.holdings["R9"], 9_550, 0.0, "테스트")
+    return ok, len([o for o in st.order_manager.orders if o["side"] == "buy"])
+
+_ok_e, _n_e = _rescue_at(600)
+_ok_l, _n_l = _rescue_at(SM.MAX_ENTRY_AGE_SEC + 600)
+check("rescue-add: 편입 10분 뒤 정상 집행 (대조군)", _ok_e is True and _n_e == 1,
+      f"{_ok_e}/{_n_e}건")
+check("🔴 rescue-add: 편입 40분 뒤에도 집행된다(유효창이 죽이지 않는다)",
+      _ok_l is True and _n_l == 1, f"{_ok_l}/{_n_l}건")
+
 
 # ══════════════════════════════════════════════════════════
 section("[3] VI 상단 확정매도 50% 분할")
@@ -294,6 +377,67 @@ so2 = sells_of(st2)
 check("롤백(False): 종전대로 전량 매도", bool(so2) and so2[0]["qty"] == 100 and "X" not in st2.holdings,
       f"{so2[0]['qty'] if so2 else 0}주")
 
+# ── 🔴 (2026-08-12 결함수정) 연속 틱 — 자기 잔량을 다시 털지 않는가 ──────
+# 위 단발 틱 검사만으로는 결함이 안 잡혔다. VI 상단 밴드는 0.5%/2호가라
+# 상승 중 종목은 그 안에 **여러 틱** 머무는데, 분할이 나가면 partial_exited가
+# True가 되어 **바로 다음 틱**에 전량 매도 분기로 떨어졌다(실측 재현).
+# 그러면 '50% 분할'이 사실상 1틱짜리 무효 기능이 된다.
+# ⚠️ 매수가를 시가보다 위(+7%)로 둬야 실전형이다 — 시가에 사면 VI 도달 시
+#    순 +9.5%라 익절캡(6%)이 먼저 잡아 이 결함이 가려진다.
+def vi_multi(n_ticks, price=10_970, buy=10_700, open_px=10_000):
+    st = build()
+    p = put(st, buy=buy, qty=100)
+    st._opening_prices["X"] = open_px
+    for _ in range(n_ticks):
+        if "X" in st.holdings:
+            st.on_price_update("X", price)
+    return st, p
+
+
+stm, pm = vi_multi(4)
+check("🔴 같은 가격 4틱에도 잔량이 살아남는다(분할이 무효가 아니다)",
+      "X" in stm.holdings and stm.holdings["X"]["qty"] == 50,
+      f"보유 {stm.holdings.get('X', {}).get('qty', '청산됨')}")
+check("  매도는 1회(50주)만 나갔다", [o["qty"] for o in sells_of(stm)] == [50],
+      str([o["qty"] for o in sells_of(stm)]))
+check("  vi_partial_done 표식이 찍힌다",
+      stm.holdings.get("X", {}).get("vi_partial_done") is True)
+
+# 잔량은 무방비가 아니다 — 트레일/손절이 그대로 받는다.
+stt, _ = vi_multi(2)
+if "X" in stt.holdings:
+    stt.on_price_update("X", int(10_970 * (1 - SM.PARTIAL_EXIT_TRAIL) - 1))
+check("🔴 잔량은 트레일로 청산된다(방치되지 않는다)", "X" not in stt.holdings,
+      f"보유 {stt.holdings.get('X', {}).get('qty', '청산됨')}")
+
+sts, _ = vi_multi(2)
+if "X" in sts.holdings:
+    sts.on_price_update("X", int(10_700 * (1 + SM.STOP_LOSS_RATE)) - 1)
+check("🔴 잔량도 손절은 정상 발동", "X" not in sts.holdings,
+      f"보유 {sts.holdings.get('X', {}).get('qty', '청산됨')}")
+
+# 의도된 동작 보존 — **다른 규칙**이 이미 분할한 포지션은 VI에서 전량 정리한다
+sto = build()
+po = put(sto, buy=10_700, qty=100)
+sto._opening_prices["X"] = 10_000
+po["partial_exited"] = True          # 동적캡/반등소진이 이미 절반 뺀 상태
+po["qty"] = 50
+sto.on_price_update("X", 10_970)
+check("의도 보존: 다른 규칙의 분할 잔량은 VI에서 전량 정리",
+      "X" not in sto.holdings and [o["qty"] for o in sells_of(sto)] == [50],
+      f"{[o['qty'] for o in sells_of(sto)]}")
+
+# 롤백해도 연속 틱에서 동작이 종전과 같아야 한다(전량 1회)
+_svp = SM.VI_UPPER_EXIT_PARTIAL
+SM.VI_UPPER_EXIT_PARTIAL = False
+try:
+    str_, _ = vi_multi(4)
+    check("롤백(False): 연속 틱에서도 전량 1회",
+          "X" not in str_.holdings and [o["qty"] for o in sells_of(str_)] == [100],
+          str([o["qty"] for o in sells_of(str_)]))
+finally:
+    SM.VI_UPPER_EXIT_PARTIAL = _svp
+
 
 # ══════════════════════════════════════════════════════════
 section("[4] 분할 잔량 보호 — 동적캡 재발동으로 털지 않는다")
@@ -303,20 +447,59 @@ src4 = inspect.getsource(SM.StrategyManager)
 check("동적캡 경로가 잔량 보호 상수를 본다",
       "PARTIAL_EXIT_REMAINDER_HOLD" in src4)
 
-# 이미 분할 1차가 나간 포지션에 동적캡이 다시 발동해도 잔량을 팔면 안 된다
-s = build()
-p = put(s, buy=10_000, qty=100)
-p["partial_exited"] = True
-p["qty"] = 50
-p["tp_cap_upgraded"] = True
-before = len(sells_of(s))
-try:
-    s.check_timeouts()
-except Exception:
-    pass
+# 🔴 (2026-08-12 재작성) 예전 검사는 **공허했다**.
+#    틱·거래량을 하나도 주지 않고 check_timeouts()만 불렀는데, 그러면
+#    `_update_dynamic_caps`가 강도 중립값에서 곧바로 continue 해버려
+#    **동적캡 경로에 도달조차 하지 않는다.** 즉 상수를 False로 되돌려도
+#    똑같이 통과했다(A/B 실측 동일). 이 코드베이스가 반복 경고해 온
+#    '검증이 거짓말한다'의 전형이라, 실제로 발동하는 시나리오로 바꾸고
+#    **A/B가 갈리는지**를 단언한다.
+def dyncap_case(hold_remainder, already_partial):
+    _sv = SM.PARTIAL_EXIT_REMAINDER_HOLD
+    SM.PARTIAL_EXIT_REMAINDER_HOLD = hold_remainder
+    try:
+        st = build()
+        p = put(st, buy=10_000, qty=100)
+        p["tp_cap_upgraded"] = True
+        p["tp_cap"] = SM.TP_CAP_UPGRADED_MAX
+        p["strength_baseline"] = 200.0
+        p["tranches_filled"] = 2
+        if already_partial:
+            p["partial_exited"] = True
+            p["qty"] = 50
+        # 강도 하락(매도 우위) + 거래량 하락 + 순이익 구간을 실제로 만든다
+        _now = _t.time()
+        for i in range(12):
+            st.phase1b.trade_flow.add_tick("X", 10_300, "sell", 50, now=_now - i * 0.2)
+            st.phase1b.trade_flow.add_tick("X", 10_300, "buy", 1, now=_now - i * 0.2)
+        # 이 스위트의 _Rest는 분봉을 빈 리스트로 돌려준다 -> candles가 비면
+        # vol_ratio가 None이 되어 **동적캡 경로에 도달하지 못한다**(옛 검사가
+        # 공허했던 진짜 원인). 거래량 하락 상황을 명시적으로 만든다.
+        st._get_merged_candles = lambda *a, **kw: [
+            {"close": 10_300, "volume": 100} for _ in range(30)
+        ]
+        st._volume_ratio = lambda c: 0.3
+        st._update_dynamic_caps()
+        return st
+    finally:
+        SM.PARTIAL_EXIT_REMAINDER_HOLD = _sv
+
+
+# 대조군 — 이 시나리오에서 동적캡이 **실제로** 발동하는가(공허하지 않은가)
+ctl = dyncap_case(True, already_partial=False)
+check("🔴 [대조군] 동적캡이 실제로 발동하는 시나리오다",
+      [o["qty"] for o in sells_of(ctl)] == [50],
+      f"매도 {[o['qty'] for o in sells_of(ctl)]}")
+
+on = dyncap_case(True, already_partial=True)
+off = dyncap_case(False, already_partial=True)
 check("🔴 분할 후 잔량은 동적캡으로 청산되지 않는다",
-      len(sells_of(s)) == before and "X" in s.holdings,
-      f"매도 {len(sells_of(s)) - before}건 / 보유 {'O' if 'X' in s.holdings else 'X'}")
+      not sells_of(on) and "X" in on.holdings,
+      f"매도 {len(sells_of(on))}건 / 보유 {on.holdings.get('X', {}).get('qty', '청산됨')}")
+check("🔴 [A/B] 롤백(False)에서는 잔량이 실제로 털린다 — 검사가 공허하지 않다",
+      bool(sells_of(off)) and "X" not in off.holdings,
+      f"매도 {[o['qty'] for o in sells_of(off)]} / 보유 "
+      f"{off.holdings.get('X', {}).get('qty', '청산됨')}")
 
 # 잔량이라도 손절은 그대로 작동해야 한다(안전성)
 s = build()
