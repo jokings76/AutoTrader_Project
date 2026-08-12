@@ -766,6 +766,26 @@ MIN_ENTRY_DELAY_SEC_BY_COND = {
     "돌파전": 30.0,
 }
 
+# ── 진입 유효창 상한 (2026-08-12 신설, 사용자 지정) ─────────────────────
+# 숙성(MIN_ENTRY_DELAY_SEC)이 '너무 이른 진입'을 막는다면, 이 값은
+# **'너무 늦은 진입'**을 막는다. 둘이 합쳐 [30초 ~ 30분]의 진입 유효창이 된다.
+#
+# [근거] 08-05~08-12 실거래 104건을 편입→매수 지연으로 갈랐다(+30분 MFE):
+#     ~1분   n=23  MFE +4.50%      1~3분  n=27  MFE **+7.00%**(최고)
+#     5~10분 n=12  MFE +5.21%      10~30분 n=23  MFE +2.59%
+#     30분~  n=14  MFE **+1.79%**  <- 절반(50%)이 MFE 1% 미만 = 사실상 못 먹음
+#   corr(log10(지연), MFE) = **-0.291**. 30분 컷은 **5/5일 우세**.
+#   대표 사례: 08-12 JW신약 — 편입 09:01 -> 매수 09:39(38분), MFE -0.12%로
+#   사자마자 밀려 사용자가 수동 추가매수까지 하게 됐다.
+#
+# 🔴 기준은 `_first_seen`(그날 **첫 편입**)이다. prearm_candidate가 setdefault로
+#    넣으므로 재편입해도 갱신되지 않는다 — 위 검증도 첫 편입 기준이라 일치한다.
+# ⚠️ 조건식을 고쳐서 풀 문제가 아니다. 편입 직후 1~3분 매수가 MFE +7.00%로
+#    가장 좋았다 = 조건식은 좋은 자리를 잡아준다. 늦게 사는 쪽이 문제다.
+# ⚠️ 이 컷으로 08-05 아진엑스텍(+9.74%, 33분) 같은 건은 놓친다(14건 중 1건).
+# 롤백: 0 (또는 아주 큰 값) -> 상한 없음 = 08-12까지의 동작.
+MAX_ENTRY_AGE_SEC = 1800.0
+
 # ══════════════════════════════════════════════════════════════════
 # 확인 전용 조건식 (2026-08-11 신설, 사용자 지정)
 # ══════════════════════════════════════════════════════════════════
@@ -1143,6 +1163,22 @@ VI_STATIC_RATIO = 0.10          # 정적VI 발동 폭 (기준가 대비 ±10%)
 VI_UPPER_MARGIN_PCT = 0.005     # 상단까지 0.5% 이내면 확정매도
 VI_UPPER_MARGIN_TICKS = 2       # 또는 2호가 이내 (둘 중 하나만 맞으면 발동)
 
+# ── VI 상단 확정매도를 **50% 분할**로 (2026-08-12 신설) ─────────────────
+# [왜] 이 규칙의 목적은 익절이 아니라 **리스크 회피**다(VI가 발동하면 2분
+#   단일가라 시장가 매도가 막힌다). 그런데 VI 상단에 닿는 종목은 정의상
+#   그날 가장 강한 종목이라, 팔고 나서 계속 간다.
+# [실측] 08-05~08-12 VI 상단 매도 9건:
+#     실현 +2.37%인데 **판 뒤 30분 최고 +5.67% / 종가까지 +8.85%**,
+#     **78%가 판 뒤 +3% 이상** 더 갔다 — 전 청산 사유 중 가장 일찍 판다.
+#   (08-11에도 7건 전수로 "종가보유 +36.93% vs 실제 +18.41%"가 기록돼 있다.
+#    표본을 2건 -> 9건으로 늘려도 결론이 같아 이번에 반영한다.)
+# [설계] 절반만 빼서 VI 발동 리스크를 절반으로 줄이고, 잔량은 기존
+#   분할 트레일(PARTIAL_EXIT_TRAIL)에 맡겨 상승에 절반 참여한다.
+#   이미 분할이 나간 포지션(partial_exited)이면 잔량은 전량 정리한다 —
+#   그건 이미 트레일 관리 중인데 VI가 코앞이므로 리스크 회피가 우선이다.
+# 롤백: False -> 종전대로 전량 확정매도.
+VI_UPPER_EXIT_PARTIAL = True
+
 # ── 정적VI 상단 근접 시 **매수 차단** (2026-08-06 사용자 지정) ────────
 # [왜] 무장·버스트가 다 맞아도 VI 상단 코앞에서 사면 세 가지가 겹친다:
 #   ① VI가 걸리면 2분간 단일가매매라 **산 직후 손도 못 대는 구간**에 갇힌다.
@@ -1285,6 +1321,26 @@ ENTRY_PULLBACK_ENABLED = True
 #    **설계대로 총액 100%가 체결되게 하는 것** — 지금은 의도 금액의 절반만
 #    사져서 성과 측정 자체가 설계와 어긋나 있었다.
 ENTRY_PULLBACK_TRANCHES = ((0.003, 0.5), (0.007, 0.5))
+
+# ── 되돌림 2차 트랜치의 기준을 '편입가'로 (2026-08-12 신설) ─────────────
+# [왜] 되돌림은 **트리거가**(이미 오른 값) 기준으로 -0.3%/-0.7%를 잡는다.
+#   그런데 편입 -> 트리거 사이에 가격이 오르므로, 결국 '돌파 전'을 잡아준
+#   조건식의 취지를 우리가 스스로 깎아먹는다.
+#   실측(08-12): 편입->매수 지연 중앙값 97초에 **평균 +1.71% 양보**,
+#   13건 중 9건을 편입가보다 비싸게 샀다(남화토건 +6.97%, 서산 +4.37%).
+# [검증] 08-05~08-11 90건, '1차는 현행 + 2차만 편입가'로 바꾼 C안:
+#   체결 90/90(기회손실 0), MAE -1.62% -> -1.58%, 순 +1.60 -> +1.68%p,
+#   **4/5일 우세**. 2차가 편입가에 체결된 비율 66%.
+#   ⚠️ 효과는 작다(+0.08%p). 큰 개선을 기대하지 말 것.
+# 🔴 **1차는 절대 건드리지 않는다** — 그래야 '현행이 사던 건 다 산다'가
+#    보장된다(기회 손실 0). 앵커 단독안(B)은 강한 종목 31/90을 놓쳐서 버렸다
+#    (놓친 건이 순 +1.69%p로 오히려 더 좋았다).
+# 🔴 **downside 0 가드**: 편입가가 현행 2차보다 **낮을 때만** 바꾼다.
+#    편입 후 별로 안 오른 종목은 편입가가 오히려 위에 있어(08-12 JW신약:
+#    편입가 2,405 vs 현행 2차 2,403) 그대로 쓰면 더 비싸게 산다.
+#    -> 2차 가격은 언제나 현행보다 같거나 낮다(테스트 불변식).
+# 롤백: False -> 종전대로 트리거가 기준 -0.7%.
+ENTRY_ANCHOR_SECOND_TRANCHE = True
 ENTRY_PULLBACK_TIMEOUT_SEC = 120.0   # 이 시간 안에 안 오면 남은 트랜치는 포기
 
 # ── 되돌림 대기 중 '상승 이탈' 즉시진입 (2026-08-05 신규) ──────────────
@@ -1488,6 +1544,22 @@ REBUY_BURST_VALUE_MULT = 2.5
 PARTIAL_EXIT_ENABLED = True
 PARTIAL_EXIT_FRACTION = 0.5      # 신호 시 이 비중만 먼저 매도
 PARTIAL_EXIT_TRAIL = 0.030       # 잔량은 고점 대비 이만큼 밀리면 청산
+
+# ── 분할 잔량 보호 (2026-08-12 결함수정) ───────────────────────────────
+# 🔴 분할 1차가 나간 뒤 **동적캡이 다시 발동하면 잔량이 전량 청산**되고 있었다.
+#   `partial_exited`가 True면 분할 분기 조건을 못 넘어 아래 전량 매도로
+#   떨어지기 때문이다. 그러면 08-04에 이 기능을 만든 이유
+#   ("전량청산은 과잉대응이다. 절반은 트레일에 맡겨 추세를 남긴다")가
+#   **44~55초 만에 무력화**된다.
+# [실측 08-12] 일성건설 09:08:43 분할 -> 09:09:28 잔량 전량(45초)
+#              마녀공장 10:01:04 분할 -> 10:01:48 잔량 전량(44초)
+#              한켐     09:21:18 분할 -> 09:22:12 잔량 전량(54초)
+#   그리고 8일치에서 동적캡 12건 중 **50%가 판 뒤 +3% 이상** 더 갔다
+#   (특히 실현 +1% 이상에서 판 7건은 판 뒤 +3.81%).
+# -> True면 잔량은 **트레일(5-b)에만** 맡긴다. 손절·최종선·지수가드는
+#    그대로 살아 있으므로 무방비가 되는 것이 아니다(테스트로 못박음).
+# 롤백: False -> 08-12까지의 동작(동적캡 재발동 시 잔량 전량 청산).
+PARTIAL_EXIT_REMAINDER_HOLD = True
 
 # ── 손실 반등 하이브리드 매도 (2026-07-31 사용자 지정) ──────────
 # 손실 중인 종목이 저점에서 한 번 반등했는데 그 반등이 체결강도·거래량 어느
@@ -1736,6 +1808,10 @@ class StrategyManager:
         # stock_code -> 그 종목을 **처음 본 시각**(monotonic). [F] 진입 숙성 판정용.
         # 편입/pre-arm 어느 경로로 들어와도 여기 한 번만 찍힌다(setdefault).
         self._first_seen: dict[str, float] = {}
+        # stock_code -> **편입 시점 가격** (2026-08-12). 되돌림 2차 트랜치의
+        # 앵커로 쓴다(ENTRY_ANCHOR_SECOND_TRANCHE). _first_seen과 같은 자리에서
+        # 한 번만 찍히므로 재편입해도 최초 값이 유지된다. REST 0콜.
+        self._cond_hit_prices: dict[str, float] = {}
         # 일봉 캐시 (2026-08-07) — {code: {'asof':'YYYYMMDD','bars':[...]}}
         # 하루 1회만 채우고 판정은 여기서만 읽는다(진입 핫패스 REST 0콜).
         self._daily_bars: dict[str, dict] = {}
@@ -2426,6 +2502,15 @@ class StrategyManager:
         if waited < need:
             return (
                 f"진입 숙성 미달 (편입 후 {waited:.0f}초 < {need:.0f}초)"
+            )
+        # ── 진입 유효창 상한 (2026-08-12) ──────────────────────────
+        # 편입 후 너무 오래 지나서 잡는 신호는 실측상 우위가 없다
+        # (30분 초과 14건 MFE +1.79%, 절반이 1% 미만). 사유를 숙성과
+        # **분리**해 진단에서 구분되게 한다(뭉치면 어느 쪽인지 못 본다).
+        if MAX_ENTRY_AGE_SEC > 0 and waited > MAX_ENTRY_AGE_SEC:
+            return (
+                f"진입 유효창 만료 (편입 후 {waited / 60:.0f}분 > "
+                f"{MAX_ENTRY_AGE_SEC / 60:.0f}분)"
             )
         return None
 
@@ -4219,6 +4304,11 @@ class StrategyManager:
             logger.exception("[%s] pre-arm 감시 시작 실패", stock_code)
 
         px = current_price or self._fresh_tick_price(stock_code) or 0
+        # 편입가 앵커 (2026-08-12) — 되돌림 2차 트랜치 기준.
+        # setdefault라 재편입해도 **최초 편입가**가 유지된다(_first_seen과 동일 규약).
+        # px를 못 구하면 아무것도 안 남긴다 -> 앵커 없음 = 현행 동작(모름은 막지 않는다).
+        if px:
+            self._cond_hit_prices.setdefault(stock_code, float(px))
         if px and stock_code not in self._prev_closes:
             try:
                 self._get_prev_close(stock_code, px)
@@ -4927,6 +5017,17 @@ class StrategyManager:
                 "depth": depth,
                 "filled": False,
             })
+
+        # ── 2차 트랜치 앵커를 '편입가'로 (2026-08-12) ────────────────────
+        # 🔴 1차는 건드리지 않는다 — 현행이 사던 건은 그대로 산다(기회 손실 0).
+        # 🔴 편입가가 현행 2차보다 **낮을 때만** 바꾼다. 편입 후 별로 안 오른
+        #    종목은 편입가가 오히려 위에 있어(JW신약 2,405 vs 2,403), 그대로
+        #    쓰면 더 비싸게 산다. -> 2차 가격은 언제나 현행 이하가 보장된다.
+        if ENTRY_ANCHOR_SECOND_TRANCHE and len(targets) >= 2:
+            _anchor = self._cond_hit_prices.get(stock_code)
+            if _anchor and 0 < float(_anchor) < targets[-1]["price"]:
+                targets[-1]["price"] = float(_anchor)
+                targets[-1]["anchor"] = True
         self._entry_plans[stock_code] = {
             "trigger_price": trigger_price,
             "targets": targets,
@@ -6420,11 +6521,33 @@ class StrategyManager:
             if vi_info and vi_info["near"]:
                 why = ("2호가 이내" if vi_info["within_ticks"]
                        else f"{vi_info['gap_pct']*100:.2f}% 이내")
-                self._execute_sell(
-                    stock_code, current_price,
+                _reason = (
                     f"VI 상단 확정매도 (정적VI {vi_info['vi']:,.0f}원까지 {why}, "
-                    f"순 {net_rate*100:+.2f}%)",
+                    f"순 {net_rate*100:+.2f}%)"
                 )
+                # ── 50% 분할 (2026-08-12) ────────────────────────────
+                # 실측 9건에서 78%가 판 뒤 +3% 이상 더 갔다. 절반은 지금
+                # 빼서 VI 발동 리스크를 줄이고, 절반은 트레일에 남긴다.
+                _q = int(pos.get("qty", pos.get("buy_quantity")) or 0)
+                _half = int(_q * PARTIAL_EXIT_FRACTION)
+                if (VI_UPPER_EXIT_PARTIAL and PARTIAL_EXIT_ENABLED
+                        and not pos.get("partial_exited")
+                        and 1 <= _half < _q):
+                    self._execute_sell(
+                        stock_code, current_price,
+                        _reason + f" — 분할 1차 {int(PARTIAL_EXIT_FRACTION*100)}%"
+                        f" (잔량은 고점대비 {PARTIAL_EXIT_TRAIL*100:.1f}% 트레일)",
+                        sell_qty=_half,
+                    )
+                    # 잔량 트레일 기준 고점을 지금 시점으로 고정(동적캡 경로와 동일).
+                    _p = self.holdings.get(stock_code)
+                    if _p is not None:
+                        _p["trail_peak"] = max(
+                            float(_p.get("highest_price") or current_price),
+                            float(current_price),
+                        )
+                    return
+                self._execute_sell(stock_code, current_price, _reason)
                 return
 
         warmup_until = pos.get("warmup_until")
@@ -7057,6 +7180,12 @@ class StrategyManager:
                 f"거래량 x{vol_ratio:.2f}, 순 {net_rate:+.2f}%)"
             )
             remaining = int(pos.get("qty", pos.get("buy_quantity")) or 0)
+            # 🔴 (2026-08-12) 이미 분할 1차가 나간 포지션은 동적캡으로 **다시
+            #    팔지 않는다**. 잔량은 5-b 트레일이 담당한다 — 안 그러면 45초
+            #    만에 재발동해 '절반은 추세를 남긴다'는 설계가 무력화된다.
+            #    손절/최종선/지수가드는 이 분기와 무관하게 계속 살아 있다.
+            if PARTIAL_EXIT_REMAINDER_HOLD and pos.get("partial_exited"):
+                continue
             if (
                 PARTIAL_EXIT_ENABLED
                 and not pos.get("partial_exited")

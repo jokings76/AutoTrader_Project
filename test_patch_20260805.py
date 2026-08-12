@@ -654,11 +654,31 @@ def vi_run(open_price, buy, price, warm=False, guard=False, loss_guard=None):
     s.on_price_update("VI1", price)
     return s
 
+# (2026-08-12 사양변경) VI 확정매도가 **50% 분할**로 바뀌었다 —
+# 실측 9건에서 실현 +2.37%인데 판 뒤 30분 +5.67%, 78%가 +3% 이상 더 갔다.
+# 그래서 'holdings에서 사라졌는가'로는 더 이상 판정할 수 없다. 매도 주문이
+# 나갔는가 + 잔량이 남았는가로 본다. 분할 상세는 test_patch_20260813 [3].
 _r = vi_run(10_000, 10_000, 10_960)
-check("근접 + 순이익>0 -> 확정매도 실행", "VI1" not in _r.holdings)
-check("사유에 'VI 상단 확정매도'가 남는다",
-      any("VI 상단 확정매도" in (x.get("exit_reason") or "") for x in _Repo.sells),
-      str([x.get("exit_reason") for x in _Repo.sells])[:90])
+_vi_sold = [o for o in _r.order_manager.orders if o.get("side") == "sell"]
+check("근접 + 순이익>0 -> 확정매도 실행", len(_vi_sold) >= 1,
+      f"매도 {len(_vi_sold)}건")
+check("🆕 전량이 아니라 절반만 나간다 (08-12)",
+      bool(_vi_sold) and _vi_sold[0]["qty"] == 50 and "VI1" in _r.holdings,
+      f"{_vi_sold[0]['qty'] if _vi_sold else 0}주 / 잔량 "
+      f"{_r.holdings.get('VI1', {}).get('qty')}")
+
+# 🔴 롤백 경로 — 끈 기능의 배선을 남겨둔다(08-10 교훈).
+_sv_vip = SM.VI_UPPER_EXIT_PARTIAL
+SM.VI_UPPER_EXIT_PARTIAL = False
+try:
+    _r2 = vi_run(10_000, 10_000, 10_960)
+    check("롤백(False): 종전대로 전량 매도 + DB 기록",
+          "VI1" not in _r2.holdings
+          and any("VI 상단 확정매도" in (x.get("exit_reason") or "")
+                  for x in _Repo.sells),
+          str([x.get("exit_reason") for x in _Repo.sells])[:90])
+finally:
+    SM.VI_UPPER_EXIT_PARTIAL = _sv_vip
 
 # ⚠️ 손실 구간에서는 절대 발동하지 않아야 한다 (08-03 결함과 같은 원칙)
 _r = vi_run(10_000, 11_000, 10_960)          # 매수 11,000 -> 현재 10,960 = 손실
@@ -671,8 +691,17 @@ check("🔴 순이익 0 이하(수수료 미만)면 발동 안 함", "VI1" in _r
 #    그러니 "보유가 남아있는지"가 아니라 **"VI 사유로 나가지 않았는지"**를 봐야
 #    한다(처음엔 보유 여부로 단언했다가 이 정상 동작을 실패로 잡았다).
 def vi_reason(open_price, buy, price):
-    vi_run(open_price, buy, price)
-    return " | ".join((x.get("exit_reason") or "") for x in _Repo.sells)
+    # (2026-08-12) 여기서 보려는 건 **어느 규칙이 판정을 가져가는가**이지
+    # 분할 여부가 아니다. VI 분할이 켜져 있으면 update_sell을 안 부르므로
+    # (포지션이 안 닫힘) 사유가 DB에 안 남는다 -> 판정 목적에 맞게 끄고 잰다.
+    # 분할 동작 자체는 위 블록과 test_patch_20260813 [3]에서 본다.
+    _sv = SM.VI_UPPER_EXIT_PARTIAL
+    SM.VI_UPPER_EXIT_PARTIAL = False
+    try:
+        vi_run(open_price, buy, price)
+        return " | ".join((x.get("exit_reason") or "") for x in _Repo.sells)
+    finally:
+        SM.VI_UPPER_EXIT_PARTIAL = _sv
 
 # (2026-08-10) 캡 4.0 -> 6.0 상향으로 10,500(+5%)은 더 이상 캡에 안 닿는다.
 # 가격을 **상수에서 역산**해 캡을 확실히 넘긴다(앞으로 캡을 또 바꿔도 따라온다).
@@ -689,8 +718,11 @@ check(f"캡({SM.TAKE_PROFIT_CAP*100:.0f}%) 미달인데 VI만 가까우면 VI가
       "VI 상단" in _why, _why[:80])
 
 # 워밍업 중에도 작동 (가격 기반이라 안전)
+# (2026-08-12) 분할이라 잔량이 남으므로 매도 주문 발생으로 판정한다.
 _r = vi_run(10_000, 10_000, 10_960, warm=True)
-check("워밍업 중에도 VI 매도는 작동", "VI1" not in _r.holdings)
+check("워밍업 중에도 VI 매도는 작동",
+      any(o.get("side") == "sell" for o in _r.order_manager.orders),
+      f"매도 {sum(1 for o in _r.order_manager.orders if o.get('side') == 'sell')}건")
 
 # 우선순위: 손절 > 지수가드 > VI
 _s, _p = vi_setup(10_000, 11_500)            # VI 상단 11,000, 매수 11,500

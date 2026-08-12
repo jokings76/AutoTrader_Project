@@ -279,7 +279,18 @@ def replay_day(day, per_code, vol_stop=True):
         strat._opening_prices[code] = float(first_px)
         # 전일종가를 시가보다 1% 아래로 둔다 -> 등락률 하한(0% 초과) 통과.
         strat._prev_closes[code] = float(first_px) / 1.01
-        strat._first_seen[code] = WALL0 - 999.0     # 숙성 통과
+        # 편입 시각 — 숙성(최대 60초)은 통과하되 **진입 유효창 안**이어야 한다.
+        # ⚠️ (2026-08-12) 예전엔 -999초로 크게 밀어뒀는데, 진입 유효창 상한
+        #    (MAX_ENTRY_AGE_SEC=1800)이 생기자 waited = span+1299초가 되어
+        #    **전 종목이 '유효창 만료'로 차단, 매수 0건**이 됐다.
+        #    숙성만 보고 과거로 밀면 이제 반대쪽 경계에 걸린다.
+        # 🔴 종목마다 **자기 첫 틱 120초 전**에 편입된 것으로 둔다.
+        #    전역 WALL0 기준으로 잡으면 아카이브 span(여러 날짜가 섞이면 수일)이
+        #    그대로 waited에 더해져 유효창을 넘긴다. 실거래와도 이쪽이 유사하다.
+        _t0 = WALL0 + (ticks[0][0] - t_first).total_seconds()
+        strat._first_seen[code] = _t0 - 120.0
+        # 편입가 앵커(2026-08-12) — 실거래처럼 첫 틱 가격을 넣어둔다.
+        strat._cond_hit_prices[code] = float(first_px)
         strat.phase1b.start_watching(code)
         strat.phase1b.orderbook.update(
             code,

@@ -500,7 +500,16 @@ def scenario(label, price, buy=10_000, open_px=None, guard=False,
     if guard:
         s._is_index_guard_active = lambda now_dt=None: True
     _Repo.sells = []
-    s.on_price_update("P", price)
+    # (2026-08-12) 이 매트릭스는 **어느 규칙이 판정을 가져가는가**(우선순위)를
+    # 본다. VI 확정매도가 50% 분할이면 포지션이 안 닫혀 update_sell을 안 부르고
+    # 사유가 DB에 안 남는다 -> 우선순위 판정이 불가능해진다. 그래서 여기서만
+    # 분할을 끈다. 분할 동작 자체는 test_patch_20260813 [3]이 검증한다.
+    _sv_vip = SM.VI_UPPER_EXIT_PARTIAL
+    SM.VI_UPPER_EXIT_PARTIAL = False
+    try:
+        s.on_price_update("P", price)
+    finally:
+        SM.VI_UPPER_EXIT_PARTIAL = _sv_vip
     why = " | ".join(x.get("exit_reason") or "" for x in _Repo.sells) or "(보유유지)"
     print(f"    {label:<44} -> {why[:56]}")
     return why
@@ -656,6 +665,23 @@ if _doc:
               "시간 기반 자동청산" in _doc,
               "❌ 강제청산을 껐으면 문서 청산표/요약도 갱신할 것")
 
+    # (2026-08-12 장마감 후 신규 5건) 진입 유효창 / VI 분할 / 잔량 보호 /
+    # 편입가 앵커. 매수·매도 시점을 직접 바꾸는 값이라 문서와 어긋나면
+    # 장중에 "왜 안 사지/왜 벌써 팔지"를 판단할 수 없다.
+    doc_has("진입유효창", f"진입유효창 {SM.MAX_ENTRY_AGE_SEC}")
+    doc_has("VI분할", f"VI분할 {SM.VI_UPPER_EXIT_PARTIAL}")
+    doc_has("분할잔량보호", f"분할잔량보호 {SM.PARTIAL_EXIT_REMAINDER_HOLD}")
+    doc_has("편입가앵커", f"편입가앵커 {SM.ENTRY_ANCHOR_SECOND_TRANCHE}")
+
+    # 🔴 불변식 — 진입 유효창은 숙성보다 커야 창이 열린다.
+    if SM.MAX_ENTRY_AGE_SEC > 0:
+        check("진입 유효창 상한 > 숙성 하한 (창이 닫히지 않았다)",
+              SM.MAX_ENTRY_AGE_SEC > SM.MIN_ENTRY_DELAY_SEC,
+              f"{SM.MAX_ENTRY_AGE_SEC} > {SM.MIN_ENTRY_DELAY_SEC}")
+        check("진입 유효창 상한 > 조건식별 숙성 최대값",
+              SM.MAX_ENTRY_AGE_SEC > max(
+                  [SM.MIN_ENTRY_DELAY_SEC] + list(SM.MIN_ENTRY_DELAY_SEC_BY_COND.values())))
+
     # (2026-08-06 신규) [B][C][D]
     doc_has("등락률하한", f"등락률하한 {SM.MIN_ENTRY_CHANGE_PCT}")
     doc_has("상승이탈", f"상승이탈 {SM.ENTRY_BREAKOUT_ENABLED} {SM.ENTRY_BREAKOUT_PCT}")
@@ -737,7 +763,14 @@ def one_vi(label, expect, open_px, buy, price, **kw):
     for k, v in kw.items():
         setattr(s, k, v)
     _Repo.sells = []
-    s.on_price_update("M", price)
+    # (2026-08-12) scenario()와 같은 이유로 VI 분할을 끄고 잰다 —
+    # 여기서 보는 것은 '어느 사유로 나가는가'이지 분할 여부가 아니다.
+    _sv_vip = SM.VI_UPPER_EXIT_PARTIAL
+    SM.VI_UPPER_EXIT_PARTIAL = False
+    try:
+        s.on_price_update("M", price)
+    finally:
+        SM.VI_UPPER_EXIT_PARTIAL = _sv_vip
     why = " | ".join(x.get("exit_reason") or "" for x in _Repo.sells) or "(보유유지)"
     ok = (expect in why) if expect else (why == "(보유유지)")
     check(f"{label} -> {expect or '보유유지'}", ok, why[:58])
