@@ -170,7 +170,21 @@ check("무장 지점 > 바닥 (그 사이가 허용 되돌림 폭)",
       f"{SM.BREAKEVEN_TRIGGER} > {SM.BREAKEVEN_FLOOR}")
 # (2026-08-05) 0.0 -> 0.002. 바닥을 정확히 0%로 두면 매도가 시장가라
 # 체결이 판정가보다 아래에서 이뤄져 결국 마이너스로 나간다(포톤 -0.04% 실측).
-check("바닥은 순 +0.2% (슬리피지만큼 위)", abs(SM.BREAKEVEN_FLOOR - 0.002) < 1e-9)
+# 🔴 (2026-08-13 사양 변경) 0.002 -> **0.010**. '본전'이 아니라 +1% 확보.
+#    근거: 본전스톱 발동 12건 실측이 고점 순 +1.85% -> 실현 +0.07%로
+#    **1.78%p를 반납**하고 있었다(12/12건이 +1.0% 미만, 4건은 마이너스).
+#    무장 문턱(2.5%)은 건드리지 않았다 — 낮추면 격자 4개 열 전부 악화.
+check("바닥은 순 +1.0% (08-13 상향, 구 +0.2%)",
+      abs(SM.BREAKEVEN_FLOOR - 0.010) < 1e-9, f"{SM.BREAKEVEN_FLOOR}")
+# 롤백 검증 — 끈/바꾼 사양의 배선 테스트를 지우면 되살릴 때 검증이 없다.
+_svbf = SM.BREAKEVEN_FLOOR
+SM.BREAKEVEN_FLOOR = 0.002
+try:
+    check("[롤백] 0.002로 되돌리면 구 사양 그대로",
+          abs(SM.BREAKEVEN_FLOOR - 0.002) < 1e-9
+          and SM.BREAKEVEN_FLOOR < SM.BREAKEVEN_TRIGGER)
+finally:
+    SM.BREAKEVEN_FLOOR = _svbf
 
 px_arm = int(10_000 * (1 + SM.BREAKEVEN_TRIGGER + SM.ROUND_TRIP_COST)) + 1
 

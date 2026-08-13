@@ -150,7 +150,12 @@ print("\n[1] 상수 — 7건이 전부 반영됐는가")
 # ═════════════════════════════════════════════════════════
 check("① 시장가 문턱 1천만", SM.PHASE1A_ASK_DEPTH_MIN == 10_000_000,
       f"{SM.PHASE1A_ASK_DEPTH_MIN:,}")
-check("② 본전스톱 바닥 +0.2%", abs(SM.BREAKEVEN_FLOOR - 0.002) < 1e-9)
+# 🔴 (2026-08-13) 바닥 0.002 -> 0.010. 08-05에 넣은 "슬리피지만큼 위"는
+#    유지되고(여전히 0보다 크다) 값만 +1% 확보로 올라갔다.
+check("② 본전스톱 바닥 +1.0% (08-13 상향, 구 +0.2%)",
+      abs(SM.BREAKEVEN_FLOOR - 0.010) < 1e-9, f"{SM.BREAKEVEN_FLOOR}")
+check("②-b 바닥은 여전히 0보다 크다(시장가 슬리피지 방어 — 08-05 취지 유지)",
+      SM.BREAKEVEN_FLOOR > 0)
 check("④ 1A 등락률 13% / 눌림 10%",
       SM.MAX_ENTRY_CHANGE_PCT == 13.0 and SM.MAX_ENTRY_CHANGE_PCT_PULLBACK == 10.0)
 check("⑤ 되돌림 -0.3%/-0.7%",

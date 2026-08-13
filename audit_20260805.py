@@ -682,6 +682,23 @@ if _doc:
               SM.MAX_ENTRY_AGE_SEC > max(
                   [SM.MIN_ENTRY_DELAY_SEC] + list(SM.MIN_ENTRY_DELAY_SEC_BY_COND.values())))
 
+    # (2026-08-13 신규) 본전스톱 바닥 — 익절 확정 지점을 직접 바꾸는 값이다.
+    doc_has("본전스톱무장", f"본전스톱무장 {SM.BREAKEVEN_TRIGGER}")
+    doc_has("본전스톱바닥", f"본전스톱바닥 {SM.BREAKEVEN_FLOOR}")
+    # 🔴 불변식 — 바닥이 무장 문턱 이상이면 무장하는 순간 곧바로 청산된다.
+    #    (격자에서 '--'로 표시한 성립 불가 영역이 실제로 코드에 들어오면
+    #     본전스톱이 '무장 즉시 매도'라는 전혀 다른 규칙이 된다)
+    if SM.BREAKEVEN_STOP_ENABLED:
+        check("본전스톱 바닥 < 무장 문턱 (무장 즉시 청산이 아니다)",
+              SM.BREAKEVEN_FLOOR < SM.BREAKEVEN_TRIGGER,
+              f"{SM.BREAKEVEN_FLOOR} < {SM.BREAKEVEN_TRIGGER}")
+        check("본전스톱 바닥 > 0 (시장가 슬리피지로 마이너스 청산 방지)",
+              SM.BREAKEVEN_FLOOR > 0, str(SM.BREAKEVEN_FLOOR))
+        # 무장 문턱은 익절캡보다 아래여야 한다 — 위면 캡이 먼저 잡아 영영 무장 못 한다.
+        check("본전스톱 무장 문턱 < 익절캡 (무장 자체가 가능하다)",
+              SM.BREAKEVEN_TRIGGER < SM.TAKE_PROFIT_CAP,
+              f"{SM.BREAKEVEN_TRIGGER} < {SM.TAKE_PROFIT_CAP}")
+
     # (2026-08-13 신규) 매수 주가 상한 — 매수 대상 유니버스를 직접 자르는 값이라
     # 문서와 어긋나면 장중에 "왜 저 종목을 안 사지"를 판단할 수 없다.
     doc_has("주가상한", f"주가상한 {SM.MAX_ENTRY_PRICE}")

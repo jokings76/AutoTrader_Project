@@ -298,6 +298,100 @@ finally:
 check("롤백 후 원복", SM.MAX_ENTRY_PRICE == 100_000)
 
 
+# ══════════════════════════════════════════════════════════
+section("[7] 본전스톱 바닥 0.2% -> 1.0% (2026-08-13)")
+# ══════════════════════════════════════════════════════════
+check("BREAKEVEN_FLOOR == 0.010", SM.BREAKEVEN_FLOOR == 0.010, str(SM.BREAKEVEN_FLOOR))
+check("무장 문턱은 2.5% 그대로 (낮추면 승자를 자른다 — 격자 4/4열 악화)",
+      SM.BREAKEVEN_TRIGGER == 0.025, str(SM.BREAKEVEN_TRIGGER))
+check("🔴 불변식: 바닥 < 무장 (같거나 크면 무장 즉시 청산)",
+      SM.BREAKEVEN_FLOOR < SM.BREAKEVEN_TRIGGER,
+      f"{SM.BREAKEVEN_FLOOR} < {SM.BREAKEVEN_TRIGGER}")
+check("🔴 불변식: 무장 문턱 < 익절캡 (무장 자체가 가능하다)",
+      SM.BREAKEVEN_TRIGGER < SM.TAKE_PROFIT_CAP,
+      f"{SM.BREAKEVEN_TRIGGER} < {SM.TAKE_PROFIT_CAP}")
+
+
+def be_run(peak_net, back_to_net, floor=None):
+    """순 peak_net까지 올렸다가 back_to_net으로 되돌린다. 청산되면 True."""
+    sv = SM.BREAKEVEN_FLOOR
+    if floor is not None:
+        SM.BREAKEVEN_FLOOR = floor
+    try:
+        st = build()
+        buy = 10_000
+        st._prev_closes["B"] = buy * 0.95
+        st._opening_prices["B"] = buy
+        st._cond_names["B"] = "주도주상위"
+        st.holdings["B"] = {
+            "trade_id": 1, "stock_code": "B", "stock_name": "B",
+            "buy_price": buy, "buy_quantity": 100, "qty": 100,
+            "buy_time": NOW - timedelta(minutes=30),
+            "warmup_until": NOW - timedelta(seconds=1), "sub_strategy": "1A",
+            "strategy_phase": "1A", "origin_price": buy,
+            "lowest_price": buy, "highest_price": buy, "stop_rate": -0.045}
+        # 순수익률 -> 가격 역산 (수수료 0.23%)
+        def px(net): return buy * (1 + net + 0.0023)
+        st.on_price_update("B", px(peak_net))
+        armed = bool(st.holdings.get("B", {}).get("breakeven_armed"))
+        if "B" in st.holdings:
+            st.on_price_update("B", px(back_to_net))
+        return armed, ("B" not in st.holdings)
+    finally:
+        SM.BREAKEVEN_FLOOR = sv
+
+
+# 무장 자체는 종전과 동일해야 한다(문턱을 안 건드렸으므로)
+a, _ = be_run(0.024, 0.024)
+check("순 +2.4%로는 무장하지 않는다(문턱 불변)", not a)
+a, _ = be_run(0.026, 0.026)
+check("순 +2.6%면 무장한다(문턱 불변)", a)
+
+# 🔴 핵심 — 바닥이 실제로 1.0%에서 잘리는가
+_, sold = be_run(0.030, 0.011)
+check("🔴 순 +1.1%로 되돌리면 **팔지 않는다**(바닥 위)", not sold)
+_, sold = be_run(0.030, 0.010)
+check("🔴 순 +1.0%면 청산한다(바닥 도달)", sold)
+_, sold = be_run(0.030, 0.005)
+check("🔴 순 +0.5%면 청산한다 — 예전엔 여기까지 흘렀다", sold)
+
+# A/B — 롤백값(0.002)과 실제로 갈리는가 (공허한 검사 방지)
+_, sold_new = be_run(0.030, 0.005, floor=0.010)
+_, sold_old = be_run(0.030, 0.005, floor=0.002)
+check("🔴 [A/B] 순 +0.5%에서 신·구 사양이 갈린다 (검사가 공허하지 않다)",
+      sold_new and not sold_old,
+      f"바닥1.0%={'청산' if sold_new else '보유'} / 바닥0.2%={'청산' if sold_old else '보유'}")
+
+# 롤백
+_, sold = be_run(0.030, 0.003, floor=0.002)
+check("롤백(0.002): 순 +0.3%면 아직 안 판다(구 사양 복원)", not sold)
+_, sold = be_run(0.030, 0.001, floor=0.002)
+check("롤백(0.002): 순 +0.1%면 청산(구 사양 복원)", sold)
+
+# 무장 전에는 바닥이 아무 일도 하지 않는다 (회귀 방지)
+_, sold = be_run(0.005, 0.003)
+check("무장 전(순 +0.5%)에는 바닥이 발동하지 않는다", not sold)
+
+# 손절은 그대로 (바닥 상향이 하방 보호를 건드리지 않는다)
+st = build()
+st._prev_closes["S"] = 9_500
+st._opening_prices["S"] = 10_000
+st._cond_names["S"] = "주도주상위"
+st.holdings["S"] = {
+    "trade_id": 1, "stock_code": "S", "stock_name": "S", "buy_price": 10_000,
+    "buy_quantity": 100, "qty": 100, "buy_time": NOW - timedelta(minutes=30),
+    "warmup_until": NOW - timedelta(seconds=1), "sub_strategy": "1A",
+    "strategy_phase": "1A", "origin_price": 10_000, "lowest_price": 10_000,
+    "highest_price": 10_000, "stop_rate": -0.045}
+_svad2 = SM.AVG_DOWN_ENABLED
+SM.AVG_DOWN_ENABLED = False          # 물타기가 손절을 가로챈다(08-11 규약)
+try:
+    st.on_price_update("S", int(10_000 * (1 + SM.STOP_LOSS_RATE)) - 1)
+    check("손절은 바닥 상향과 무관하게 정상 발동", "S" not in st.holdings)
+finally:
+    SM.AVG_DOWN_ENABLED = _svad2
+
+
 print("\n" + "=" * 68)
 print(f"통과 {len(PASS)}건 / 실패 {len(FAIL)}건")
 if FAIL:
