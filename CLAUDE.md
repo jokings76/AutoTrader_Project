@@ -1742,10 +1742,12 @@ with get_connection() as c:
 | 16 | `python test_patch_20260811.py` | **62건 전원 통과** (🆕 **08-11 변경 전용** — 손절 계층 -4.5/-5.5/-6.0 / 돌파전·돌파후(확인전용) / **-3% 물타기**(경계·1회·캡·MDD·지수가드·복원분 제외·롤백) / **구조 후 최종선이 손절 분기 밖에 있는가** / 수동 추가매수 합산 / 수동매도·미체결 구분) |
 | 17 | `python test_patch_20260812.py` | **47건 전원 통과** (🆕 **08-12 변경 전용** — 물타기 **11:00 컷오프**(경계 7종·15:09 회귀방지·롤백) / 🔴 **물타기 주문거부 재시도 상한**(50틱 50회 -> 3회, 쿨다운, 포기 후에도 손절 정상) / **15:10 강제청산 폐지**(자동종료 비차단·가격청산 생존) / **지수가드 14:50 폐지**(1단계 본전청산은 생존·롤백) / **오버나이트 manual 격리**(당일분은 복원·슬롯 미점유·롤백) / 시간청산 전멸 불변식) |
 | 18 | `python test_patch_20260813.py` | **61건 전원 통과** (🆕 **08-12 장마감 후** — 🔴 **수동 추가매수 `elif` 결함**(JW신약 515→1032주 재현) / **진입 유효창 30분**(경계 6종·재편입 불변·롤백) / **VI 50% 분할**(잔량 생존·롤백) / **분할 잔량 보호**(동적캡 재발동 무시·손절은 생존) / ~~편입가 앵커~~(**OFF로 되돌림** — 배선은 ON으로 켜서 검증, 캐시 보존 확인) / 경로 수 불변) |
-| 19 | `git log --oneline -5` | 최신 커밋이 `b3a3fa7`(08-12 당일청산 폐지) 이후인지 |
-| 20 | `git status --short` | 비어 있어야 정상(작업 중이면 예외) |
+| 19 | `python test_patch_20260814.py` | **31건 전원 통과** (🆕 **매수 주가 상한** — 경계 10만원 / 두 진입경로 차단 / **전일종가 몰라도 상한 생존**(결합 회귀) / 진단 분류 분리 / 매도·익절·손절 무영향 / 물타기 우회 기록 / 롤백) |
+| 20 | `git log --oneline -5` | 최신 커밋이 `0ddf79f`(08-12 재검증) 이후인지 |
+| 21 | `git status --short` | 비어 있어야 정상(작업 중이면 예외) |
 
-**합계 1,781건 전원 통과**(297+89+132+70+165+24+144+187+68+168+51+91+103+22+62+47+61).
+**합계 1,815건 전원 통과**(297+89+132+70+165+24+144+187+68+**171**+51+91+103+22+62+47+61+**31**).
+⚠️ 08-13에 **#11 감사 168 -> 171**(주가상한 문서대조 + 불변식 2건), **#19 신규 31건**.
 **2026-08-12 장마감 후 실행으로 검증한 값이다**(진입 유효창 30분 / VI 50% 분할 /
 분할 잔량 보호 / 편입가 앵커 / 수동 추가매수 `elif` 결함수정 반영).
 ⚠️ 08-12 장마감 후에 **#8이 143 -> 144**(VI 분할 + 롤백 검증), **#11 감사가 162 -> 168**
@@ -1827,7 +1829,7 @@ with get_connection() as c:
 
 설정값이 의도대로인지 한 번에 보는 명령:
 ```
-python -c "import core.strategy_manager as s; from core.order_manager import FORCE_CLOSE_TIME; print('1A', s.GROUP_A_START, '~', s.PHASE1A_END); print('PB', s.PULLBACK_START, '~', s.PULLBACK_END); print('중복전환', s.DUAL_SOURCE_PULLBACK_FROM); print('청산', FORCE_CLOSE_TIME); print('슬롯', s.PHASE1A_MAX_SLOTS, s.PULLBACK_MAX_SLOTS, s.MAX_HOLDINGS, s.MAX_HOLDINGS_HARD); print('무장', s.TICK_STRENGTH_MIN, s.TICK_STRENGTH_SUSTAIN_SEC); print('버스트', s.PHASE1A_BURST_TRADE_VALUE, s.PHASE1A_BURST_TRADE_COUNT, s.PHASE1A_SINGLE_TRADE_VALUE); print('버스트방향', s.BURST_REQUIRE_BUY_SIDE); print('VWAP깊은검사', s.VWAP_ENTRY_CHECK_DEEPEST, s.PHASE1A_PRIORITY_MAX_PER_DAY); print('초반캡', s.EARLY_SLOT_CAP_ENABLED, s.EARLY_SLOT_CAP_UNTIL, s.EARLY_SLOT_CAP); print('발사분리', s.FIRE_GATE_SPLIT_ENABLED, s.FIRE_GATE_ACCEL_FROM, s.FIRE_ACCEL_MIN, s.FIRE_ACCEL_SHORT_SEC, s.FIRE_ACCEL_LONG_SEC, s.FIRE_ACCEL_MIN_TICKS); print('시간계수', sorted(set(v for _,v in s.TICK_BURST_TIME_MULT))); print('되돌림', s.ENTRY_PULLBACK_ENABLED, s.ENTRY_PULLBACK_TRANCHES, s.ENTRY_PULLBACK_TIMEOUT_SEC); print('상승이탈', s.ENTRY_BREAKOUT_ENABLED, s.ENTRY_BREAKOUT_PCT); print('등락률하한', s.MIN_ENTRY_CHANGE_PCT); print('진입숙성', s.MIN_ENTRY_DELAY_SEC); print('파동상한', s.BURST_WAVE_MAX); print('분할매도', s.PARTIAL_EXIT_ENABLED, s.PARTIAL_EXIT_FRACTION, s.PARTIAL_EXIT_TRAIL); print('지수가드', s.INDEX_GUARD_THRESHOLD, s.INDEX_GUARD_FROM, s.INDEX_GUARD_BREAKEVEN_UNTIL, s.INDEX_GUARD_FORCE_CLOSE); print('캡', s.TAKE_PROFIT_CAP, s.TAKE_PROFIT_CAP_PULLBACK, s.TAKE_PROFIT_CAP_EARLY, s.TP_CAP_UPGRADED_MAX); print('본전스톱', s.BREAKEVEN_STOP_ENABLED); print('1B잔재', hasattr(s, 'PHASE1B_ENABLED')); print('틱구동', s.TICK_ENTRY_ENABLED)"
+python -c "import core.strategy_manager as s; from core.order_manager import FORCE_CLOSE_TIME; print('1A', s.GROUP_A_START, '~', s.PHASE1A_END); print('PB', s.PULLBACK_START, '~', s.PULLBACK_END); print('중복전환', s.DUAL_SOURCE_PULLBACK_FROM); print('청산', FORCE_CLOSE_TIME); print('슬롯', s.PHASE1A_MAX_SLOTS, s.PULLBACK_MAX_SLOTS, s.MAX_HOLDINGS, s.MAX_HOLDINGS_HARD); print('무장', s.TICK_STRENGTH_MIN, s.TICK_STRENGTH_SUSTAIN_SEC); print('버스트', s.PHASE1A_BURST_TRADE_VALUE, s.PHASE1A_BURST_TRADE_COUNT, s.PHASE1A_SINGLE_TRADE_VALUE); print('버스트방향', s.BURST_REQUIRE_BUY_SIDE); print('VWAP깊은검사', s.VWAP_ENTRY_CHECK_DEEPEST, s.PHASE1A_PRIORITY_MAX_PER_DAY); print('초반캡', s.EARLY_SLOT_CAP_ENABLED, s.EARLY_SLOT_CAP_UNTIL, s.EARLY_SLOT_CAP); print('발사분리', s.FIRE_GATE_SPLIT_ENABLED, s.FIRE_GATE_ACCEL_FROM, s.FIRE_ACCEL_MIN, s.FIRE_ACCEL_SHORT_SEC, s.FIRE_ACCEL_LONG_SEC, s.FIRE_ACCEL_MIN_TICKS); print('시간계수', sorted(set(v for _,v in s.TICK_BURST_TIME_MULT))); print('되돌림', s.ENTRY_PULLBACK_ENABLED, s.ENTRY_PULLBACK_TRANCHES, s.ENTRY_PULLBACK_TIMEOUT_SEC); print('상승이탈', s.ENTRY_BREAKOUT_ENABLED, s.ENTRY_BREAKOUT_PCT); print('등락률하한', s.MIN_ENTRY_CHANGE_PCT); print('주가상한', s.MAX_ENTRY_PRICE); print('진입숙성', s.MIN_ENTRY_DELAY_SEC); print('파동상한', s.BURST_WAVE_MAX); print('분할매도', s.PARTIAL_EXIT_ENABLED, s.PARTIAL_EXIT_FRACTION, s.PARTIAL_EXIT_TRAIL); print('지수가드', s.INDEX_GUARD_THRESHOLD, s.INDEX_GUARD_FROM, s.INDEX_GUARD_BREAKEVEN_UNTIL, s.INDEX_GUARD_FORCE_CLOSE); print('캡', s.TAKE_PROFIT_CAP, s.TAKE_PROFIT_CAP_PULLBACK, s.TAKE_PROFIT_CAP_EARLY, s.TP_CAP_UPGRADED_MAX); print('본전스톱', s.BREAKEVEN_STOP_ENABLED); print('1B잔재', hasattr(s, 'PHASE1B_ENABLED')); print('틱구동', s.TICK_ENTRY_ENABLED)"
 ```
 기대값(**2026-08-06 [A][B][C][D] 수정 기준**):
 ```
@@ -1850,6 +1852,28 @@ VWAP깊은검사 True 0   <- 🆕 08-08. 계획 생성 시 **가장 깊은 트�
 되돌림 True ((0.003, 0.5), (0.007, 0.5)) 120.0   <- -0.3% / -0.7%
 상승이탈 False 0.003   <- [D] 08-06에 OFF. 폭 상수는 보존(되살릴 때 재사용)
 등락률하한 0.0        <- [C] 전일종가 대비 이 값 '초과'여야 매수 (= +일 때만)
+주가상한 100000       <- 🆕 08-13 사용자 지정. 이 가격 **이상**은 신규 매수 안 함.
+                      근거: 08-05 이후 청산 105건(수동매도 34건 제외)을 가격대로
+                      가르니 **10만+만 유일하게 중앙값 마이너스**다 —
+                        1만미만 n=59 평균 +0.16% 중앙 +0.23% 손절 36% -2%이하 22%
+                        1~2만  n=22  -0.57%  -0.49%  45%  27%
+                        2~5만  n=16  -0.14%  +0.20%  44%  25%
+                        **10만+ n=8  -1.87%  -2.08%  62%  50%**
+                      🔴 **날짜 효과가 아니다** — 산 4일 전부 그날 평균보다 열위
+                      (08-06 -3.06 vs -0.98 / 08-07 -0.74 vs -0.44 /
+                       08-10 -1.15 vs -0.07 / 08-11 -3.93 vs -0.91). 4/4일.
+                      🔴 기전: **비쌀수록 발사 게이트가 헐거워진다.** 진입 로그
+                      전수 파싱 결과 '게이트 무효' 비율이 가격과 단조 증가 —
+                      1만미만 26% / 1~2만 28% / 2~5만 32% / **10만+ 50%**.
+                      내역: 주가계수 절단 3(상한 3.00에 걸려 문턱이 의도보다
+                      15~43% 헐거움, 73,704원부터) / 가속도 4.00 수학적상한 2 /
+                      개장초반 발사면제 1.
+                      ⚠️ **표본 8건**이라 프로젝트 기준(30건+3일)에 못 미친다.
+                      ⚠️ **경계 10만원은 데이터로 고른 값이 아니다** — 5~10만
+                         구간 표본이 **0건**이라 어디부터 나빠지는지 미확정.
+                      ⚠️ 물타기는 bypass라 **이 상한을 안 받는다**(기존 보유분은
+                         -3%에서 수량이 는다). rescue-add는 받아 손절로 수렴.
+                      롤백: 0 = 상한 없음
 진입숙성 60.0        <- [F] 편입 후 이 초가 지나야 매수(기본값)
 숙성조건식별 {'돌파전': 30.0}   <- 🆕 08-11 조건식 개편으로 키 변경(돌파자동매매용
                       -> 돌파전). 30초는 **유지**(사용자 지정 "돌파전후 비교
@@ -2138,6 +2162,7 @@ python -c "import core.strategy_manager as s; print('주가계수', s.BURST_PRIC
 | 진입 조건 | **무장**(체결강도 FID228 100+ **3.0초 연속**) → **발사**(🆕 **09:00~09:05 면제 / 09:05~ 거래대금 가속 2.5배**, 08-08) → **되돌림 대기**(-0.3%/-0.7% 분할매수, 120초) | **1A와 동일** |
 | **발사 게이트** | 09:05 이전 면제 · 09:05부터 `value_acceleration(30초/120초) >= 2.5` + **최소 20틱**. ~~대량체결 버스트~~는 신규 진입에서 빠졌다(재매수·슬롯교체엔 그대로 남음) | 동일 |
 | **등락률 하한(전일종가)** | **+0% 초과** — 매수는 무조건 + 일 때만 (2026-08-06 [C]) | 동일 |
+| 🆕 **매수 주가 상한** | **100,000원 이상은 신규 매수 안 함** (2026-08-13 사용자 지정) | 동일 |
 | 등락률 상한(전일종가) | **13%** (08-05에 16%→13%) | **10%** |
 | **버스트 방향** | **매수 체결만** 센다 (2026-08-06 [B]. 투매를 매수 신호로 읽던 결함) | 동일 |
 | ~~상승 이탈 즉시매수~~ | **현재 OFF** (2026-08-06 [D]. 실측 평균 -1.00%/승률 22%) | 동일 |
@@ -2174,6 +2199,12 @@ python -c "import core.strategy_manager as s; print('주가계수', s.BURST_PRIC
    |   `_entry_delay_reject`가 숙성과 **같은 함수**에서 판정한다(호출부 2곳 자동 적용).
    |   사유 문구가 `진입 유효창 만료`라 숙성과 진단에서 구분된다.
    |   근거: 8일 104건 — 1~3분 매수 MFE +7.00%(최고) vs 30분~ +1.79%(절반이 못 먹음).
+   v
+[주가 상한]  현재가가 **100,000원 이상**이면 매수하지 않는다 (2026-08-13)
+   |          `_entry_change_reject()` **맨 앞**에서 본다 — 전일종가 판정보다
+   |          앞이라, 전일종가를 몰라도 상한은 살아 있다(결합 방지).
+   |          근거: 10만+ 8건 평균 -1.87%·중앙 -2.08%·손절률 62%, 4/4일 열위.
+   |          기전은 '비싼 게 나쁘다'가 아니라 **비쌀수록 발사 게이트가 헐거워진다**.
    v
 [등락률 게이트]  전일종가 대비 **0% 초과 ~ 상한(1A 13% / 눌림 10%)**
    |             <- 2026-08-06 [C]. 하한 미달(하락중)이면 여기서 끝.
@@ -2767,6 +2798,7 @@ for ts, price, _, volume in d          # <- 이 '_'가 side다. 버려졌다.
 | 🆕 **발사 게이트 분리** | `FIRE_GATE_SPLIT_ENABLED = False` -> 전 구간 옛 버스트로 완전 복귀. 문턱만 조이려면 `FIRE_ACCEL_MIN`(2.5 -> 3.0이면 하루 10.8 -> 5.6종목). 전환시각은 `FIRE_GATE_ACCEL_FROM`(09:05, 09:00으로 두면 전 구간 가속도). ⚠️ `FIRE_ACCEL_MIN_TICKS`(20)는 **금액이 아니라 개수** 하한이다 |
 | **[B] 버스트 매수 방향** | `BURST_REQUIRE_BUY_SIDE = False` -> 08-05까지의 동작(투매도 버스트로 셈). ⚠️ 이걸 끄면 "-%에서 매수"가 되살아난다 |
 | **[C] 등락률 하한** | `MIN_ENTRY_CHANGE_PCT = -100.0` -> 사실상 무제한(하한 없음). 현재 **0.0** = 전일종가 대비 + 일 때만 매수 |
+| 🆕 **매수 주가 상한**(08-13) | `MAX_ENTRY_PRICE = 0` -> 상한 없음(08-12까지의 동작). 현재 **100,000**(이 가격 **이상** 신규매수 금지). ⚠️ 물타기는 bypass라 안 받는다 |
 | **[D] 상승 이탈** | 현재 **OFF**. 되살리려면 `ENTRY_BREAKOUT_ENABLED = True` (폭 `ENTRY_BREAKOUT_PCT` 0.003은 보존돼 있다) |
 | **[E] 눌림목 매매** | `PULLBACK_MAX_SLOTS = 4` **+ `PHASE1A_MAX_SLOTS = 4`** — ⚠️ **반드시 둘 다**. 눌림만 되살리고 1A를 8로 두면 1A가 6칸을 독식한다 |
 | **[F] 진입 숙성** | `MIN_ENTRY_DELAY_SEC = 0.0` -> 편입 즉시 매수 가능(08-05까지의 동작) |

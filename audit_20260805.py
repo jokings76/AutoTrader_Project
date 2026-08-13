@@ -682,6 +682,22 @@ if _doc:
               SM.MAX_ENTRY_AGE_SEC > max(
                   [SM.MIN_ENTRY_DELAY_SEC] + list(SM.MIN_ENTRY_DELAY_SEC_BY_COND.values())))
 
+    # (2026-08-13 신규) 매수 주가 상한 — 매수 대상 유니버스를 직접 자르는 값이라
+    # 문서와 어긋나면 장중에 "왜 저 종목을 안 사지"를 판단할 수 없다.
+    doc_has("주가상한", f"주가상한 {SM.MAX_ENTRY_PRICE}")
+    if SM.MAX_ENTRY_PRICE > 0:
+        # 🔴 불변식 — 상한이 버스트 주가계수 클램프 시작가보다 위여야 의미가 있다.
+        #    (클램프 구간이 곧 '게이트가 헐거워지는 구간'이고, 상한은 그 위를 자른다)
+        _clamp_from = 10_000 * (SM.BURST_PRICE_MAX ** (1 / SM.BURST_PRICE_ALPHA))
+        check("주가 상한 > 버스트 계수 클램프 시작가 (헐거워지는 구간을 자른다)",
+              SM.MAX_ENTRY_PRICE > _clamp_from,
+              f"{SM.MAX_ENTRY_PRICE:,} > {_clamp_from:,.0f}")
+        # 상한이 되돌림 트랜치 1회분보다 크면 1주도 못 사는 종목이 생긴다.
+        check("주가 상한이 트랜치 1회분보다 작다 (최소 1주는 살 수 있다)",
+              SM.MAX_ENTRY_PRICE <= SM.POSITION_AMOUNT * SM.ENTRY_PULLBACK_TRANCHES[0][1],
+              f"{SM.MAX_ENTRY_PRICE:,} <= "
+              f"{SM.POSITION_AMOUNT * SM.ENTRY_PULLBACK_TRANCHES[0][1]:,.0f}")
+
     # (2026-08-06 신규) [B][C][D]
     doc_has("등락률하한", f"등락률하한 {SM.MIN_ENTRY_CHANGE_PCT}")
     doc_has("상승이탈", f"상승이탈 {SM.ENTRY_BREAKOUT_ENABLED} {SM.ENTRY_BREAKOUT_PCT}")
