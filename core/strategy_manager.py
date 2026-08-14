@@ -1378,6 +1378,44 @@ BREAKEVEN_TRIGGER = 0.025           # 순 +2.5% 도달 시 무장
 # 롤백: 0.002 (08-12까지의 동작).
 BREAKEVEN_FLOOR = 0.010             # 무장 후 순수익이 이 값 아래로 떨어지면 청산
 
+# ── 본전스톱 **50% 분할** (2026-08-14 신설, 사용자 지정) ────────────────
+# 바닥에서 전량 팔지 않고 절반만 팔고, 잔량은 기존 분할 트레일에 맡긴다.
+#
+# [왜] 08-14에 바닥 상향(0.2 -> 1.0%)의 실거래 첫날 결과가 나왔는데
+#   **금액 기준으로는 손해**였다. 본전스톱 5건 전수를 종일 분봉으로 반사실 계산:
+#       현행 바닥 1.0%   +30,968원
+#       옛 바닥  0.2%   +34,837원(비관) / +48,253원(낙관)   <- 두 가정 모두 옛것 우세
+#   그런데 내역을 보면 **현행이 4승 1패**다:
+#       금호타이어 +4,500 / 삼기에너지 +27,348 / 삼기 +8,316 / 세아메카닉스 +7,440
+#       **아이로보틱스 -51,473**  <- 이 한 건이 나머지 4승을 통째로 뒤집었다
+#   · 옛 바닥이었다면 그 4건은 **전부 마이너스로 청산**됐다
+#     (-888 / -18,759 / -3,047 / -2,492) — 12건 이력의 "마이너스 4/12"와 같은 패턴.
+#   · 아이로보틱스는 무장 32초 만에 +0.85%에 잘리고 **10분 뒤 +22.1%**까지 갔다.
+#   => 바닥을 되돌리면 평시 4건의 방어를 잃고, 유지하면 폭등을 놓친다.
+#      **분할이 둘 다 잡는다.**
+#
+# [실측] 같은 5건, 종일 분봉, 잔량은 고점대비 PARTIAL_EXIT_TRAIL(3%) 트레일:
+#       현행(전량)        +30,968원
+#       옛 바닥 0.2%      +34,837(비관) / +48,253(낙관)
+#       **분할(이 안)     +58,155(비관) / +37,844(낙관)**   <- 두 가정 모두 최고
+#   · 아이로보틱스 잔량이 익절캡까지(+25,737), 세아메카닉스도 캡까지(+13,857).
+#   · 대신 금호타이어(-5,290)·삼기에너지(-6,192)에서 조금 잃는다 —
+#     폭등을 잡으면서 평시 방어도 절반은 유지하는 형태다.
+#
+# [구조] 이 코드베이스는 **전량청산은 과잉대응**이라는 이유로 이미 세 규칙을
+#   50% 분할로 바꿨다(VI 상단 08-12 / 동적캡 08-04 / 반등소진 08-05).
+#   **본전스톱만 아직 전량**이었다 — 성과 이전에 정합성 논거가 선다.
+#
+# ⚠️ **표본 5건 / 하루치다.** 프로젝트 기준(30건 + 3일 우세)에 한참 못 미친다.
+#    본전스톱 발동 17건 중 12건은 틱 아카이브가 09:00~09:15만 담아 검증조차
+#    못 했다(이월과제 [R] 전 시간대 확대가 병목). 근거는 '정합성 + 5건 우세'이지
+#    성과가 입증된 값이 아니다.
+# 🔴 `be_partial_done` 가드가 핵심이다 — 분할 후에도 순이익은 여전히 바닥
+#    아래이므로, 가드가 없으면 **다음 틱에 잔량이 전량 청산**되어 기능이 무효가
+#    된다(08-12에 VI 상단에서 정확히 이 결함을 실측으로 잡았다).
+# 롤백: False -> 종전대로 바닥에서 전량 청산.
+BREAKEVEN_EXIT_PARTIAL = True
+
 # ── 되돌림 대기 분할매수 (2026-08-04 신규, 사용자 지정) ──────────
 # 08-04 틱 재생으로 확인된 사실: **버스트 트리거 시점은 국소 고점이다.**
 # 측정한 6건 전부가 트리거 후 60초 안에 되돌림을 겪었다(-0.45% ~ -1.78%).
@@ -6726,7 +6764,14 @@ class StrategyManager:
         # "캡 도달 종목 77%가 본전까지 되돌아온다"가 재현된다(상수 주석 참고).
         # 무장은 아래 익절 분기에서 하지 않고 여기서 직접 한다 — 지수급락
         # 모드로 빠져 익절 분기를 건너뛰어도 하방 보호는 살아있어야 한다.
-        if BREAKEVEN_STOP_ENABLED and exit_reason is None:
+        # 🔴 `be_partial_done`이 찍힌 포지션은 본전스톱을 **다시 보지 않는다**.
+        #    분할 1차가 나가면 순이익이 여전히 바닥 아래이므로, 이 가드가 없으면
+        #    **바로 다음 틱**에 잔량이 전량 청산되어 '50% 분할'이 무효가 된다
+        #    (08-12에 VI 상단에서 정확히 같은 결함을 실측으로 잡았다).
+        #    잔량은 아래 1-c 트레일 / 익절캡 / 손절이 받는다.
+        _be_partial = False
+        if (BREAKEVEN_STOP_ENABLED and exit_reason is None
+                and not pos.get("be_partial_done")):
             if not pos.get("breakeven_armed") and net_rate >= BREAKEVEN_TRIGGER:
                 pos["breakeven_armed"] = True
                 pos["breakeven_peak"] = net_rate
@@ -6742,6 +6787,7 @@ class StrategyManager:
                         f"본전스톱 (고점 순+{pos.get('breakeven_peak', 0.0)*100:.2f}% "
                         f"-> 현재 순{net_rate*100:+.2f}%)"
                     )
+                    _be_partial = True
 
         # 1-c) 분할매도 잔량 트레일 (2026-08-04) — 동적캡 1차(50%)가 나간
         # 포지션만 대상. 폭이 PARTIAL_EXIT_TRAIL(3%)로 넓은 이유는 '고점 도달 전
@@ -6863,6 +6909,31 @@ class StrategyManager:
                     )
 
         if exit_reason:
+            # ── 본전스톱 50% 분할 (2026-08-14 신설) ────────────────────────
+            # 근거는 BREAKEVEN_EXIT_PARTIAL 주석 참고. VI 상단·동적캡·반등소진이
+            # 이미 쓰는 기계(PARTIAL_EXIT_FRACTION/TRAIL)를 그대로 재사용한다.
+            # ⚠️ 다른 규칙이 이미 분할한 포지션(partial_exited)은 분할하지 않고
+            #    종전대로 잔량 전량 청산한다 — VI 상단과 같은 규약이다.
+            _q = int(pos.get("qty", pos.get("buy_quantity")) or 0)
+            _half = int(_q * PARTIAL_EXIT_FRACTION)
+            if (_be_partial and BREAKEVEN_EXIT_PARTIAL and PARTIAL_EXIT_ENABLED
+                    and not pos.get("partial_exited") and 1 <= _half < _q):
+                self._execute_sell(
+                    stock_code, current_price,
+                    exit_reason + f" — 분할 1차 {int(PARTIAL_EXIT_FRACTION*100)}%"
+                    f" (잔량은 고점대비 {PARTIAL_EXIT_TRAIL*100:.1f}% 트레일)",
+                    sell_qty=_half,
+                )
+                _p = self.holdings.get(stock_code)
+                # 🔴 표식은 분할이 **실제로 나갔을 때만** 찍는다. 주문이 실패하면
+                #    다음 틱에 정상 재시도된다(실패를 '처리 완료'로 오인하지 않는다).
+                if _p is not None and _p.get("partial_exited"):
+                    _p["be_partial_done"] = True
+                    _p["trail_peak"] = max(
+                        float(_p.get("highest_price") or current_price),
+                        float(current_price),
+                    )
+                return
             self._execute_sell(stock_code, current_price, exit_reason)
 
     def _rescue_precheck(self, stock_code: str, pos: dict) -> tuple[bool, str]:

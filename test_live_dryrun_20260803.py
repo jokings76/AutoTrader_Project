@@ -959,7 +959,13 @@ sN.holdings["PB1"]["warmup_until"] = cN.dt - timedelta(seconds=1)
 sN.on_price_update("PB1", armN)
 check("본전스톱 ON — 무장됨", sN.holdings["PB1"].get("breakeven_armed") is True)
 sN.on_price_update("PB1", buyN)
-check("본전스톱 ON — 본전 복귀 시 청산", "PB1" not in sN.holdings)
+# 🔴 (2026-08-14) 본전스톱은 50% 분할로 바뀌었다 — 완전 청산이 아니라
+#    절반 매도 + 잔량 보유가 정상이다(잔량은 3% 트레일이 받는다).
+check("본전스톱 ON — 본전 복귀 시 매도 발동(50% 분할)",
+      ("PB1" not in sN.holdings)
+      or (sN.holdings["PB1"].get("be_partial_done") is True),
+      f'보유 {sN.holdings.get("PB1", {}).get("qty", "청산")} / '
+      f'be_partial_done={sN.holdings.get("PB1", {}).get("be_partial_done")}')
 SM.PULLBACK_MAX_SLOTS = _pb_old3   # [E] 원상복구
 
 # (4) 손절은 워밍업 중에도 작동 (별도 포지션으로)

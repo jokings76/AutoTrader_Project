@@ -336,7 +336,11 @@ def be_run(peak_net, back_to_net, floor=None):
         armed = bool(st.holdings.get("B", {}).get("breakeven_armed"))
         if "B" in st.holdings:
             st.on_price_update("B", px(back_to_net))
-        return armed, ("B" not in st.holdings)
+        # 🔴 (2026-08-14) 본전스톱은 **50% 분할**이 됐다. '청산됐는가'는 이제
+        #    완전 청산이 아니라 **바닥이 발동했는가**로 판정해야 한다.
+        p = st.holdings.get("B")
+        fired = (p is None) or bool(p.get("be_partial_done"))
+        return armed, fired
     finally:
         SM.BREAKEVEN_FLOOR = sv
 
@@ -371,6 +375,69 @@ check("롤백(0.002): 순 +0.1%면 청산(구 사양 복원)", sold)
 # 무장 전에는 바닥이 아무 일도 하지 않는다 (회귀 방지)
 _, sold = be_run(0.005, 0.003)
 check("무장 전(순 +0.5%)에는 바닥이 발동하지 않는다", not sold)
+
+# ── 🆕 (2026-08-14) 본전스톱 50% 분할 ──────────────────────────────
+check("BREAKEVEN_EXIT_PARTIAL is True", SM.BREAKEVEN_EXIT_PARTIAL is True)
+
+
+def be_split(peak_net=0.030, back_net=0.005, ticks=1, partial=False):
+    st = build()
+    buy = 10_000
+    st._prev_closes["B"] = buy * 0.95
+    st._opening_prices["B"] = buy
+    st._cond_names["B"] = "주도주상위"
+    st.holdings["B"] = {
+        "trade_id": 1, "stock_code": "B", "stock_name": "B",
+        "buy_price": buy, "buy_quantity": 100, "qty": 50 if partial else 100,
+        "buy_time": NOW - timedelta(minutes=30),
+        "warmup_until": NOW - timedelta(seconds=1), "sub_strategy": "1A",
+        "strategy_phase": "1A", "origin_price": buy, "lowest_price": buy,
+        "highest_price": buy, "stop_rate": -0.045, "partial_exited": partial}
+    def _px(n): return int(buy * (1 + n + 0.0023))
+    st.on_price_update("B", _px(peak_net))
+    for _ in range(ticks):
+        if "B" in st.holdings:
+            st.on_price_update("B", _px(back_net))
+    return st
+
+
+st_s = be_split(ticks=4)
+_q = st_s.holdings.get("B", {}).get("qty", "청산")
+check("🔴 바닥 도달 시 절반만 판다", _q == 50, str(_q))
+check("🔴 연속 4틱에도 잔량이 살아남는다(다음 틱 전량청산 방지)",
+      "B" in st_s.holdings and st_s.holdings["B"]["qty"] == 50, str(_q))
+check("  be_partial_done 표식", st_s.holdings.get("B", {}).get("be_partial_done") is True)
+check("  잔량 트레일 기준 고점이 세팅된다",
+      float(st_s.holdings.get("B", {}).get("trail_peak") or 0) > 0)
+
+# 잔량은 무방비가 아니다
+st_t = be_split(ticks=1)
+if "B" in st_t.holdings:
+    _pk = float(st_t.holdings["B"]["trail_peak"])
+    st_t.on_price_update("B", int(_pk * (1 - SM.PARTIAL_EXIT_TRAIL) - 1))
+check("🔴 잔량은 트레일로 청산된다", "B" not in st_t.holdings,
+      str(st_t.holdings.get("B", {}).get("qty", "청산")))
+
+st_c = be_split(ticks=1)
+if "B" in st_c.holdings:
+    st_c.on_price_update("B", int(10_000 * (1 + SM.TAKE_PROFIT_CAP + 0.0023) + 1))
+check("🔴 잔량이 익절캡까지 가면 캡으로 청산", "B" not in st_c.holdings)
+
+# 의도 보존 — 다른 규칙이 이미 분할한 포지션은 종전대로 잔량 전량
+st_o = be_split(ticks=1, partial=True)
+check("의도 보존: 이미 분할된 포지션은 잔량 전량 청산", "B" not in st_o.holdings,
+      str(st_o.holdings.get("B", {}).get("qty", "청산")))
+
+# 롤백
+_svp = SM.BREAKEVEN_EXIT_PARTIAL
+SM.BREAKEVEN_EXIT_PARTIAL = False
+try:
+    st_r = be_split(ticks=3)
+    check("롤백(False): 종전대로 전량 청산", "B" not in st_r.holdings,
+          str(st_r.holdings.get("B", {}).get("qty", "청산")))
+finally:
+    SM.BREAKEVEN_EXIT_PARTIAL = _svp
+
 
 # 손절은 그대로 (바닥 상향이 하방 보호를 건드리지 않는다)
 st = build()

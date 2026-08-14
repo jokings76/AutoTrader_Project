@@ -1860,7 +1860,7 @@ with get_connection() as c:
 | 1 | `python -c "import main; print('OK')"` | `OK` (임포트 체인 전체 정상) |
 | 2 | `python test_patch_20260801.py` | **297건 전원 통과 / 실패 0건** |
 | 3 | `python test_patch_20260802.py` | **89건 전원 통과 / 실패 0건** (틱 구동 + 상대경로 뒷문차단 + VI 매수차단 교차) |
-| 4 | `python test_patch_20260803.py` | **133건 전원 통과** (익절/손절/시간계수/자동종료/종목명/지수가드/시간정리/슬롯교체/본전스톱ON) |
+| 4 | `python test_patch_20260803.py` | **137건 전원 통과** (익절/손절/시간계수/자동종료/종목명/지수가드/시간정리/슬롯교체/본전스톱ON) |
 | 5 | `python test_patch_20260804.py` | **70건 전원 통과** (되돌림 대기 분할매수 + 분할매도 + 폴링 우회 회귀방지) |
 | 6 | `python test_live_dryrun_20260803.py` | **165건 전원 통과** (종일 통합 + 기동 인프라 + 상수 불변식 + 설정조합 + 전면차단 교차감사) |
 | 7 | `python test_closing_bet_routing.py` | **24건 전원 통과** (종가베팅 분리 라우팅) |
@@ -1875,11 +1875,13 @@ with get_connection() as c:
 | 16 | `python test_patch_20260811.py` | **62건 전원 통과** (🆕 **08-11 변경 전용** — 손절 계층 -4.5/-5.5/-6.0 / 돌파전·돌파후(확인전용) / **-3% 물타기**(경계·1회·캡·MDD·지수가드·복원분 제외·롤백) / **구조 후 최종선이 손절 분기 밖에 있는가** / 수동 추가매수 합산 / 수동매도·미체결 구분) |
 | 17 | `python test_patch_20260812.py` | **47건 전원 통과** (🆕 **08-12 변경 전용** — 물타기 **11:00 컷오프**(경계 7종·15:09 회귀방지·롤백) / 🔴 **물타기 주문거부 재시도 상한**(50틱 50회 -> 3회, 쿨다운, 포기 후에도 손절 정상) / **15:10 강제청산 폐지**(자동종료 비차단·가격청산 생존) / **지수가드 14:50 폐지**(1단계 본전청산은 생존·롤백) / **오버나이트 manual 격리**(당일분은 복원·슬롯 미점유·롤백) / 시간청산 전멸 불변식) |
 | 18 | `python test_patch_20260813.py` | **61건 전원 통과** (🆕 **08-12 장마감 후** — 🔴 **수동 추가매수 `elif` 결함**(JW신약 515→1032주 재현) / **진입 유효창 30분**(경계 6종·재편입 불변·롤백) / **VI 50% 분할**(잔량 생존·롤백) / **분할 잔량 보호**(동적캡 재발동 무시·손절은 생존) / ~~편입가 앵커~~(**OFF로 되돌림** — 배선은 ON으로 켜서 검증, 캐시 보존 확인) / 경로 수 불변) |
-| 19 | `python test_patch_20260814.py` | **45건 전원 통과** (🆕 **매수 주가 상한 + 본전스톱 바닥** — 경계 10만원 / 두 진입경로 차단 / **전일종가 몰라도 상한 생존**(결합 회귀) / 진단 분류 분리 / 물타기 우회 기록 / **바닥 1.0% 경계 3종 + A/B(신·구가 실제로 갈리는가) + 무장 문턱 불변 + 손절 생존** / 롤백 2종) |
+| 19 | `python test_patch_20260814.py` | **54건 전원 통과** (🆕 **매수 주가 상한 + 본전스톱 바닥** — 경계 10만원 / 두 진입경로 차단 / **전일종가 몰라도 상한 생존**(결합 회귀) / 진단 분류 분리 / 물타기 우회 기록 / **바닥 1.0% 경계 3종 + A/B(신·구가 실제로 갈리는가) + 무장 문턱 불변 + 손절 생존** / 롤백 2종) |
 | 20 | `git log --oneline -5` | 최신 커밋이 `0ddf79f`(08-12 재검증) 이후인지 |
 | 21 | `git status --short` | 비어 있어야 정상(작업 중이면 예외) |
 
-**합계 1,836건 전원 통과**(297+89+133+70+165+24+145+187+68+**176**+51+91+103+22+62+47+61+**45**).
+**합계 1,849건 전원 통과**(297+89+**137**+70+165+24+145+187+68+176+51+91+103+22+62+47+61+**54**).
+⚠️ 08-14에 **#19 45->54**(본전스톱 50% 분할 9건), **#4 133->137**(옛 '전량 청산'
+단언 2건을 분할 사양으로 교체 + 연속틱 회귀 + 롤백 검증).
 ⚠️ 08-13에 **#11 감사 168 -> 176**(주가상한·본전스톱 문서대조 + 불변식 5건),
 **#19 신규 45건**, **#4 132->133 / #8 144->145**(옛 바닥 +0.2%를 단언하던 2건을
 새 사양으로 교체하고 **롤백 검증을 같이 넣었다**).
@@ -1964,7 +1966,7 @@ with get_connection() as c:
 
 설정값이 의도대로인지 한 번에 보는 명령:
 ```
-python -c "import core.strategy_manager as s; from core.order_manager import FORCE_CLOSE_TIME; print('1A', s.GROUP_A_START, '~', s.PHASE1A_END); print('PB', s.PULLBACK_START, '~', s.PULLBACK_END); print('중복전환', s.DUAL_SOURCE_PULLBACK_FROM); print('청산', FORCE_CLOSE_TIME); print('슬롯', s.PHASE1A_MAX_SLOTS, s.PULLBACK_MAX_SLOTS, s.MAX_HOLDINGS, s.MAX_HOLDINGS_HARD); print('무장', s.TICK_STRENGTH_MIN, s.TICK_STRENGTH_SUSTAIN_SEC); print('버스트', s.PHASE1A_BURST_TRADE_VALUE, s.PHASE1A_BURST_TRADE_COUNT, s.PHASE1A_SINGLE_TRADE_VALUE); print('버스트방향', s.BURST_REQUIRE_BUY_SIDE); print('VWAP깊은검사', s.VWAP_ENTRY_CHECK_DEEPEST, s.PHASE1A_PRIORITY_MAX_PER_DAY); print('초반캡', s.EARLY_SLOT_CAP_ENABLED, s.EARLY_SLOT_CAP_UNTIL, s.EARLY_SLOT_CAP); print('발사분리', s.FIRE_GATE_SPLIT_ENABLED, s.FIRE_GATE_ACCEL_FROM, s.FIRE_ACCEL_MIN, s.FIRE_ACCEL_SHORT_SEC, s.FIRE_ACCEL_LONG_SEC, s.FIRE_ACCEL_MIN_TICKS); print('시간계수', sorted(set(v for _,v in s.TICK_BURST_TIME_MULT))); print('되돌림', s.ENTRY_PULLBACK_ENABLED, s.ENTRY_PULLBACK_TRANCHES, s.ENTRY_PULLBACK_TIMEOUT_SEC); print('상승이탈', s.ENTRY_BREAKOUT_ENABLED, s.ENTRY_BREAKOUT_PCT); print('등락률하한', s.MIN_ENTRY_CHANGE_PCT); print('주가상한', s.MAX_ENTRY_PRICE); print('진입숙성', s.MIN_ENTRY_DELAY_SEC); print('파동상한', s.BURST_WAVE_MAX); print('분할매도', s.PARTIAL_EXIT_ENABLED, s.PARTIAL_EXIT_FRACTION, s.PARTIAL_EXIT_TRAIL); print('지수가드', s.INDEX_GUARD_THRESHOLD, s.INDEX_GUARD_FROM, s.INDEX_GUARD_BREAKEVEN_UNTIL, s.INDEX_GUARD_FORCE_CLOSE); print('캡', s.TAKE_PROFIT_CAP, s.TAKE_PROFIT_CAP_PULLBACK, s.TAKE_PROFIT_CAP_EARLY, s.TP_CAP_UPGRADED_MAX); print('본전스톱', s.BREAKEVEN_STOP_ENABLED); print('본전스톱무장', s.BREAKEVEN_TRIGGER); print('본전스톱바닥', s.BREAKEVEN_FLOOR); print('1B잔재', hasattr(s, 'PHASE1B_ENABLED')); print('틱구동', s.TICK_ENTRY_ENABLED)"
+python -c "import core.strategy_manager as s; from core.order_manager import FORCE_CLOSE_TIME; print('1A', s.GROUP_A_START, '~', s.PHASE1A_END); print('PB', s.PULLBACK_START, '~', s.PULLBACK_END); print('중복전환', s.DUAL_SOURCE_PULLBACK_FROM); print('청산', FORCE_CLOSE_TIME); print('슬롯', s.PHASE1A_MAX_SLOTS, s.PULLBACK_MAX_SLOTS, s.MAX_HOLDINGS, s.MAX_HOLDINGS_HARD); print('무장', s.TICK_STRENGTH_MIN, s.TICK_STRENGTH_SUSTAIN_SEC); print('버스트', s.PHASE1A_BURST_TRADE_VALUE, s.PHASE1A_BURST_TRADE_COUNT, s.PHASE1A_SINGLE_TRADE_VALUE); print('버스트방향', s.BURST_REQUIRE_BUY_SIDE); print('VWAP깊은검사', s.VWAP_ENTRY_CHECK_DEEPEST, s.PHASE1A_PRIORITY_MAX_PER_DAY); print('초반캡', s.EARLY_SLOT_CAP_ENABLED, s.EARLY_SLOT_CAP_UNTIL, s.EARLY_SLOT_CAP); print('발사분리', s.FIRE_GATE_SPLIT_ENABLED, s.FIRE_GATE_ACCEL_FROM, s.FIRE_ACCEL_MIN, s.FIRE_ACCEL_SHORT_SEC, s.FIRE_ACCEL_LONG_SEC, s.FIRE_ACCEL_MIN_TICKS); print('시간계수', sorted(set(v for _,v in s.TICK_BURST_TIME_MULT))); print('되돌림', s.ENTRY_PULLBACK_ENABLED, s.ENTRY_PULLBACK_TRANCHES, s.ENTRY_PULLBACK_TIMEOUT_SEC); print('상승이탈', s.ENTRY_BREAKOUT_ENABLED, s.ENTRY_BREAKOUT_PCT); print('등락률하한', s.MIN_ENTRY_CHANGE_PCT); print('주가상한', s.MAX_ENTRY_PRICE); print('진입숙성', s.MIN_ENTRY_DELAY_SEC); print('파동상한', s.BURST_WAVE_MAX); print('분할매도', s.PARTIAL_EXIT_ENABLED, s.PARTIAL_EXIT_FRACTION, s.PARTIAL_EXIT_TRAIL); print('지수가드', s.INDEX_GUARD_THRESHOLD, s.INDEX_GUARD_FROM, s.INDEX_GUARD_BREAKEVEN_UNTIL, s.INDEX_GUARD_FORCE_CLOSE); print('캡', s.TAKE_PROFIT_CAP, s.TAKE_PROFIT_CAP_PULLBACK, s.TAKE_PROFIT_CAP_EARLY, s.TP_CAP_UPGRADED_MAX); print('본전스톱', s.BREAKEVEN_STOP_ENABLED); print('본전스톱무장', s.BREAKEVEN_TRIGGER); print('본전스톱바닥', s.BREAKEVEN_FLOOR); print('본전스톱분할', s.BREAKEVEN_EXIT_PARTIAL); print('1B잔재', hasattr(s, 'PHASE1B_ENABLED')); print('틱구동', s.TICK_ENTRY_ENABLED)"
 ```
 기대값(**2026-08-06 [A][B][C][D] 수정 기준**):
 ```
@@ -2042,6 +2044,18 @@ VWAP깊은검사 True 0   <- 🆕 08-08. 계획 생성 시 **가장 깊은 트�
                       (2.5 > 2.0 > 1.5 > 1.0). 낮추면 더 많이 무장하고 바닥이
                       **승자를 자른다**(조건검색 +6.05->+1.00 / 서산 +4.39->+0.77).
                       -> 문턱은 2.5% 유지가 맞다
+본전스톱분할 True       <- 🆕 08-14 사용자 지정. 바닥에서 **전량이 아니라 50%만** 팔고
+                      잔량은 고점대비 3% 트레일(PARTIAL_EXIT_TRAIL)에 맡긴다.
+                      근거: 08-14 본전스톱 5건 종일 분봉 반사실 —
+                        현행(전량) +30,968 / 옛바닥0.2% +34,837(비관)·+48,253(낙관)
+                        **분할 +58,155(비관)·+37,844(낙관)** <- 두 가정 모두 최고
+                      구조: VI상단·동적캡·반등소진이 이미 50% 분할이고
+                      **본전스톱만 전량**이었다(정합성 논거).
+                      🔴 `be_partial_done` 가드 필수 — 없으면 분할 후에도 순이익이
+                        바닥 아래라 **다음 틱에 잔량 전량청산**되어 기능이 무효가 된다
+                        (08-12 VI 상단에서 같은 결함을 실측으로 잡았다).
+                      ⚠️ 표본 5건·하루치. 근거는 정합성이지 성과 입증이 아니다.
+                      롤백: False
 본전스톱바닥 0.01       <- 🆕 08-13 사용자 지정. 0.002 -> **0.010** ('본전'이 아니라 +1% 확보).
                       근거: 본전스톱 발동 **12건 전수 실측** —
                         고점 순 평균 +1.85% -> 실현 순 평균 **+0.07%** = **1.78%p 반납**
@@ -2432,7 +2446,7 @@ python -c "import core.strategy_manager as s; print('주가계수', s.BURST_PRIC
 | **급등 버스트 강화** | `PHASE1A_OPEN_SURGE_STRICT_FROM`(6.0) / `PHASE1A_OPEN_SURGE_BURST_MULT`(1.5). 배수를 1.0으로 두면 무효화 |
 | **VI 상단 확정매도** | 정적VI 상단(시가 x1.10)까지 **0.5% 이내 또는 2호가 이내** + **순이익>0** -> 🆕 **50%만 분할매도**(08-12), 잔량은 3% 트레일 | 2026-08-05 신규. VI 발동 시 2분 단일가라 시장가 매도가 막히는 것을 미리 피한다. **시가 캐시가 없으면 발동 안 함**(전일종가 폴백 금지), **이미 VI선을 넘었으면 발동 안 함**. 워밍업보다 앞(순수 가격 판정). 하단 VI 로직은 없다(손절이 항상 먼저).<br>🆕 **08-12에 50% 분할로 바꿨다** — 8일 9건에서 실현 +2.37%인데 판 뒤 30분 **+5.67%**, **78%가 +3% 이상** 더 갔다(전 청산 사유 중 가장 일찍 판다). 목적이 익절이 아니라 **VI 발동 회피**이므로 절반만 빼고 절반은 추세에 남긴다. 이미 분할이 나간 포지션이면 잔량 전량(리스크 회피 우선). 롤백 `VI_UPPER_EXIT_PARTIAL=False` |
 | 3 | (워밍업 60초 — 아래는 여기서 대기) | | 강도·거래량 기반 판정만 유예 |
-| 4 | 본전스톱 | **순 +2.5%** 도달 후 **순 +1.0%** 아래로 이탈 시 청산 (08-13에 바닥 0.2% -> **1.0%**) | **현재 ON**. 발동 12건 실측이 고점 +1.85% -> 실현 +0.07%로 **1.78%p를 반납**하고 있었다 |
+| 4 | 본전스톱 | **순 +2.5%** 도달 후 **순 +1.0%** 아래로 이탈 시 🆕 **50%만 분할매도**(08-14), 잔량은 3% 트레일 (바닥은 08-13에 0.2% -> **1.0%**) | **현재 ON**. 발동 12건 실측이 고점 +1.85% -> 실현 +0.07%로 **1.78%p를 반납**하고 있었다 |
 | 5 | 익절 캡 | **1A 6.0% / 눌림·개장초반 6.0% / 상향 8.0%** (08-10 상향) | 지수 -5%면 1.5%로 축소. 실질 천장은 **VI 상단** |
 | 5-b | **분할 잔량 트레일** | 분할 1차가 나간 포지션이 고점 대비 **3%** 하락 | 2026-08-04 신규. 🆕 **08-12부터 잔량은 동적캡으로 안 판다**(`PARTIAL_EXIT_REMAINDER_HOLD`) — 예전엔 분할 1차 후 **44~55초 만에** 동적캡이 재발동해 잔량이 전량 털렸다(일성건설 45초/마녀공장 44초/한켐 54초). 이제 잔량은 **이 트레일 + 손절/최종선/지수가드**만 받는다 |
 | 6 | 동적캡 → **분할매도 50%** | **상향된** 포지션 + 강도·거래량 동시하락 + **순이익>0** | 08-03 결함 3건 수정 / **08-04부터 전량이 아니라 절반**, 잔량은 5-b로 |
@@ -2988,6 +3002,7 @@ for ts, price, _, volume in d          # <- 이 '_'가 side다. 버려졌다.
 | **VI 상단 확정매도** | `VI_UPPER_EXIT_ENABLED = False` |
 | **재매수 대금** | `REBUY_BURST_VALUE_MULT`(2.5) |
 | **추가매수 끄기** | `RESCUE_ADD_ENABLED = False` |
+| 🆕 **본전스톱 50% 분할**(08-14) | `BREAKEVEN_EXIT_PARTIAL = False` -> 바닥에서 종전대로 전량 청산. 잔량 트레일 폭은 `PARTIAL_EXIT_TRAIL`(3%) 공용. ⚠️ 되돌리면 폭등 종목을 바닥에서 통째로 놓친다(08-14 아이로보틱스 +22%) |
 | **본전스톱** | `BREAKEVEN_STOP_ENABLED` / 무장 `BREAKEVEN_TRIGGER`(**0.025**, 08-10에 0.010에서 상향 — 🔴 **낮추지 말 것**, 08-13 격자에서 4개 열 전부 악화) / 바닥 `BREAKEVEN_FLOOR`(🆕 **0.010**, 08-13에 0.002에서 상향. 롤백 0.002) |
 | 🆕 **익절캡**(08-10 상향) | `EXIT_POLICY['default']['take_profit_cap']`(0.06) / `TAKE_PROFIT_CAP_PULLBACK`(0.06) / `TAKE_PROFIT_CAP_EARLY`(0.06) / `TP_CAP_UPGRADED_MAX`(0.08). ⚠️ **본전스톱과 세트로** 되돌릴 것 |
 | 🆕 **정체·시간정리** | `STAGNANT_EXIT_ENABLED = True` -> 08-01~08-10 사양 부활(정체 15분 / 시간 30분) |

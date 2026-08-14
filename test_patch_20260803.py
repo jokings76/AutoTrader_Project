@@ -194,10 +194,40 @@ pos = put_pos(s)
 s.on_price_update("000001", px_arm)
 check("ON이면 순+1% 도달 시 무장", pos.get("breakeven_armed") is True)
 s.on_price_update("000001", 10_000)
-check("ON이면 본전 이탈 시 청산", sold(s))
-check("청산 사유가 본전스톱",
-      any("본전스톱" in (r.get("exit_reason") or "") for r in _Repo.sells),
-      str([r.get("exit_reason") for r in _Repo.sells])[:70])
+# 🔴 (2026-08-14 사양 변경) 본전스톱은 이제 **50% 분할**이다(BREAKEVEN_EXIT_PARTIAL).
+#    잔량은 고점대비 3% 트레일이 받으므로, 이 시점엔 '완전 청산'이 아니라
+#    '절반 매도 + 잔량 보유'가 정상이다.
+# ⚠️ 이 스위트의 주문 스텁은 side를 안 남긴다 — 수량·보유로 판정한다.
+_be_orders = list(s.order_manager.orders)
+check("ON이면 본전 이탈 시 매도가 나간다", bool(_be_orders),
+      str(_be_orders)[:60])
+check("🔴 전량이 아니라 절반만 (08-14 분할 전환)",
+      bool(_be_orders) and _be_orders[-1]["qty"] == 50
+      and s.holdings.get("000001", {}).get("qty") == 50,
+      f'{_be_orders[-1]["qty"] if _be_orders else 0}주 / 보유 '
+      f'{s.holdings.get("000001", {}).get("qty", "청산")}')
+check("🔴 분할 표식이 찍힌다(다음 틱에 잔량이 안 털린다)",
+      s.holdings.get("000001", {}).get("be_partial_done") is True)
+# 연속 틱 회귀 — 분할 후 같은 가격이 또 와도 잔량은 살아 있어야 한다
+s.on_price_update("000001", 10_000)
+check("🔴 [회귀] 연속 틱에도 잔량 50주 유지",
+      s.holdings.get("000001", {}).get("qty") == 50,
+      str(s.holdings.get("000001", {}).get("qty", "청산")))
+
+# [롤백] BREAKEVEN_EXIT_PARTIAL=False -> 종전대로 전량 청산 + DB 사유 기록
+_svbp = SM.BREAKEVEN_EXIT_PARTIAL
+SM.BREAKEVEN_EXIT_PARTIAL = False
+try:
+    s2 = build()
+    pos2 = put_pos(s2)
+    s2.on_price_update("000001", px_arm)
+    s2.on_price_update("000001", 10_000)
+    check("[롤백] False면 전량 청산", sold(s2))
+    check("[롤백] 청산 사유가 본전스톱",
+          any("본전스톱" in (r.get("exit_reason") or "") for r in _Repo.sells),
+          str([r.get("exit_reason") for r in _Repo.sells])[:70])
+finally:
+    SM.BREAKEVEN_EXIT_PARTIAL = _svbp
 
 # 구버전 '익절 조기확정' 문자열은 플래그와 무관하게 코드에서 완전히 제거돼야 한다.
 check("조기확정 문자열이 코드에서 제거됨",
