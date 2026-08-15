@@ -18,6 +18,10 @@ if not exist "%ROOT%\ui\server.py" (
 cd /d "%ROOT%"
 set PYTHONIOENCODING=utf-8
 echo Starting dashboard on http://127.0.0.1:8787  (Ctrl+C to stop)
-start "" http://127.0.0.1:8787
+
+REM Pass "nobrowser" to skip opening a browser tab. The logon-triggered
+REM scheduled task uses that, so a browser does not pop up on every logon.
+if /i not "%~1"=="nobrowser" start "" http://127.0.0.1:8787
+
 python -m ui.server
 endlocal

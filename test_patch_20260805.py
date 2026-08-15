@@ -700,19 +700,26 @@ def vi_reason(open_price, buy, price):
     # 분할 여부가 아니다. VI 분할이 켜져 있으면 update_sell을 안 부르므로
     # (포지션이 안 닫힘) 사유가 DB에 안 남는다 -> 판정 목적에 맞게 끄고 잰다.
     # 분할 동작 자체는 위 블록과 test_patch_20260813 [3]에서 본다.
+    # 🆕 (2026-08-15) 확정익절(FLAT_TP)도 50% 분할이라 같은 이유로 DB에 사유가
+    #    안 남는다 -> 분할 스위치를 같이 끄고 '어느 규칙이 판정을 가져가는가'만 본다.
     _sv = SM.VI_UPPER_EXIT_PARTIAL
+    _svb = SM.BREAKEVEN_EXIT_PARTIAL
     SM.VI_UPPER_EXIT_PARTIAL = False
+    SM.BREAKEVEN_EXIT_PARTIAL = False
     try:
         vi_run(open_price, buy, price)
         return " | ".join((x.get("exit_reason") or "") for x in _Repo.sells)
     finally:
         SM.VI_UPPER_EXIT_PARTIAL = _sv
+        SM.BREAKEVEN_EXIT_PARTIAL = _svb
 
 # (2026-08-10) 캡 4.0 -> 6.0 상향으로 10,500(+5%)은 더 이상 캡에 안 닿는다.
 # 가격을 **상수에서 역산**해 캡을 확실히 넘긴다(앞으로 캡을 또 바꿔도 따라온다).
 _cap_px = int(10_000 * (1 + SM.TAKE_PROFIT_CAP + SM.ROUND_TRIP_COST) + 50)
 _why = vi_reason(10_000, 10_000, _cap_px)    # VI(11,000)까지는 아직 멀다
-check("멀면 VI 사유로 안 나간다(익절캡이 담당)",
+# 🆕 (2026-08-15) 이 자리를 이제 **확정익절 2%**가 먼저 가져간다(익절캡보다 앞).
+#    핵심 단언은 그대로다 — **VI 사유로는 안 나간다**.
+check("멀면 VI 사유로 안 나간다(익절 계열이 담당)",
       "VI 상단" not in _why and "익절" in _why, f"{_cap_px} -> {_why[:60]}")
 _why = vi_reason(10_000, 10_000, 11_050)     # 이미 VI선 초과
 check("VI선 초과면 VI 사유로 안 나간다",

@@ -316,6 +316,14 @@ check("매도 주문은 실제로 나갔다(50주)",
 # ═════════════════════════════════════════════════════════
 print("\n[8] 잔량 트레일 3% — 오르는 동안은 안 팔고, 3% 밀리면 판다")
 # ═════════════════════════════════════════════════════════
+# 🔴 (2026-08-15) 확정익절(FLAT_TP 2%)이 신설되면서, **다른 규칙이 남긴 잔량**도
+#    순 +2%를 넘으면 확정익절이 전량 정리한다(VI 상단부터 이어온 규약 —
+#    "이미 분할된 포지션은 분할하지 않고 잔량 전량"). 이 절은 **트레일 기계
+#    자체**를 보는 것이므로 확정익절을 끄고 격리한다.
+#    ⚠️ 이 상호작용은 실거래에서도 일어난다 — 동적캡이 +1.5%에 절반 팔면
+#       잔량은 3% 트레일이 아니라 **+2% 확정익절**에 먼저 걸린다.
+_sv_flat8 = SM.FLAT_TP_ENABLED
+SM.FLAT_TP_ENABLED = False
 if "X1" in s4.holdings:
     s4.on_price_update("X1", 10_600)        # 신고가 -> 트레일 기준 상향
     check("고점 갱신 중에는 청산하지 않음", "X1" in s4.holdings)
@@ -330,6 +338,25 @@ if "X1" in s4.holdings:
               rec["sell_quantity"] == 100, str(rec["sell_quantity"]))
         check("DB 매도가는 수량가중 평균(두 체결가 사이)",
               10_200 < rec["sell_price"] < 10_600, f'{rec["sell_price"]:,.0f}')
+
+# 🔴 상호작용 회귀방지 — 확정익절(2026-08-15)이 **다른 규칙의 잔량을 털면 안 된다**.
+#    가드(`not partial_exited`)가 빠지면 순 +2%를 넘는 순간 잔량이 전량 정리되어
+#    08-12에 고친 "분할 잔량이 다음 틱에 털린다"와 같은 결과가 된다.
+_s8b = build()
+_p8b = put_pos(_s8b, code="X8B")
+_p8b["partial_exited"] = True
+_p8b["qty"] = 50
+_p8b["trail_peak"] = 10_100
+SM.FLAT_TP_ENABLED = True
+_s8b.on_price_update("X8B", 10_300)          # 순 +2.77% — 확정익절 문턱 위
+check("🔴 [상호작용] 확정익절은 다른 규칙의 잔량을 건드리지 않는다",
+      "X8B" in _s8b.holdings and _s8b.holdings["X8B"]["qty"] == 50,
+      str(_s8b.holdings.get("X8B", {}).get("qty", "청산")))
+# 그 잔량은 트레일이 정상적으로 받는다(무방비가 아니다)
+_pk8 = float(_s8b.holdings["X8B"]["trail_peak"])
+_s8b.on_price_update("X8B", int(_pk8 * (1 - SM.PARTIAL_EXIT_TRAIL) - 1))
+check("  그 잔량은 트레일이 받는다", "X8B" not in _s8b.holdings)
+SM.FLAT_TP_ENABLED = _sv_flat8
 
 # ═════════════════════════════════════════════════════════
 print("\n[9] 반등소진 매도 — 본전 이상에서만 + 50% 분할 (2026-08-10 사양 변경)")

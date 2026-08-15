@@ -44,6 +44,19 @@ RECONCILE_GRACE_SECONDS = 45
 #      슬롯을 점유하기 때문이다. 상한을 넘으면 종전대로 정리한다.
 #      (그 뒤에도 안전망이 있다: 매도 시 800033이면 `_release_ghost_position`.)
 RECONCILE_UNSEEN_GRACE_SECONDS = 300
+# 🔴 (2026-08-15 결함수정) 위와 **정반대 방향**의 같은 함정.
+#   봇이 스스로 50% 분할매도를 하면 holdings의 qty는 즉시 절반이 되는데,
+#   서버 잔고는 위 주석의 99초 실측대로 한동안 **팔기 전 수량**을 그대로 준다.
+#   그러면 `server_qty > tracked_qty`가 되어 08-11에 만든 '수동 추가매수 합산'이
+#   봇 자신의 매도를 **사용자의 추가매수로 오인**한다. 2회 연속 확인 가드는
+#   SYNC_INTERVAL(15초) x2 = 30초면 채워지므로 지연 창 안에 그대로 들어간다.
+#   실측 재현: 본전스톱 50% 분할(100->50주) 직후 서버가 100주를 2회 보고하면
+#             qty가 100으로 되살아나고 DB buy_quantity까지 100으로 덮였다.
+#   피해가 기록에서 끝나지 않는다 — `_maybe_average_down`이 `pos["qty"]`로
+#   주문 수량을 정하므로(exact_quantity) **물타기가 50주가 아니라 100주를 산다.**
+#   -> 봇이 마지막으로 판 뒤 이 시간 안이고, 서버 수량이 '팔기 전 수량'으로
+#      전부 설명되면 판단을 보류한다(시간·수량 두 조건을 **동시에** 만족할 때만).
+RECONCILE_SELL_GRACE_SECONDS = 120
 TOKEN_REFRESH_INTERVAL = 23 * 3600
 SIGNAL_WATCHDOG_INTERVAL = 300
 SIGNAL_TIMEOUT = 1800
@@ -708,6 +721,31 @@ class TradingBot:
                 #    ① 되돌림 계획이 살아있으면(봇이 더 살 수 있는 상태) 보류
                 #    ② **2회 연속 같은 값**으로 관측될 때만 반영
                 if code in getattr(strat, "_entry_plans", {}):
+                    continue
+                # 🔴 (2026-08-15 결함수정) ③ **봇 자신의 분할매도**가 아직 잔고에
+                #    반영되지 않은 창을 수동 추가매수로 오인하면 안 된다.
+                #    ①의 되돌림 계획은 '더 살 수 있는 상태'만 막고, ②의 2회 연속은
+                #    30초면 채워져 99초 지연을 못 넘긴다.
+                #    두 조건을 **동시에** 만족할 때만 보류한다:
+                #      ⓐ 봇이 판 지 RECONCILE_SELL_GRACE_SECONDS 이내이고
+                #      ⓑ 서버 수량이 '팔기 전 수량(tracked + 봇이 판 누적)' 이하다
+                #    ⓑ 덕에 진짜 추가매수(팔기 전 수량을 넘김)는 그대로 즉시 잡히고,
+                #    ⓐ 덕에 지연이 걷힌 뒤에는 종전대로 감지된다(영구 억제가 아니다).
+                _realized = int(pos.get("_realized_qty", 0) or 0)
+                _sold_at = getattr(strat, "sold_at", {}).get(code)
+                if (
+                    _realized > 0
+                    and _sold_at is not None
+                    and (now - _sold_at).total_seconds() < RECONCILE_SELL_GRACE_SECONDS
+                    and server_qty <= tracked_qty + _realized
+                ):
+                    # 연속 카운터도 지운다 — 안 지우면 지연이 걷힌 직후 남아 있던
+                    # 옛 관측 하나가 '2회 연속'을 채워 그대로 오인이 성립한다.
+                    pos.pop("_pending_qty_up", None)
+                    logger.debug(
+                        "[%s] 잔고 증가(%d>%d)가 봇 분할매도 미반영으로 설명됨 — 보류",
+                        code, server_qty, tracked_qty,
+                    )
                     continue
                 prev = pos.get("_pending_qty_up")
                 if prev != server_qty:

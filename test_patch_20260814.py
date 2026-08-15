@@ -276,8 +276,13 @@ s.holdings["Q"] = dict(s.holdings.get("Q", {}), **{
     "highest_price": 100_000, "stop_rate": None})
 s._prev_closes["Q"] = 95_000
 s.on_price_update("Q", int(100_000 * (1 + SM.TAKE_PROFIT_CAP + 0.005)))
-check("🔴 10만원+ 보유분도 익절은 정상 발동", "Q" not in s.holdings,
-      f"보유 {s.holdings.get('Q', {}).get('qty', '청산됨')}")
+# 🆕 (2026-08-15) 확정익절 2%가 캡보다 먼저 잡아 **50% 분할**이 나간다.
+#    이 검사의 요지는 "주가 상한이 **매도**까지 막지는 않는다"이므로,
+#    완전 청산이 아니라 **매도가 실제로 나갔는가**로 본다.
+_q_sold = any(o["side"] == "sell" for o in s.order_manager.orders)
+check("🔴 10만원+ 보유분도 익절은 정상 발동(매수 상한이 매도를 막지 않는다)",
+      _q_sold and ("Q" not in s.holdings or s.holdings["Q"]["qty"] < 4),
+      f"보유 {s.holdings.get('Q', {}).get('qty', '청산됨')} / 매도 {_q_sold}")
 
 
 # ══════════════════════════════════════════════════════════
@@ -299,8 +304,14 @@ check("롤백 후 원복", SM.MAX_ENTRY_PRICE == 100_000)
 
 
 # ══════════════════════════════════════════════════════════
-section("[7] 본전스톱 바닥 0.2% -> 1.0% (2026-08-13)")
+section("[7] 본전스톱 바닥 0.2% -> 1.0% (2026-08-13) — 🔄 롤백 경로")
 # ══════════════════════════════════════════════════════════
+# 🔴 (2026-08-15) 확정익절(FLAT_TP 2%)이 본전스톱을 **대체**했다. 이 절과
+#    아래 [8]은 이제 `FLAT_TP_ENABLED = False` 롤백 경로를 검증한다 —
+#    끈 기능의 배선 테스트를 지우면 되살릴 때 검증이 없다(08-10 교훈).
+_SV_FLAT_814 = SM.FLAT_TP_ENABLED
+SM.FLAT_TP_ENABLED = False
+
 check("BREAKEVEN_FLOOR == 0.010", SM.BREAKEVEN_FLOOR == 0.010, str(SM.BREAKEVEN_FLOOR))
 check("무장 문턱은 2.5% 그대로 (낮추면 승자를 자른다 — 격자 4/4열 악화)",
       SM.BREAKEVEN_TRIGGER == 0.025, str(SM.BREAKEVEN_TRIGGER))
@@ -457,6 +468,8 @@ try:
     check("손절은 바닥 상향과 무관하게 정상 발동", "S" not in st.holdings)
 finally:
     SM.AVG_DOWN_ENABLED = _svad2
+
+SM.FLAT_TP_ENABLED = _SV_FLAT_814     # 본전스톱 롤백 컨텍스트 종료
 
 
 print("\n" + "=" * 68)

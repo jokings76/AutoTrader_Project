@@ -188,6 +188,14 @@ finally:
 
 px_arm = int(10_000 * (1 + SM.BREAKEVEN_TRIGGER + SM.ROUND_TRIP_COST)) + 1
 
+# 🔴 (2026-08-15) 확정익절(FLAT_TP 2%)이 본전스톱을 **대체**했다. 아래 동작
+#    검증은 이제 `FLAT_TP_ENABLED = False` 롤백 경로를 본다 — 끈 기능의 배선
+#    테스트를 지우면 되살릴 때 검증이 없어 그대로 사고가 난다(08-10 교훈).
+#    ⚠️ 안 끄면 +2.5%로 밀어 올리는 순간 확정익절이 먼저 잡아 무장 자체가
+#       일어나지 않는다(실제로 이 스위트가 그렇게 실패해서 발견했다).
+_SV_FLAT_BE = SM.FLAT_TP_ENABLED
+SM.FLAT_TP_ENABLED = False
+
 # --- ON 상태(기본값): +1% 찍고 되돌리면 본전스톱으로 청산 ---
 s = build()
 pos = put_pos(s)
@@ -253,6 +261,8 @@ try:
 finally:
     SM.BREAKEVEN_STOP_ENABLED = True    # 원상복구 — 실제 기본값(ON)으로
 
+SM.FLAT_TP_ENABLED = _SV_FLAT_BE        # 본전스톱 롤백 컨텍스트 종료
+
 print("\n[3] 결함 ① — 동적캡 즉시매도가 모든 1A에 걸리던 문제")
 s3 = build()
 p3 = put_pos(s3, code="000003", sub="1A")
@@ -308,6 +318,8 @@ print("\n[6] 청산 우선순위 — 손절이 본전스톱보다 먼저")
 # 본전스톱이 켜져 있어도(현재 기본값) 손절이 우선이어야 한다(순서가 뒤집히면
 # -4% 급락을 '본전스톱'으로 기록해 사후 분석이 어긋난다).
 SM.BREAKEVEN_STOP_ENABLED = True
+_sv_flat6 = SM.FLAT_TP_ENABLED
+SM.FLAT_TP_ENABLED = False   # 08-15: 확정익절이 먼저 잡으면 무장 자체가 없다
 try:
     s6 = build()
     p6 = put_pos(s6, code="000006")
@@ -318,6 +330,7 @@ try:
     check("급락 시 손절로 청산", sold(s6, "000006"))
 finally:
     SM.BREAKEVEN_STOP_ENABLED = True   # 원상복구 — 실제 기본값(ON)으로
+    SM.FLAT_TP_ENABLED = _sv_flat6
 check("사유가 손절(본전스톱 아님)",
       any("손절" in (r.get("exit_reason") or "") for r in _Repo.sells),
       str([r.get("exit_reason") for r in _Repo.sells])[:70])

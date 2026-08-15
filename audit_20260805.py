@@ -427,12 +427,18 @@ s3.on_price_update("Z", int(10_000 * (1 + SM.STOP_LOSS_RATE)) - 1)
 check("✅ 대조군: 정상 가격이면 가드가 막지 않는다",
       any("손절" in (x.get("exit_reason") or "") for x in _Repo.sells))
 # KRX 일일 상하한(±30%)은 반드시 통과해야 한다
+# 🆕 (2026-08-15) +30%는 확정익절 2%가 **50% 분할**로 먼저 잡는다 -> 포지션이
+#    안 닫혀 update_sell을 안 부른다. 이 검사의 요지는 "위생 가드가 정상 가격을
+#    과잉차단하지 않는가"이므로 DB 행이 아니라 **매도 주문이 나갔는가**로 본다.
 for px, label in ((13_000, "+30% 상한가"), (7_000, "-30% 하한가")):
     _Repo.sells = []
     s4 = pos_at(10_000)
     s4.on_price_update("Z", px)
-    check(f"✅ {label}는 정상 처리(가드에 걸리지 않음)", bool(_Repo.sells),
-          str([x.get("exit_reason") for x in _Repo.sells])[:60])
+    _ordered = any(o.get("side") == "sell" for o in s4.order_manager.orders)
+    check(f"✅ {label}는 정상 처리(가드에 걸리지 않음)",
+          bool(_Repo.sells) or _ordered,
+          str([x.get("exit_reason") for x in _Repo.sells])[:60]
+          or f"주문 {s4.order_manager.orders}")
 # 보유하지 않은 종목
 try:
     pos_at(10_000).on_price_update("없음", 10_000)
@@ -504,12 +510,17 @@ def scenario(label, price, buy=10_000, open_px=None, guard=False,
     # 본다. VI 확정매도가 50% 분할이면 포지션이 안 닫혀 update_sell을 안 부르고
     # 사유가 DB에 안 남는다 -> 우선순위 판정이 불가능해진다. 그래서 여기서만
     # 분할을 끈다. 분할 동작 자체는 test_patch_20260813 [3]이 검증한다.
+    # 🆕 (2026-08-15) 확정익절(FLAT_TP)도 50% 분할이라 같은 이유로 사유가 DB에
+    #    안 남는다 -> 같이 끄고 '어느 규칙이 판정을 가져가는가'만 본다.
     _sv_vip = SM.VI_UPPER_EXIT_PARTIAL
+    _sv_bep = SM.BREAKEVEN_EXIT_PARTIAL
     SM.VI_UPPER_EXIT_PARTIAL = False
+    SM.BREAKEVEN_EXIT_PARTIAL = False
     try:
         s.on_price_update("P", price)
     finally:
         SM.VI_UPPER_EXIT_PARTIAL = _sv_vip
+        SM.BREAKEVEN_EXIT_PARTIAL = _sv_bep
     why = " | ".join(x.get("exit_reason") or "" for x in _Repo.sells) or "(보유유지)"
     print(f"    {label:<44} -> {why[:56]}")
     return why
@@ -699,6 +710,34 @@ if _doc:
               SM.BREAKEVEN_TRIGGER < SM.TAKE_PROFIT_CAP,
               f"{SM.BREAKEVEN_TRIGGER} < {SM.TAKE_PROFIT_CAP}")
 
+    # (2026-08-15 신규) 확정익절 — 본전스톱을 대체한 익절 확정 지점.
+    doc_has("확정익절", f"확정익절 {SM.FLAT_TP_ENABLED} {SM.FLAT_TP_RATE}")
+    # 🔴 상호 배타 — 둘이 같이 살아 있으면 어느 쪽이 팔았는지 사후에 못 가른다.
+    _src_be = inspect.getsource(SM.StrategyManager.on_price_update)
+    check("확정익절과 본전스톱이 상호 배타(elif)로 묶여 있다",
+          "elif (BREAKEVEN_STOP_ENABLED" in _src_be,
+          "if/if면 둘 다 돌아 사유가 뒤섞인다")
+    if SM.FLAT_TP_ENABLED:
+        check("확정익절 문턱 < 익절캡 (캡이 먼저 잡으면 무의미)",
+              SM.FLAT_TP_RATE < SM.TAKE_PROFIT_CAP,
+              f"{SM.FLAT_TP_RATE} < {SM.TAKE_PROFIT_CAP}")
+        check("확정익절 문턱 > 0 (시장가 슬리피지로 마이너스 청산 방지)",
+              SM.FLAT_TP_RATE > 0, str(SM.FLAT_TP_RATE))
+        # 🔴 잔량 보호 — 다른 규칙이 남긴 잔량을 확정익절이 털면 08-12에 고친
+        #    "분할 잔량이 다음 틱에 털린다"와 같은 결과가 된다(경로만 다르다).
+        #    ⚠️ 소스 문자열로 단언하지 않는다(이 파일이 반복해서 오탐을 낸 패턴).
+        #       **실제로 잔량이 살아남는지**를 실물 on_price_update로 확인한다.
+        _sg, _ = build(datetime(2026, 8, 5, 10, 0, 0))
+        _pg = put_pos(_sg, "G", buy=10_000)
+        _pg["partial_exited"] = True          # 다른 규칙이 이미 절반 판 상태
+        _pg["qty"] = 50
+        _pg["trail_peak"] = 10_100
+        _sg.on_price_update("G", int(10_000 * (1 + SM.FLAT_TP_RATE + 0.010)))
+        check("확정익절이 다른 규칙의 잔량을 건드리지 않는다",
+              "G" in _sg.holdings and _sg.holdings["G"]["qty"] == 50,
+              f'잔량 {_sg.holdings.get("G", {}).get("qty", "청산")} — 가드가 빠지면 '
+              f'동적캡·VI·반등소진 잔량이 +{SM.FLAT_TP_RATE*100:.0f}%에서 전량 정리된다')
+
     # (2026-08-13 신규) 매수 주가 상한 — 매수 대상 유니버스를 직접 자르는 값이라
     # 문서와 어긋나면 장중에 "왜 저 종목을 안 사지"를 판단할 수 없다.
     doc_has("주가상한", f"주가상한 {SM.MAX_ENTRY_PRICE}")
@@ -772,7 +811,15 @@ def one(label, expect, **kw):
     for k, v in kw.items():
         setattr(s, k, v)
     _Repo.sells = []
-    s.on_price_update("M", price)
+    # 🆕 (2026-08-15) 확정익절(FLAT_TP)이 50% 분할이면 포지션이 안 닫혀
+    #    update_sell을 안 부르고 사유가 DB에 안 남는다 -> 이 매트릭스는
+    #    '어느 규칙이 판정을 가져가는가'만 보므로 분할을 끄고 잰다.
+    _sv_bep2 = SM.BREAKEVEN_EXIT_PARTIAL
+    SM.BREAKEVEN_EXIT_PARTIAL = False
+    try:
+        s.on_price_update("M", price)
+    finally:
+        SM.BREAKEVEN_EXIT_PARTIAL = _sv_bep2
     why = " | ".join(x.get("exit_reason") or "" for x in _Repo.sells) or "(보유유지)"
     ok = (expect in why) if expect else (why == "(보유유지)")
     check(f"{label} -> {expect or '보유유지'}", ok, why[:58])
@@ -786,7 +833,12 @@ one("아무것도 성립 안 함", None, price=10_100)
 one("워밍업 중 + 손절", "손절", price=int(10_000 * (1 + SM.STOP_LOSS_RATE)) - 1, warm=True)
 one("워밍업 중 + 익절 구간", None, price=10_450, warm=True)
 one("손절선 1원 위", None, price=int(10_000 * (1 + SM.STOP_LOSS_RATE)) + 1)
-one("익절캡 1원 아래", None, price=10_399)
+# 🆕 (2026-08-15) 확정익절 2%가 익절캡보다 먼저 잡으므로, '캡 1원 아래'는 이제
+#    보유유지가 아니라 **확정익절**이 가져간다. 경계는 상수에서 역산한다.
+one("확정익절 1원 아래는 보유유지", None,
+    price=int(10_000 * (1 + SM.FLAT_TP_RATE + SM.ROUND_TRIP_COST)) - 1)
+one("확정익절 문턱 위 ~ 캡 아래는 확정익절이 가져간다", "확정익절",
+    price=int(10_000 * (1 + SM.FLAT_TP_RATE + SM.ROUND_TRIP_COST)) + 5)
 
 # VI: 시가를 넣어야 성립 — 별도 구성
 def one_vi(label, expect, open_px, buy, price, **kw):

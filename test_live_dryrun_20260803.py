@@ -952,6 +952,10 @@ check("09:02 매수분 캡 = 개장초반 2.5%",
       abs(capN - SM.TAKE_PROFIT_CAP_EARLY) < 1e-9, f"{capN} ({lblN})")
 
 # (3) 본전스톱 ON(2026-08-04 재활성화) — +1% 찍고 되돌리면 본전에서 청산
+# 🔴 (2026-08-15) 확정익절(FLAT_TP 2%)이 본전스톱을 대체했다. 이 블록은 이제
+#    `FLAT_TP_ENABLED = False` 롤백 경로를 본다(끄고 되살릴 때의 배선 검증).
+_sv_flatN = SM.FLAT_TP_ENABLED
+SM.FLAT_TP_ENABLED = False
 buyN = sN.holdings["PB1"]["buy_price"]
 armN = int(buyN * (1 + SM.BREAKEVEN_TRIGGER + SM.ROUND_TRIP_COST)) + 1
 cN.set(9, 5, 0)
@@ -966,6 +970,7 @@ check("본전스톱 ON — 본전 복귀 시 매도 발동(50% 분할)",
       or (sN.holdings["PB1"].get("be_partial_done") is True),
       f'보유 {sN.holdings.get("PB1", {}).get("qty", "청산")} / '
       f'be_partial_done={sN.holdings.get("PB1", {}).get("be_partial_done")}')
+SM.FLAT_TP_ENABLED = _sv_flatN     # 확정익절 롤백 컨텍스트 종료
 SM.PULLBACK_MAX_SLOTS = _pb_old3   # [E] 원상복구
 
 # (4) 손절은 워밍업 중에도 작동 (별도 포지션으로)
