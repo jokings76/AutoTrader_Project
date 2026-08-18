@@ -158,8 +158,20 @@ def px(net):
 
 
 def be_partial(st, code="B"):
-    """실물 청산 사다리로 본전스톱 50% 분할을 실제로 낸다."""
-    st.on_price_update(code, px(0.030))     # 무장 (순 +3.0%)
+    """실물 청산 사다리로 50% 분할을 실제로 낸다.
+
+    확정익절(FLAT_TP_ENABLED)이 켜져 있으면 **첫 틱에서 이미 분할이 난다**
+    (순 +3.0% > FLAT_TP_RATE 2.0%). 그 상태에서 둘째 틱으로 순 +0.5%까지
+    떨어뜨리면 2026-08-18에 신설한 **잔량 하한(1차 매도가)**이 정당하게
+    발동해 잔량까지 정리된다 — 헬퍼가 "분할만 내고 잔량은 남긴다"는 의도를
+    잃는다. 그래서 첫 틱에서 분할이 났으면 거기서 멈춘다.
+    본전스톱 경로(FLAT_TP_ENABLED=False)에서는 첫 틱이 무장만 하므로
+    종전대로 둘째 틱이 분할을 낸다 — 동작 불변.
+    """
+    st.on_price_update(code, px(0.030))     # 무장 / 확정익절이면 여기서 분할
+    _p = st.holdings.get(code)
+    if _p is not None and _p.get("partial_exited"):
+        return _p
     st.on_price_update(code, px(0.005))     # 바닥 이탈 -> 분할
     return st.holdings.get(code)
 

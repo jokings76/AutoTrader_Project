@@ -682,6 +682,13 @@ if _doc:
     doc_has("진입유효창", f"진입유효창 {SM.MAX_ENTRY_AGE_SEC}")
     doc_has("VI분할", f"VI분할 {SM.VI_UPPER_EXIT_PARTIAL}")
     doc_has("분할잔량보호", f"분할잔량보호 {SM.PARTIAL_EXIT_REMAINDER_HOLD}")
+    # (2026-08-18 신규) 잔량 하한 — 트레일이 1차 매도가보다 싸게 파는 구간을 없앤다.
+    doc_has("분할잔량하한", f"분할잔량하한 {SM.PARTIAL_EXIT_FLOOR_AT_FIRST}")
+    # 🔴 불변식 — 하한이 켜져 있으면 트레일 폭은 여전히 의미가 있어야 한다.
+    #    (하한만 남고 트레일이 0이면 잔량이 상방에서 영영 안 팔린다)
+    if SM.PARTIAL_EXIT_FLOOR_AT_FIRST:
+        check("잔량 하한 ON이면 트레일 폭 > 0 (상방 청산 경로 생존)",
+              SM.PARTIAL_EXIT_TRAIL > 0, str(SM.PARTIAL_EXIT_TRAIL))
     doc_has("편입가앵커", f"편입가앵커 {SM.ENTRY_ANCHOR_SECOND_TRANCHE}")
 
     # 🔴 불변식 — 진입 유효창은 숙성보다 커야 창이 열린다.
