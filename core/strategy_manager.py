@@ -1600,6 +1600,40 @@ ENTRY_BREAKOUT_PCT = 0.003       # 트리거가 대비 이만큼 오르면 잔�
 #       아래 AVG_DOWN_CUTOFF / RESCUE_ADD_CUTOFF를 각각 다른 값으로 둘 것.
 ADD_BUY_CUTOFF = time(10, 0)
 
+# ══════════════════════════════════════════════════════════════════
+# 🔴 추가매수 지수 문턱 (2026-08-18 사용자 지정)
+# ══════════════════════════════════════════════════════════════════
+# 사용자 지정: "지수 1% 이상 하락 시에는 무조건 물타기는 없는걸로."
+# 코스피/코스닥 중 **나쁜 쪽**이 이 값 이하이면 추가매수를 하지 않는다.
+# ADD_BUY_CUTOFF(시각)와 **AND가 아니라 OR**다 — 둘 중 하나만 걸려도 안 산다.
+#
+# 🔴 [왜 기존 지수 가드로는 안 되는가 — 이게 이 상수의 존재 이유다]
+#    기존 INDEX_GUARD는 **-5% 이하 + 11:00 이후**에만 켜진다. 그런데 물타기는
+#    08-18부터 **10:00에 끊긴다** — 즉 두 창이 겹치지 않아
+#    `AVG_DOWN_BLOCK_ON_INDEX_GUARD`는 **구조적으로 도달 불가**가 됐다.
+#    (그 상수는 남겨 둔다 — 컷오프를 11:00 이후로 되돌리면 다시 살아난다.)
+#    그래서 물타기 전용으로 **시간 제한 없는** 별도 문턱을 둔다.
+#
+# [근거 — 2026-08-18 실측]
+#  · 그날 코스피 -1.55% / 코스닥 **-3.52%**로 장이 무너졌는데
+#    기존 가드(-5%·11:00~)는 **한 번도 안 켜졌고** 물타기가 3번 나가 전부 손절.
+#  · 물타기 시점의 '나쁜 쪽' 지수(분봉 재구성):
+#      일성건설 09:08 **-1.16%**  <- 이 규칙이 막는다
+#      아진엑스텍 10:44 -0.28%    <- 10:00 컷오프가 막는다
+#      피노      10:57 -0.74%    <- 10:00 컷오프가 막는다
+#    -> **두 규칙이 서로 다른 건을 막아 3건을 전부 덮는다.** 세트로 볼 것.
+#  · ⚠️ 표본 n=3이다. -1.0%라는 경계는 데이터가 고른 값이 아니라
+#    **'지수가 밀리는 날엔 물 안 탄다'는 원칙을 수치로 옮긴 사용자 지정**이다.
+#
+# ⚠️ 조회 실패 시 동작 — `_refresh_market_rates`가 **직전 캐시값을 유지**하고,
+#    최초 조회부터 실패하면 0.0이라 **차단하지 않는다**(fail-open).
+#    기존 INDEX_GUARD와 같은 관례다("데이터가 없으면 매매를 막지 않는다").
+#
+# 롤백: None 으로 두면 이 규칙이 완전히 꺼진다(08-18 오전까지의 동작).
+#       경로별로 따로 두려면 아래 AVG_DOWN_INDEX_DROP_PCT /
+#       RESCUE_ADD_INDEX_DROP_PCT를 각각 다른 값으로.
+ADD_BUY_INDEX_DROP_PCT = -1.0
+
 # ── 손절 대신 추가매수 (Rescue Add, 2026-08-05 신규 — 사용자 지정) ──────
 # -3% 손절선에 닿았을 때, **매수세가 오히려 몰리고 있다는 증거 3개가 전부**
 # 성립하면 매도 대신 같은 금액을 추가 매수해 평단을 낮춘다.
@@ -1671,6 +1705,12 @@ RESCUE_ADD_OBSERVE_FLOOR = 0.055
 # 롤백: time(15, 10) 으로 두면 08-17까지의 '시간 제한 없음'과 같아진다.
 RESCUE_ADD_CUTOFF = ADD_BUY_CUTOFF
 
+# 🔴 추가매수 지수 문턱 (2026-08-18) — 위 ADD_BUY_INDEX_DROP_PCT 참고.
+#    지수가 밀리는 날에 손절을 미루고 더 사는 것은 방향이 정반대다.
+#    걸리면 판정은 그냥 'sell'(손절)로 수렴한다 — 안전측이다.
+# 롤백: None 으로 두면 이 경로만 지수 무관하게 돈다.
+RESCUE_ADD_INDEX_DROP_PCT = ADD_BUY_INDEX_DROP_PCT
+
 # ══════════════════════════════════════════════════════════════════
 # -3% 물타기 (2026-08-11 신설, 사용자 지정)
 # ══════════════════════════════════════════════════════════════════
@@ -1718,6 +1758,13 @@ AVG_DOWN_BLOCK_ON_INDEX_GUARD = True   # 지수 가드 발동 중 금지
 # 롤백: time(11, 0) -> 08-12~08-17 사양 / time(15, 10) -> 08-11까지의
 #       '시간 제한 없음'.
 AVG_DOWN_CUTOFF = ADD_BUY_CUTOFF
+
+# ── 물타기 지수 문턱 ──────────────────────────────────────────
+# 🔴 2026-08-18 사용자 지정: "지수 1% 이상 하락 시엔 무조건 물타기 없음."
+#    ⚠️ 이건 아래 AVG_DOWN_BLOCK_ON_INDEX_GUARD(-5%·11:00~)와 **다른 규칙**이고
+#       훨씬 자주 걸린다. 컷오프(10:00)가 생기면서 그 상수는 도달 불가가 됐다.
+# 롤백: None 으로 두면 이 경로만 지수 무관하게 돈다.
+AVG_DOWN_INDEX_DROP_PCT = ADD_BUY_INDEX_DROP_PCT
 
 # 물타기 주문이 **거부**됐을 때의 재시도 상한 (2026-08-12 결함 수정).
 # 🔴 실측: 상한이 없어서 50틱을 흘리면 주문을 **50회** 냈다. 예수금 부족처럼
@@ -4507,6 +4554,31 @@ class StrategyManager:
             f"<= {VI_UPPER_ENTRY_BLOCK_PCT*100:.0f}%)"
         )
 
+    def _add_buy_index_blocked(self, threshold: float) -> bool:
+        """추가매수(물타기/rescue) 전용 지수 차단 (2026-08-18 사용자 지정).
+
+        코스피/코스닥 중 **나쁜 쪽**이 threshold(%) 이하이면 True.
+
+        🔴 `_is_index_guard_active()`와 **일부러 분리**돼 있다. 그쪽은
+        **-5% 이하 + 11:00 이후**라야 켜지는데, 추가매수는 08-18부터
+        **10:00에 끊긴다** — 두 창이 안 겹쳐 기존 가드는 추가매수 경로에서
+        구조적으로 도달 불가다. 이 함수는 **시간 제한이 없다**.
+
+        threshold가 None이면 항상 False(규칙 OFF).
+        조회 실패 시 `_refresh_market_rates`가 직전 캐시를 유지하므로
+        기존 가드와 같은 fail-open 관례를 따른다(데이터 없으면 안 막는다).
+        """
+        if threshold is None:
+            return False
+        self._refresh_market_rates()
+        worst = min(self._kospi_rate, self._kosdaq_rate)
+        return worst <= threshold
+
+    def _add_buy_index_reason(self, threshold: float) -> str:
+        """차단 로그용 문구 — 어느 지수가 얼마였는지 남긴다."""
+        return (f"지수 {threshold:+.1f}% 이하 (코스피 {self._kospi_rate:+.2f}% / "
+                f"코스닥 {self._kosdaq_rate:+.2f}%)")
+
     def _is_index_guard_active(self, now_dt: datetime = None) -> bool:
         """지수 하락 가드 발동 여부 (2026-08-03 신규, 사용자 지정).
 
@@ -7151,6 +7223,13 @@ class StrategyManager:
                             stock_code, RESCUE_ADD_CUTOFF.strftime("%H:%M"))
             return "sell"
 
+        # 🔴 지수 문턱 (2026-08-18 사용자 지정) — 시각과 **OR**다.
+        #    지수가 밀리는 날에 손절을 미루고 더 사는 것은 방향이 정반대다.
+        if self._add_buy_index_blocked(RESCUE_ADD_INDEX_DROP_PCT):
+            logger.info("[%s] 추가매수 미발동 — %s", stock_code,
+                        self._add_buy_index_reason(RESCUE_ADD_INDEX_DROP_PCT))
+            return "sell"
+
         now = _time_mod.time()
         watch_until = pos.get("rescue_watch_until")
 
@@ -7252,6 +7331,17 @@ class StrategyManager:
             # 🔴 안전 게이트 — 여기만은 우회하지 않는다(사용자 지정).
             if not self.risk_can_trade():
                 logger.info("[%s] 물타기 보류: 일손실 차단(MDD) 발동 중", stock_code)
+                return
+            # 🔴 지수 문턱 (2026-08-18 사용자 지정) — 컷오프와 **OR**다.
+            #    ⚠️ 아래 AVG_DOWN_BLOCK_ON_INDEX_GUARD와 별개 규칙이다.
+            #       그쪽은 -5%+11:00~이라 10:00 컷오프와 창이 안 겹쳐
+            #       지금은 도달 불가다(컷오프를 되돌리면 다시 산다).
+            #    보류가 아니라 **avg_down_done**으로 닫는다 — 지수가 이만큼
+            #    밀린 날은 그 종목을 그날 다시 판정할 이유가 없다.
+            if self._add_buy_index_blocked(AVG_DOWN_INDEX_DROP_PCT):
+                pos["avg_down_done"] = True
+                logger.info("[%s] 물타기 생략: %s", stock_code,
+                            self._add_buy_index_reason(AVG_DOWN_INDEX_DROP_PCT))
                 return
             if AVG_DOWN_BLOCK_ON_INDEX_GUARD and self._is_index_guard_active():
                 logger.info("[%s] 물타기 보류: 지수 하락 가드 발동 중", stock_code)

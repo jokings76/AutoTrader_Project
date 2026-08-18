@@ -670,6 +670,12 @@ if _doc:
     #    갈라지면 "10시 이후 추가매수 금지"가 반쪽만 도는데 로그로는 안 보인다.
     doc_has("추가매수컷오프", f"추가매수컷오프 {SM.ADD_BUY_CUTOFF} "
                           f"{SM.AVG_DOWN_CUTOFF} {SM.RESCUE_ADD_CUTOFF}")
+    # (2026-08-18 신규 ②) 🔴 **추가매수 지수 문턱**. 기존 INDEX_GUARD(-5%·11:00~)
+    #    와 별개 규칙이고 훨씬 자주 걸린다. 컷오프(10:00)와 창이 안 겹쳐
+    #    AVG_DOWN_BLOCK_ON_INDEX_GUARD가 도달 불가가 됐기 때문에 생긴 값이다.
+    doc_has("추가매수지수문턱", f"추가매수지수문턱 {SM.ADD_BUY_INDEX_DROP_PCT} "
+                            f"{SM.AVG_DOWN_INDEX_DROP_PCT} "
+                            f"{SM.RESCUE_ADD_INDEX_DROP_PCT}")
     doc_has("강제청산", f"강제청산 {FORCE_CLOSE_ENABLED} {FORCE_CLOSE_TIME}")
     doc_has("지수가드강제청산", f"지수가드강제청산 {SM.INDEX_GUARD_FORCE_CLOSE_ENABLED}")
     doc_has("오버나이트격리", f"오버나이트격리 {SM.OVERNIGHT_RESTORE_AS_MANUAL}")
