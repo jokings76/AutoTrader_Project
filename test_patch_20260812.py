@@ -18,7 +18,7 @@ import sys
 os.environ.setdefault("AUTOTRADER_TEST_LOG", "1")
 
 import inspect                                          # noqa: E402
-from datetime import datetime, timedelta                # noqa: E402
+from datetime import date as _date, datetime, timedelta                # noqa: E402
 
 import core.strategy_manager as SM                      # noqa: E402
 import core.order_manager as OM                         # noqa: E402
@@ -109,7 +109,12 @@ class _OrderMgr:
     def get_stock_name(self, code): return code
 
 
-NOW = datetime(2026, 8, 12, 10, 0, 0)
+# 🔴 픽스처 시각은 **추가매수 컷오프(ADD_BUY_CUTOFF)보다 앞**이어야 한다.
+#    08-18에 컷오프가 11:00 -> 10:00으로 앞당겨지자 하드코딩된 10:00 픽스처가
+#    통째로 컷오프에 걸려 물타기 테스트가 무더기로 실패했다 —
+#    "테스트 픽스처에 수치를 하드코딩하지 말 것"의 교과서적 사례다.
+#    상수에서 30분 역산해 다음에 또 바뀌어도 안 깨지게 한다.
+NOW = datetime.combine(_date(2026, 8, 12), SM.ADD_BUY_CUTOFF) - timedelta(minutes=30)
 
 
 def build(now_dt=NOW, buy_ok=True):
@@ -147,14 +152,22 @@ def sells(s): return [o for o in s.order_manager.orders if o["side"] == "sell"]
 
 
 # ══════════════════════════════════════════════════════════
-section("[1] 물타기 11:00 컷오프 (사용자 지정)")
+section("[1] 물타기 컷오프 (사용자 지정, 08-12 11:00 -> 08-18 10:00)")
 # ══════════════════════════════════════════════════════════
-check("AVG_DOWN_CUTOFF == 11:00",
-      SM.AVG_DOWN_CUTOFF == SM.time(11, 0), SM.AVG_DOWN_CUTOFF.strftime("%H:%M"))
+# 🔴 08-18에 11:00 -> 10:00으로 앞당겼다. 이 스위트는 '컷오프가 존재하고
+#    경계에서 정확히 갈린다'를 지키는 것이 목적이라, 값은 상수에서 읽고
+#    경계 시각만 상수 기준으로 만든다 — 다음에 또 바꿔도 안 깨진다.
+check("AVG_DOWN_CUTOFF == 10:00",
+      SM.AVG_DOWN_CUTOFF == SM.time(10, 0), SM.AVG_DOWN_CUTOFF.strftime("%H:%M"))
 check("컷오프 < 진입종료(14:50)", SM.AVG_DOWN_CUTOFF < SM.PHASE1A_END)
+check("물타기 컷오프 == 공용 ADD_BUY_CUTOFF",
+      SM.AVG_DOWN_CUTOFF == SM.ADD_BUY_CUTOFF)
 
-for hh, mm, want in ((9, 0, True), (9, 30, True), (10, 59, True),
-                     (11, 0, False), (11, 1, False),
+_CUT = SM.AVG_DOWN_CUTOFF
+for hh, mm, want in ((9, 0, True), (9, 30, True),
+                     (_CUT.hour - 1, 59, True),          # 컷오프 1분 전
+                     (_CUT.hour, _CUT.minute, False),    # 컷오프 정각
+                     (_CUT.hour, _CUT.minute + 1, False),
                      (14, 55, False), (15, 9, False)):
     nd = datetime(2026, 8, 12, hh, mm, 0)
     s = build(now_dt=nd)
@@ -179,6 +192,13 @@ try:
     p = put(s, now_dt=datetime(2026, 8, 12, 14, 0, 0))
     s.on_price_update("X", 9_700)
     check("롤백: 컷오프를 15:10으로 두면 14:00에도 발동", len(buys(s)) == 1)
+    # 🔄 08-12 사양(11:00)으로 되돌리면 10:30에도 물타기가 된다
+    SM.AVG_DOWN_CUTOFF = SM.time(11, 0)
+    s = build(now_dt=datetime(2026, 8, 12, 10, 30, 0))
+    p = put(s, now_dt=datetime(2026, 8, 12, 10, 30, 0))
+    s.on_price_update("X", 9_700)
+    check("롤백: 11:00 사양이면 10:30에도 발동(= 08-18 변경이 실효)",
+          len(buys(s)) == 1)
 finally:
     SM.AVG_DOWN_CUTOFF = _sv
 
@@ -192,7 +212,7 @@ check("재시도 쿨다운 5초", abs(SM.AVG_DOWN_RETRY_COOLDOWN_SEC - 5.0) < 1e
 # 쿨다운을 넘겨가며 50틱 — 상한에서 멈춰야 한다
 s = build(buy_ok=False)
 p = put(s)
-base = datetime(2026, 8, 12, 10, 0, 0)
+base = NOW   # 컷오프 앞 (하드코딩 금지)
 for i in range(50):
     s._now = lambda i=i: base + timedelta(seconds=i * 10)
     s.on_price_update("X", 9_700 - i)

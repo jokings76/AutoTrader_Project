@@ -16,7 +16,7 @@ _os_testlog.environ["AUTOTRADER_TEST_LOG"] = "1"
 import inspect as _insp
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import date as _date, datetime, timedelta
 
 import core.strategy_manager as SM
 from core.phase1b_controller import Phase1BController
@@ -94,7 +94,15 @@ class Clock:
     def set(self, h, m, s=0): self.dt = self.dt.replace(hour=h, minute=m, second=s)
 
 
-def build(now_dt=datetime(2026, 8, 5, 10, 0, 0)):
+# 🔴 픽스처 시각은 **추가매수 컷오프(ADD_BUY_CUTOFF)보다 앞**이어야 한다.
+#    08-18에 컷오프가 10:00이 되면서 하드코딩된 10:00 픽스처가 rescue 경로를
+#    통째로 막아 [2]~[7]이 무너졌다. 상수에서 30분 역산한다.
+_FIX_NOW = (datetime.combine(_date(2026, 8, 5), SM.ADD_BUY_CUTOFF)
+            - timedelta(minutes=30))
+
+
+def build(now_dt=None):
+    now_dt = now_dt or _FIX_NOW
     SM.TradeRepository = _Repo
     SM.WatchListRepository = _Repo
     SM.SystemEventRepository = _Repo

@@ -665,6 +665,11 @@ if _doc:
     #    장 마감 후 "왜 안 팔렸지?"를 판단할 수 없다.
     doc_has("물타기컷오프", f"물타기컷오프 {SM.AVG_DOWN_CUTOFF} "
                         f"{SM.AVG_DOWN_MAX_RETRY} {SM.AVG_DOWN_RETRY_COOLDOWN_SEC}")
+    # (2026-08-18 신규) 🔴 **추가매수 두 경로의 마감 시각**. 08-17까지는
+    #    물타기에만 컷오프가 있었고 rescue-add에는 아예 없었다 — 두 값이
+    #    갈라지면 "10시 이후 추가매수 금지"가 반쪽만 도는데 로그로는 안 보인다.
+    doc_has("추가매수컷오프", f"추가매수컷오프 {SM.ADD_BUY_CUTOFF} "
+                          f"{SM.AVG_DOWN_CUTOFF} {SM.RESCUE_ADD_CUTOFF}")
     doc_has("강제청산", f"강제청산 {FORCE_CLOSE_ENABLED} {FORCE_CLOSE_TIME}")
     doc_has("지수가드강제청산", f"지수가드강제청산 {SM.INDEX_GUARD_FORCE_CLOSE_ENABLED}")
     doc_has("오버나이트격리", f"오버나이트격리 {SM.OVERNIGHT_RESTORE_AS_MANUAL}")

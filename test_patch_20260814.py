@@ -17,7 +17,7 @@ os.environ.setdefault("AUTOTRADER_TEST_LOG", "1")
 
 import inspect                                          # noqa: E402
 import time as _t                                       # noqa: E402
-from datetime import datetime, timedelta                # noqa: E402
+from datetime import date as _date, datetime, timedelta                # noqa: E402
 
 import core.strategy_manager as SM                      # noqa: E402
 from core.phase1b_controller import Phase1BController   # noqa: E402
@@ -101,7 +101,13 @@ class _OrderMgr:
     def get_stock_name(self, code): return code
 
 
-NOW = datetime(2026, 8, 14, 10, 0, 0)
+# 🔴 픽스처 시각은 **추가매수 컷오프(ADD_BUY_CUTOFF)보다 앞**이어야 한다.
+#    08-18에 컷오프가 11:00 -> 10:00으로 앞당겨지자 하드코딩된 10:00
+#    픽스처가 통째로 컷오프에 걸려 물타기/rescue 테스트가 무너졌다 —
+#    "테스트 픽스처에 수치를 하드코딩하지 말 것"의 교과서적 사례다.
+#    상수에서 30분 역산해 다음에 또 바뀌어도 안 깨지게 한다.
+NOW = (datetime.combine(_date(2026, 8, 14), SM.ADD_BUY_CUTOFF)
+       - timedelta(minutes=30))
 
 
 def build():

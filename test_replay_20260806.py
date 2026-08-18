@@ -24,7 +24,7 @@
 """
 import sys
 import time
-from datetime import datetime, timedelta as _td
+from datetime import date as _date, datetime, timedelta as _td
 
 import os as _os_testlog
 # 실거래 로그(autotrader.log) 오염 방지 — 반드시 core/main 임포트보다 먼저.
@@ -118,6 +118,15 @@ class _OrderMgr:
         return {"success": True, "ord_no": "2", "price": price, "style": order_style}
 
     def get_stock_name(self, code): return code
+
+
+# 🔴 픽스처 시각은 **추가매수 컷오프(ADD_BUY_CUTOFF)보다 앞**이어야 한다.
+#    08-18에 컷오프가 11:00 -> 10:00으로 앞당겨지자 하드코딩된 10:00
+#    픽스처(아래 _AD_NOW 사용처)가 통째로 컷오프에 걸려 물타기/rescue 테스트가 무너졌다 —
+#    "테스트 픽스처에 수치를 하드코딩하지 말 것"의 교과서적 사례다.
+#    상수에서 30분 역산해 다음에 또 바뀌어도 안 깨지게 한다.
+_AD_NOW = (datetime.combine(_date(2026, 8, 6), SM.ADD_BUY_CUTOFF)
+           - _td(minutes=30))
 
 
 def build(now_dt=datetime(2026, 8, 6, 9, 30, 0), change_rate=3.0):
@@ -590,7 +599,7 @@ check("RESCUE_ADD_ENABLED == True (이 교차가 실제로 도달 가능)",
       SM.RESCUE_ADD_ENABLED is True)
 
 # ── 차단 케이스: 전일종가 9,900 -> -3% 지점(9,690)은 전일대비 -2.12% ──
-sr = build(datetime(2026, 8, 6, 10, 0, 0), change_rate=-2.12)
+sr = build(_AD_NOW, change_rate=-2.12)
 setup(sr, "RC")
 sr._prev_closes["RC"] = 9_900.0
 _rescue_pos(sr, "RC")
@@ -615,7 +624,7 @@ check("🔴 그때 **손절로 수렴한다**(관찰 상태로 방치되지 않�
 
 # 🔴 대조 — 같은 조건에서 **물타기는 [C]를 우회해 산다**(2026-08-11 사양).
 #    rescue와 정반대라 반드시 구분해 둔다.
-srX = build(datetime(2026, 8, 6, 10, 0, 0), change_rate=-2.12)
+srX = build(_AD_NOW, change_rate=-2.12)
 setup(srX, "RX")
 srX._prev_closes["RX"] = 9_900.0
 _rescue_pos(srX, "RX")
@@ -625,7 +634,7 @@ check("🆕 물타기는 등락률 하한([C])을 우회한다",
       f'매수 {len([o for o in srX.order_manager.orders if o["side"] == "buy"])}건')
 
 # ── 대조군: 전일종가 9,400 -> -3% 지점은 전일대비 +3.09% (하한 통과) ──
-sr2 = build(datetime(2026, 8, 6, 10, 0, 0), change_rate=3.09)
+sr2 = build(_AD_NOW, change_rate=3.09)
 setup(sr2, "RD")
 sr2._prev_closes["RD"] = 9_400.0
 _rescue_pos(sr2, "RD")
